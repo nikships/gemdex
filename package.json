@@ -1,0 +1,38 @@
+{
+    "name": "gemdex",
+    "version": "0.1.0",
+    "description": "Semantic code search MCP for AI coding agents — Gemini embeddings + Milvus",
+    "private": true,
+    "scripts": {
+        "build": "pnpm -r build",
+        "build:core": "pnpm --filter gemdex-core build",
+        "build:mcp": "pnpm --filter gemdex-mcp build",
+        "dev": "pnpm -r dev",
+        "dev:core": "pnpm --filter gemdex-core dev",
+        "dev:mcp": "pnpm --filter gemdex-mcp dev",
+        "clean": "pnpm -r clean",
+        "lint": "pnpm -r lint",
+        "lint:fix": "pnpm -r run lint:fix",
+        "typecheck": "pnpm -r run typecheck",
+        "release:core": "pnpm --filter gemdex-core... run build && pnpm --filter gemdex-core publish --access public --no-git-checks",
+        "release:mcp": "pnpm --filter gemdex-mcp... run build && pnpm --filter gemdex-mcp publish --access public --no-git-checks"
+    },
+    "devDependencies": {
+        "@types/node": "^20.0.0",
+        "@typescript-eslint/eslint-plugin": "^8.31.1",
+        "@typescript-eslint/parser": "^8.31.1",
+        "eslint": "^9.25.1",
+        "rimraf": "^6.0.1",
+        "typescript": "^5.8.3"
+    },
+    "engines": {
+        "node": ">=20.0.0",
+        "pnpm": ">=10.0.0"
+    },
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/anand-92/gemdex.git"
+    },
+    "license": "MIT",
+    "author": "Nikhil Anand"
+}

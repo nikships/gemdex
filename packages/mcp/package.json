@@ -1,0 +1,46 @@
+{
+    "name": "gemdex-mcp",
+    "version": "0.1.0",
+    "description": "MCP server for semantic code search — Gemini embeddings + Milvus",
+    "type": "module",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "bin": {
+        "gemdex-mcp": "dist/index.js"
+    },
+    "scripts": {
+        "build": "pnpm clean && tsc --build --force",
+        "dev": "tsx --watch src/index.ts",
+        "clean": "rimraf dist",
+        "lint": "eslint src --ext .ts",
+        "lint:fix": "eslint src --ext .ts --fix",
+        "typecheck": "tsc --noEmit",
+        "test": "node --import tsx --test \"src/**/*.test.ts\"",
+        "start": "tsx src/index.ts",
+        "prepublishOnly": "pnpm build"
+    },
+    "dependencies": {
+        "gemdex-core": "workspace:*",
+        "@modelcontextprotocol/sdk": "^1.12.1",
+        "zod": "^3.25.55"
+    },
+    "devDependencies": {
+        "@types/node": "^20.0.0",
+        "tsx": "^4.19.4",
+        "typescript": "^5.0.0"
+    },
+    "files": [
+        "dist",
+        "README.md"
+    ],
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/anand-92/gemdex.git",
+        "directory": "packages/mcp"
+    },
+    "license": "MIT",
+    "author": "Nikhil Anand",
+    "publishConfig": {
+        "access": "public"
+    }
+}

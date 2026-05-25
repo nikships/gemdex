@@ -1,0 +1,57 @@
+{
+    "name": "gemdex-core",
+    "version": "0.1.0",
+    "description": "Semantic code indexing engine — Gemini embeddings + Milvus vector store",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "scripts": {
+        "build": "pnpm clean && tsc --build --force",
+        "dev": "tsc --watch",
+        "clean": "rimraf dist",
+        "lint": "eslint src --ext .ts",
+        "lint:fix": "eslint src --ext .ts --fix",
+        "typecheck": "tsc --noEmit",
+        "test": "jest --runInBand"
+    },
+    "dependencies": {
+        "@google/genai": "^1.9.0",
+        "@zilliz/milvus2-sdk-node": "^2.5.10",
+        "faiss-node": "^0.5.1",
+        "fs-extra": "^11.0.0",
+        "glob": "^10.0.0",
+        "langchain": "^0.3.27",
+        "tree-sitter": "^0.21.1",
+        "tree-sitter-cpp": "^0.22.0",
+        "tree-sitter-go": "^0.21.0",
+        "tree-sitter-java": "^0.21.0",
+        "tree-sitter-javascript": "^0.21.0",
+        "tree-sitter-python": "^0.21.0",
+        "tree-sitter-c-sharp": "^0.21.0",
+        "tree-sitter-rust": "^0.21.0",
+        "tree-sitter-typescript": "^0.21.0",
+        "tree-sitter-scala": "^0.24.0",
+        "typescript": "^5.0.0"
+    },
+    "devDependencies": {
+        "@types/fs-extra": "^11.0.0",
+        "@types/jest": "^30.0.0",
+        "@types/mock-fs": "^4.13.4",
+        "jest": "^30.0.0",
+        "mock-fs": "^5.5.0",
+        "ts-jest": "^29.4.0"
+    },
+    "files": [
+        "dist",
+        "README.md"
+    ],
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/anand-92/gemdex.git",
+        "directory": "packages/core"
+    },
+    "license": "MIT",
+    "author": "Nikhil Anand",
+    "publishConfig": {
+        "access": "public"
+    }
+}
