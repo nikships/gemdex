@@ -7,6 +7,7 @@ export {
     HybridSearchRequest,
     HybridSearchOptions,
     HybridSearchResult,
+    HybridSubScores,
     RerankStrategy,
 } from './types';
 

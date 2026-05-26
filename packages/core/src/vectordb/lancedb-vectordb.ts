@@ -11,6 +11,7 @@ import {
     HybridSearchRequest,
     HybridSearchOptions,
     HybridSearchResult,
+    HybridSubScores,
 } from './types';
 
 export interface LanceDBConfig {
@@ -293,6 +294,26 @@ export class LanceDBVectorDatabase implements VectorDatabase {
 
         const [denseRows, ftsRows] = await Promise.all([densePromise, ftsPromise]);
 
+        // Capture per-branch rank + raw signal so callers can debug fused hits
+        // without having to rerun the search. Rank is 1-based; missing entries
+        // mean that branch didn't surface the chunk at all.
+        const denseSub = new Map<string, { rank: number; distance?: number }>();
+        denseRows.forEach((row, idx) => {
+            if (!row.id) return;
+            denseSub.set(row.id, {
+                rank: idx + 1,
+                distance: typeof row._distance === 'number' ? row._distance : undefined,
+            });
+        });
+        const ftsSub = new Map<string, { rank: number; score?: number }>();
+        ftsRows.forEach((row, idx) => {
+            if (!row.id) return;
+            ftsSub.set(row.id, {
+                rank: idx + 1,
+                score: typeof row._score === 'number' ? row._score : undefined,
+            });
+        });
+
         // Reciprocal Rank Fusion: score(id) = sum over rankings: 1 / (k + rank)
         const fused = new Map<string, { row: StoredRow; score: number }>();
         const addRanked = (rows: StoredRow[]) => {
@@ -315,10 +336,19 @@ export class LanceDBVectorDatabase implements VectorDatabase {
             .sort((a, b) => b.score - a.score)
             .slice(0, limit);
 
-        return sorted.map(({ row, score }) => ({
-            document: this.rowToDocument(row),
-            score,
-        }));
+        return sorted.map(({ row, score }) => {
+            const d = denseSub.get(row.id);
+            const f = ftsSub.get(row.id);
+            const subScores: HybridSubScores | undefined = (d || f) ? {
+                ...(d && { denseRank: d.rank, ...(d.distance !== undefined && { denseDistance: d.distance }) }),
+                ...(f && { ftsRank: f.rank, ...(f.score !== undefined && { ftsScore: f.score }) }),
+            } : undefined;
+            return {
+                document: this.rowToDocument(row),
+                score,
+                ...(subScores && { subScores }),
+            };
+        });
     }
 
     async delete(collectionName: string, ids: string[]): Promise<void> {

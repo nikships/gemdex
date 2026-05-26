@@ -37,3 +37,20 @@ The `gemdex` MCP server exposes four tools:
 - `clear_index(path)` — drop the index for a codebase.
 
 Always pass an **absolute path** for `path`.
+
+## Reading sub-scores
+
+Each hit includes a `Scores:` line, for example:
+
+    Scores: fused=0.0312 · dense=#1 (d=0.180) · bm25=#3 (s=4.21)
+
+- `fused` — final RRF score after fusing both branches; higher is better.
+- `dense=#N (d=X.XXXX)` — rank in the dense ANN (semantic) candidates; smaller `d` (LanceDB `_distance`) means closer.
+- `bm25=#N (s=X.XX)` — rank in the BM25 (lexical) candidates; larger `s` is better.
+- A `—` on either side means that branch didn't surface this chunk at all.
+
+Heuristics:
+
+- Both ranks strong (`dense=#1–3` **and** `bm25=#1–5`) → high-confidence hit, trust it.
+- One side strong, other `—` → still useful, but consider re-phrasing if the hit looks off (e.g. `bm25=—` on a query that should have an exact-string match suggests the index missed it).
+- Both ranks weak (>10) → likely noise. Re-phrase the query or fall back to `Grep` for exact strings.

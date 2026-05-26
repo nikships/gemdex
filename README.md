@@ -108,20 +108,35 @@ Search for the websocket reconnection logic.
 
 Done. The agent now has a tiny, accurate retrieval layer between itself and your code.
 
-### Nudge your agent to actually use it
+### Nudge your agent to actually use it (the single biggest thing you can do)
 
-Agents won't always reach for a new tool on their own. Drop the excerpt below into your top-level `AGENTS.md` (Codex CLI, Cursor, Windsurf, etc.) and/or `CLAUDE.md` so every session starts with the right instinct:
+> Agents won't reach for a new MCP tool on their own. The fastest way to make Gemdex pay off is to **tell your agent, at the top of every session, that it exists and when to prefer it.** Skip this and you'll wonder why your agent still defaults to `grep`.
+
+**For Claude Code** — drop this into `CLAUDE.md` at the repo root (or `~/.claude/CLAUDE.md` to apply globally):
 
 ```markdown
-## Code search
+## Code search (Gemdex)
 
-This repo is indexed by **Gemdex** (MCP server `gemdex`). Before grepping, reading large
-files, or guessing at where something lives, call the `search_code` MCP tool with a
-natural-language query (e.g. "websocket reconnection logic", "JWT refresh handler").
-Use `index_codebase` once per fresh checkout and `get_indexing_status` if results
-look stale. Prefer Gemdex over `rg`/`grep` for semantic questions; fall back to
-`rg` only for exact-string lookups.
+This repo is indexed by **Gemdex** (MCP server `gemdex`). For any question about
+code by meaning or intent — "where does X happen?", "find the retry logic",
+"how is auth handled?" — call the `search_code` MCP tool **before** `Grep`,
+`Read`, or guessing at filenames.
+
+Workflow:
+1. `search_code(path=<absolute repo path>, query=<natural language>)` first.
+2. If results look stale or empty, call `get_indexing_status`; reindex with
+   `index_codebase` if the codebase isn't covered.
+3. Only fall back to `Grep`/`Glob` for exact-string lookups (known symbols,
+   error literals, log lines, file globs).
+
+Each hit's `Scores:` line shows `dense=#<rank>` (semantic) and `bm25=#<rank>`
+(lexical). If both ranks are weak (>10) or one is `—` with a low fused score,
+re-phrase the query or fall back to `Grep`.
 ```
+
+**For Codex CLI, Cursor, Windsurf, Cline, Continue, Zed** — paste the same snippet into your client's root instructions file. The convention is `AGENTS.md` at the repo root; check your client's docs if unsure.
+
+> If you installed the Claude Code plugin (`/plugin install gemdex@gemdex`), this nudge already ships as a bundled `code-search` skill — you can skip `CLAUDE.md` and it'll still work.
 
 ## How it works
 

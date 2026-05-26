@@ -170,4 +170,37 @@ describe('LanceDBVectorDatabase', () => {
         // put 'b' first.
         expect(results[0].document.id).toBe('b');
     }, 30000);
+
+    it('hybridSearch reports per-branch sub-scores', async () => {
+        const collection = 'test_hybrid_subscores';
+        await db.createHybridCollection(collection, DIM);
+
+        const docs = [
+            makeDoc('a', 1, 'authentication token refresh handler', 'src/auth.ts'),
+            makeDoc('b', 2, 'websocket reconnection logic', 'src/ws.ts'),
+            makeDoc('c', 3, 'unrelated database migration', 'src/db.ts'),
+        ];
+        await db.insertHybrid(collection, docs);
+
+        const results = await db.hybridSearch(
+            collection,
+            [
+                { data: makeVector(2), anns_field: 'vector', param: {}, limit: 10 },
+                { data: 'websocket reconnect', anns_field: 'sparse_vector', param: {}, limit: 10 },
+            ],
+            { limit: 3 },
+        );
+
+        const top = results[0];
+        // 'b' should be surfaced by both branches (dense via seed 2, FTS via the
+        // word 'websocket'), so both ranks must be populated.
+        expect(top.subScores).toBeDefined();
+        expect(top.subScores!.denseRank).toBe(1);
+        expect(typeof top.subScores!.denseDistance).toBe('number');
+        expect(top.subScores!.ftsRank).toBeGreaterThanOrEqual(1);
+        // ftsScore depends on the LanceDB build; assert only when defined.
+        if (top.subScores!.ftsScore !== undefined) {
+            expect(typeof top.subScores!.ftsScore).toBe('number');
+        }
+    }, 30000);
 });

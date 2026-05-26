@@ -7,6 +7,28 @@ import type { CodebaseIndexOptions, RequestSplitterType } from "./config.js";
 import { createRequestSplitter, isRequestSplitterType } from "./splitter.js";
 import { ensureAbsolutePath, truncateContent, trackCodebasePath } from "./utils.js";
 
+/**
+ * Render the per-branch sub-score line shown beneath each search hit.
+ * Returns an empty string when no hybrid sub-scores are available so the
+ * formatter can skip the line entirely (dense-only mode, non-hybrid backends).
+ */
+function formatSubScoresLine(fusedScore: number, subScores?: {
+    denseRank?: number;
+    denseDistance?: number;
+    ftsRank?: number;
+    ftsScore?: number;
+}): string {
+    if (!subScores) return '';
+    const fused = `fused=${fusedScore.toFixed(4)}`;
+    const dense = subScores.denseRank !== undefined
+        ? `dense=#${subScores.denseRank}${subScores.denseDistance !== undefined ? ` (d=${subScores.denseDistance.toFixed(4)})` : ''}`
+        : 'dense=—';
+    const bm25 = subScores.ftsRank !== undefined
+        ? `bm25=#${subScores.ftsRank}${subScores.ftsScore !== undefined ? ` (s=${subScores.ftsScore.toFixed(2)})` : ''}`
+        : 'bm25=—';
+    return `Scores: ${fused} · ${dense} · ${bm25}`;
+}
+
 export class ToolHandlers {
     private context: Context;
     private snapshotManager: SnapshotManager;
@@ -731,6 +753,7 @@ export class ToolHandlers {
                     : `${result.relativePath}:${result.startLine}-${result.endLine}`;
                 const context = truncateContent(result.content, 5000);
                 const codebaseInfo = path.basename(searchCodebasePath);
+                const scoresLine = formatSubScoresLine(result.score, result.subScores);
 
                 if (mediaType) {
                     const label = mediaType === 'pdf'
@@ -740,12 +763,14 @@ export class ToolHandlers {
                     return `${index + 1}. ${label} [${codebaseInfo}]\n` +
                         `   Location: ${location}\n` +
                         `   Rank: ${index + 1}\n` +
+                        (scoresLine ? `   ${scoresLine}\n` : '') +
                         `   Context:\n${context}\n`;
                 }
 
                 return `${index + 1}. Code snippet (${result.language}) [${codebaseInfo}]\n` +
                     `   Location: ${location}\n` +
                     `   Rank: ${index + 1}\n` +
+                    (scoresLine ? `   ${scoresLine}\n` : '') +
                     `   Context: \n\`\`\`${result.language}\n${context}\n\`\`\`\n`;
             }).join('\n');
 

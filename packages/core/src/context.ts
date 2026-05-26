@@ -617,6 +617,7 @@ export class Context {
                 endLine: result.document.endLine,
                 language: result.document.metadata.language || 'unknown',
                 score: result.score,
+                ...(result.subScores && { subScores: result.subScores }),
                 metadata: result.document.metadata
             }));
 

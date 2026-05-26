@@ -43,9 +43,28 @@ export interface VectorSearchResult {
     score: number;
 }
 
+/**
+ * Per-branch ranks/scores that contributed to a fused hybrid hit.
+ * All fields are optional so dense-only or FTS-only paths render cleanly
+ * (callers should treat `undefined` as "this branch did not surface this hit").
+ */
+export interface HybridSubScores {
+    /** 1-based position in the dense ANN ranking, if dense surfaced this hit. */
+    denseRank?: number;
+    /** Raw LanceDB `_distance` for the dense hit (smaller = closer). */
+    denseDistance?: number;
+    /** 1-based position in the FTS (BM25) ranking, if FTS surfaced this hit. */
+    ftsRank?: number;
+    /** Raw LanceDB FTS `_score` (BM25, larger = better) when available. */
+    ftsScore?: number;
+}
+
 export interface HybridSearchResult {
     document: VectorDocument;
+    /** Fused score from the configured rerank strategy (RRF by default). */
     score: number;
+    /** Optional per-branch debug breakdown — present when hybrid search ran. */
+    subScores?: HybridSubScores;
 }
 
 export interface VectorDatabase {
