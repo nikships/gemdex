@@ -19,7 +19,6 @@ You need:
 
 - Node.js ≥ 20
 - pnpm ≥ 10 (`corepack enable && corepack prepare pnpm@latest --activate`)
-- Docker (for running Milvus locally)
 - A Google AI Studio API key (free tier is fine for development)
 
 ```bash
@@ -29,13 +28,15 @@ pnpm install
 pnpm build
 ```
 
-Spin up Milvus using the `docker-compose.yml` snippet in the [README](README.md#1-get-milvus-running).
+The vector store is embedded (LanceDB), so there's no daemon to start — it
+persists at `~/.gemdex/lance` by default.
 
 Set the env vars used by tests / dev runs:
 
 ```bash
 export GEMINI_API_KEY=your-key
-export MILVUS_ADDRESS=localhost:19530
+# Optional: override the default LanceDB location
+# export LANCEDB_PATH=/tmp/gemdex-dev
 ```
 
 ## Common commands

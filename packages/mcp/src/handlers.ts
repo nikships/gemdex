@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
-import { Context, COLLECTION_LIMIT_MESSAGE, FileSynchronizer, IndexAbortError } from "gemdex-core";
+import { Context, FileSynchronizer, IndexAbortError } from "gemdex-core";
 import { SnapshotManager } from "./snapshot.js";
 import type { CodebaseIndexOptions, RequestSplitterType } from "./config.js";
 import { createRequestSplitter, isRequestSplitterType } from "./splitter.js";
@@ -31,7 +31,7 @@ export class ToolHandlers {
     /**
      * One-shot startup validation: find any legacy 0/0+completed entries on disk
      * (left over from old MCP versions, v1 snapshot migrations, or pre-fix recovery
-     * paths) and either heal them with the real Milvus row count or remove them
+     * paths) and either heal them with the real backend row count or remove them
      * if the underlying collection is empty/missing. See Issue #295.
      *
      * Safe to call multiple times but intended to run once per server start after
@@ -54,8 +54,8 @@ export class ToolHandlers {
 
                 // First probe: does the collection even exist? A "no" here is
                 // authoritative (permanent orphan), while a throw is most likely
-                // transient (Milvus unreachable) — keep those two cases distinct
-                // so we don't destroy real state on a network blip.
+                // transient (vector store unreachable) — keep those two cases
+                // distinct so we don't destroy real state on a blip.
                 let collectionExists: boolean;
                 try {
                     collectionExists = await vdb.hasCollection(collectionName);
@@ -66,11 +66,11 @@ export class ToolHandlers {
                 }
 
                 if (!collectionExists) {
-                    // Permanent orphan — no matching Milvus collection, so the
+                    // Permanent orphan — no matching collection on disk, so the
                     // 0/0+completed snapshot entry is a pure phantom. Remove it.
                     this.snapshotManager.removeCodebaseCompletely(codebasePath);
                     removed++;
-                    console.warn(`[SNAPSHOT-VALIDATE] Removed orphan 0/0 entry '${codebasePath}' — no matching Milvus collection`);
+                    console.warn(`[SNAPSHOT-VALIDATE] Removed orphan 0/0 entry '${codebasePath}' — no matching collection`);
                     continue;
                 }
 
@@ -257,7 +257,7 @@ export class ToolHandlers {
 
             const indexingCodebases = new Set(this.snapshotManager.getIndexingCodebases());
 
-            // Do not recover missing local snapshot entries from Milvus row
+            // Do not recover missing local snapshot entries from backend row
             // counts. A collection can exist while indexing is still in flight,
             // and row count only proves how many chunks have landed so far.
             for (const cloudCodebase of cloudCodebases) {
@@ -386,32 +386,17 @@ export class ToolHandlers {
                 }
             }
 
-            // CRITICAL: Pre-index collection creation validation
+            // Pre-index validation. LanceDB has no per-instance collection
+            // limit so this is now mostly a no-op, but we keep the check in
+            // case a future backend needs it.
             try {
-                console.log(`[INDEX-VALIDATION] 🔍 Validating collection creation capability`);
-                const canCreateCollection = await this.context.getVectorDatabase().checkCollectionLimit();
-
-                if (!canCreateCollection) {
-                    console.error(`[INDEX-VALIDATION] ❌ Collection limit validation failed: ${absolutePath}`);
-
-                    // CRITICAL: Immediately return the COLLECTION_LIMIT_MESSAGE to MCP client
-                    return {
-                        content: [{
-                            type: "text",
-                            text: COLLECTION_LIMIT_MESSAGE
-                        }],
-                        isError: true
-                    };
-                }
-
-                console.log(`[INDEX-VALIDATION] ✅  Collection creation validation completed`);
+                await this.context.getVectorDatabase().checkCollectionLimit();
             } catch (validationError: any) {
-                // Handle other collection creation errors
-                console.error(`[INDEX-VALIDATION] ❌ Collection creation validation failed:`, validationError);
+                console.error(`[INDEX-VALIDATION] ❌ Backend validation failed:`, validationError);
                 return {
                     content: [{
                         type: "text",
-                        text: `Error validating collection creation: ${validationError.message || validationError}`
+                        text: `Error validating vector store: ${validationError.message || validationError}`
                     }],
                     isError: true
                 };
@@ -711,13 +696,13 @@ export class ToolHandlers {
             console.log(`[SEARCH] ✅ Search completed! Found ${searchResults.length} results using ${embeddingProvider.getProvider()} embeddings`);
 
             if (searchResults.length === 0) {
-                // Check if collection was lost (indexed locally but missing in Milvus)
+                // Check if collection was lost (indexed locally but missing on disk)
                 if (isIndexed && !isIndexing) {
                     const collectionName = this.context.getCollectionName(searchCodebasePath);
                     const hasCollection = await this.context.getVectorDatabase().hasCollection(collectionName);
                     if (!hasCollection) {
                         return {
-                            content: [{ type: "text", text: `Error: Index data for '${searchCodebasePath}' has been lost (collection not found in Milvus). Please re-index using index_codebase with force=true.` }],
+                            content: [{ type: "text", text: `Error: Index data for '${searchCodebasePath}' has been lost (collection not found in LanceDB). Please re-index using index_codebase with force=true.` }],
                             isError: true
                         };
                     }
@@ -781,21 +766,7 @@ export class ToolHandlers {
                 }]
             };
         } catch (error) {
-            // Check if this is the collection limit error
-            // Handle both direct string throws and Error objects containing the message
             const errorMessage = typeof error === 'string' ? error : (error instanceof Error ? error.message : String(error));
-
-            if (errorMessage === COLLECTION_LIMIT_MESSAGE || errorMessage.includes(COLLECTION_LIMIT_MESSAGE)) {
-                // Return the collection limit message as a successful response
-                // This ensures LLM treats it as final answer, not as retryable error
-                return {
-                    content: [{
-                        type: "text",
-                        text: COLLECTION_LIMIT_MESSAGE
-                    }]
-                };
-            }
-
             return {
                 content: [{
                     type: "text",
@@ -919,21 +890,7 @@ export class ToolHandlers {
                 }]
             };
         } catch (error) {
-            // Check if this is the collection limit error
-            // Handle both direct string throws and Error objects containing the message
             const errorMessage = typeof error === 'string' ? error : (error instanceof Error ? error.message : String(error));
-
-            if (errorMessage === COLLECTION_LIMIT_MESSAGE || errorMessage.includes(COLLECTION_LIMIT_MESSAGE)) {
-                // Return the collection limit message as a successful response
-                // This ensures LLM treats it as final answer, not as retryable error
-                return {
-                    content: [{
-                        type: "text",
-                        text: COLLECTION_LIMIT_MESSAGE
-                    }]
-                };
-            }
-
             return {
                 content: [{
                     type: "text",

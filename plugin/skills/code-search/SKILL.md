@@ -4,7 +4,7 @@ description: Use the Gemdex `search_code` MCP tool before Grep/Glob when the use
 
 # Gemdex code search
 
-This repository is indexed by **Gemdex**, a semantic code search MCP server (Gemini embeddings + Milvus). Reach for it **first** for anything that's a question about meaning, intent, or behavior — and only fall back to `Grep`/`Glob` for exact-string lookups.
+This repository is indexed by **Gemdex**, a semantic code search MCP server (Gemini embeddings + embedded LanceDB). Reach for it **first** for anything that's a question about meaning, intent, or behavior — and only fall back to `Grep`/`Glob` for exact-string lookups.
 
 ## When to use Gemdex vs Grep / Glob
 

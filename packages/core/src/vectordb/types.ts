@@ -17,11 +17,13 @@ export interface SearchOptions {
     filterExpr?: string;
 }
 
-// New interfaces for hybrid search
+// Hybrid search shapes. Each request supplies either a dense vector or a text
+// query; the backend (LanceDB) routes by data type — number[] => dense kNN,
+// string => BM25/FTS — then fuses with the chosen rerank strategy.
 export interface HybridSearchRequest {
-    data: number[] | string; // Query vector or text
-    anns_field: string; // Vector field name (vector or sparse_vector)
-    param: Record<string, any>; // Search parameters
+    data: number[] | string;
+    anns_field: string;
+    param: Record<string, any>;
     limit: number;
 }
 
@@ -103,9 +105,9 @@ export interface VectorDatabase {
     search(collectionName: string, queryVector: number[], options?: SearchOptions): Promise<VectorSearchResult[]>;
 
     /**
-     * Hybrid search with multiple vector fields
+     * Hybrid search combining dense vector and full-text (BM25) signals.
      * @param collectionName Collection name
-     * @param searchRequests Array of search requests for different fields
+     * @param searchRequests Array of search requests (one dense, one text)
      * @param options Hybrid search options including reranking
      */
     hybridSearch(collectionName: string, searchRequests: HybridSearchRequest[], options?: HybridSearchOptions): Promise<HybridSearchResult[]>;
@@ -120,7 +122,7 @@ export interface VectorDatabase {
     /**
      * Query documents with filter conditions
      * @param collectionName Collection name
-     * @param filter Filter expression
+     * @param filter Filter expression (SQL-style, e.g. `relativePath == "src/x.ts"`)
      * @param outputFields Fields to return
      * @param limit Maximum number of results
      */
@@ -134,8 +136,9 @@ export interface VectorDatabase {
     getCollectionDescription(collectionName: string): Promise<string>;
 
     /**
-     * Check collection limit
-     * Returns true if collection can be created, false if limit exceeded
+     * Vestigial: kept on the interface so call sites compile, but always
+     * returns true for embedded backends without a per-instance collection
+     * cap. Callers should treat a `false` return as "backend exhausted".
      */
     checkCollectionLimit(): Promise<boolean>;
 
@@ -146,9 +149,3 @@ export interface VectorDatabase {
      */
     getCollectionRowCount(collectionName: string): Promise<number>;
 }
-
-/**
- * Special error message for collection limit exceeded
- * This allows us to distinguish it from other errors across all Milvus implementations
- */
-export const COLLECTION_LIMIT_MESSAGE = "[Error]: Your Milvus instance has hit its collection limit. To continue creating collections, drop unused collections or raise your Milvus collection quota."; 

@@ -2,7 +2,7 @@
 
 <img src="assets/logo-wordmark.jpg" alt="Gemdex — find the code, skip the context bloat" width="780" />
 
-### Semantic code search for AI coding agents — Gemini embeddings × Milvus × MCP
+### Semantic code search for AI coding agents — Gemini embeddings × LanceDB × MCP
 
 [![npm version](https://img.shields.io/npm/v/gemdex-mcp?color=cf6a4c&label=gemdex-mcp&logo=npm)](https://www.npmjs.com/package/gemdex-mcp)
 [![npm downloads](https://img.shields.io/npm/dm/gemdex-mcp?color=cf6a4c&label=downloads&logo=npm)](https://www.npmjs.com/package/gemdex-mcp)
@@ -11,7 +11,7 @@
 [![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A520-7a9e7e.svg?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![MCP](https://img.shields.io/badge/MCP-compatible-cf6a4c)](https://modelcontextprotocol.io)
 [![Powered by Gemini](https://img.shields.io/badge/embeddings-Gemini-4285F4?logo=google)](https://ai.google.dev/)
-[![Powered by Milvus](https://img.shields.io/badge/vector_db-Milvus-00A1EA?logo=milvus)](https://milvus.io/)
+[![Powered by LanceDB](https://img.shields.io/badge/vector_db-LanceDB-9933ff)](https://lancedb.com/)
 
 **[⭐ Star on GitHub](https://github.com/anand-92/gemdex)** · **[📦 npm](https://www.npmjs.com/package/gemdex-mcp)** · **[💬 Discussions](https://github.com/anand-92/gemdex/discussions)** · **[🐛 Issues](https://github.com/anand-92/gemdex/issues)**
 
@@ -29,7 +29,7 @@
 - 🧠 **Semantically smart** — AST-aware chunks embedded with Gemini Embedding 2 (8K context, 3072 dim, Matryoshka-resizable).
 - 💸 **Token-cheap** — agents query natural language, get back targeted file:line hits instead of dragging in whole files.
 - 🔌 **Plug-and-play** — speaks MCP over stdio, so any compatible client (Claude Code, Cursor, Codex CLI, Windsurf, Cline, Continue, Zed…) can use it instantly.
-- 🌐 **Local-first** — runs against your own Milvus (Docker) — no SaaS, no telemetry, no third-party hops.
+- 🪶 **Truly embedded** — vectors live in a single directory on your disk (LanceDB). No Docker, no daemon, no SaaS, no telemetry.
 - ♻️ **Always fresh** — incremental Merkle-tree change detection + an optional file-trigger watcher keep the index in sync as you code.
 
 ## See it in action
@@ -48,36 +48,10 @@ Find the retry-with-backoff helper.
 
 ## Quickstart (under a minute)
 
-### 1. Get Milvus running (local Docker)
+There is **no setup step** for the vector store anymore — LanceDB is embedded
+and persists at `~/.gemdex/lance` automatically the first time you index.
 
-```yaml
-# ~/milvus/docker-compose.yml
-services:
-  milvus:
-    container_name: milvus-standalone
-    image: milvusdb/milvus:v2.5.10
-    environment:
-      ETCD_USE_EMBED: "true"
-      ETCD_DATA_DIR: /var/lib/milvus/etcd
-      ETCD_CONFIG_PATH: /milvus/configs/embedEtcd.yaml
-      COMMON_STORAGETYPE: local
-      DEPLOY_MODE: STANDALONE
-    volumes:
-      - ./volumes/milvus:/var/lib/milvus
-      - ./embedEtcd.yaml:/milvus/configs/embedEtcd.yaml
-      - ./user.yaml:/milvus/configs/user.yaml
-    ports:
-      - "19530:19530"
-      - "9091:9091"
-      - "2379:2379"
-    command: ["milvus", "run", "standalone"]
-```
-
-```bash
-cd ~/milvus && docker compose up -d
-```
-
-### 2. Wire Gemdex into your agent
+### Wire Gemdex into your agent
 
 **Claude Code (one-command plugin install — recommended):**
 
@@ -86,7 +60,7 @@ cd ~/milvus && docker compose up -d
 /plugin install gemdex@gemdex
 ```
 
-You'll be prompted for `GEMINI_API_KEY` and `MILVUS_ADDRESS` (default `localhost:19530`). Sensitive values are stored in your OS keychain. The plugin ships:
+You'll be prompted for `GEMINI_API_KEY`. Sensitive values are stored in your OS keychain. The plugin ships:
 
 - the `gemdex` MCP server (no local checkout — runs via `npx -y gemdex-mcp@latest`),
 - a `code-search` skill that nudges Claude to prefer `search_code` over `Grep`/`Glob` for semantic queries, and
@@ -99,7 +73,6 @@ See [`plugin/README.md`](plugin/README.md) for the full layout.
 ```bash
 claude mcp add gemdex \
   -e GEMINI_API_KEY=your-key \
-  -e MILVUS_ADDRESS=localhost:19530 \
   -- npx -y gemdex-mcp@latest
 ```
 
@@ -112,15 +85,14 @@ claude mcp add gemdex \
       "command": "npx",
       "args": ["-y", "gemdex-mcp@latest"],
       "env": {
-        "GEMINI_API_KEY": "your-key",
-        "MILVUS_ADDRESS": "localhost:19530"
+        "GEMINI_API_KEY": "your-key"
       }
     }
   }
 }
 ```
 
-### 3. Index, then ask
+### Index, then ask
 
 ```
 Index this codebase.
@@ -136,7 +108,7 @@ Search for the websocket reconnection logic.
 
 Done. The agent now has a tiny, accurate retrieval layer between itself and your code.
 
-### 4. Nudge your agent to actually use it
+### Nudge your agent to actually use it
 
 Agents won't always reach for a new tool on their own. Drop the excerpt below into your top-level `AGENTS.md` (Codex CLI, Cursor, Windsurf, etc.) and/or `CLAUDE.md` so every session starts with the right instinct:
 
@@ -154,13 +126,13 @@ look stale. Prefer Gemdex over `rg`/`grep` for semantic questions; fall back to
 ## How it works
 
 <p align="center">
-  <img src="assets/architecture.jpg" alt="Gemdex architecture: codebase → AST splitter → Gemini embedding → Milvus → MCP → agent" width="100%" />
+  <img src="assets/architecture.jpg" alt="Gemdex architecture: codebase → AST splitter → Gemini embedding → LanceDB → MCP → agent" width="100%" />
 </p>
 
 1. **Your codebase** — pointed at any local directory.
 2. **AST splitter** — tree-sitter parses each file and emits semantically-coherent chunks (functions, classes, blocks), falling back to language-agnostic splitting when needed.
 3. **Gemini embedding** — chunks become 3072-dim vectors (Matryoshka-resizable to 1536/768/256 if you want smaller, cheaper indexes).
-4. **Milvus** — vectors land in a collection with hybrid dense + BM25 retrieval enabled by default.
+4. **LanceDB** — vectors land in a per-codebase table inside `~/.gemdex/lance`, with a BM25 full-text index on `content` for hybrid retrieval.
 5. **MCP → Agent** — your agent calls `search_code` with a natural-language query and receives ranked file:line snippets.
 
 ## Features
@@ -168,11 +140,11 @@ look stale. Prefer Gemdex over `rg`/`grep` for semantic questions; fall back to
 | | |
 |---|---|
 | 🌳 **AST-aware chunking** | tree-sitter grammars for TypeScript, JavaScript, Python, Java, C/C++, C#, Go, Rust, PHP, Ruby, Swift, Kotlin, Scala, Markdown |
-| 🧬 **Hybrid retrieval** | dense vector + BM25 fusion by default; switch to dense-only with one env var |
+| 🧬 **Hybrid retrieval** | dense vector + BM25 (LanceDB FTS) fused via Reciprocal Rank Fusion; switch to dense-only with one env var |
 | 📐 **Matryoshka dimensions** | drop embedding size to 1536 / 768 / 256 for smaller indexes and faster queries |
 | ♻️ **Incremental sync** | Merkle-tree change detection re-embeds only what moved |
 | ⚡ **Trigger watcher** | `touch ~/.gemdex/.sync-trigger` forces an immediate re-sync — perfect for editor hooks |
-| 🏠 **Local-only** | self-hosted Milvus; no SaaS dependency, no telemetry |
+| 🪶 **Truly embedded** | LanceDB persists in a single directory; no Docker, no daemon, no SaaS dependency, no telemetry |
 | 🧰 **4 MCP tools** | `index_codebase`, `search_code`, `clear_index`, `get_indexing_status` |
 | 🔧 **Configurable** | custom extensions, custom ignore patterns, custom embedding model, custom Gemini base URL |
 
@@ -210,16 +182,16 @@ Equivalent hooks work in Cursor, Codex CLI, and any client that can run a shell 
 Skip the MCP server and embed Gemdex directly in your own tooling:
 
 ```ts
-import { Context, MilvusVectorDatabase, GeminiEmbedding } from 'gemdex-core';
+import { Context, LanceDBVectorDatabase, GeminiEmbedding } from 'gemdex-core';
 
 const embedding = new GeminiEmbedding({
   apiKey: process.env.GEMINI_API_KEY!,
   model: 'gemini-embedding-2',
 });
 
-const vectorDatabase = new MilvusVectorDatabase({
-  address: 'localhost:19530',
-});
+// Pass nothing to use the default ~/.gemdex/lance directory, or specify
+// `{ uri: '/some/other/path' }` to put the database anywhere you want.
+const vectorDatabase = new LanceDBVectorDatabase();
 
 const context = new Context({ embedding, vectorDatabase });
 
@@ -231,7 +203,7 @@ const results = await context.semanticSearch('./my-project', 'how does auth work
 
 | Package | Description |
 |---------|-------------|
-| [`gemdex-core`](packages/core) | Indexing engine, AST splitters, Gemini embedding client, Milvus vector store |
+| [`gemdex-core`](packages/core) | Indexing engine, AST splitters, Gemini embedding client, embedded LanceDB vector store |
 | [`gemdex-mcp`](packages/mcp) | MCP server binary that wires the core into an MCP stdio process |
 
 ## Configuration
@@ -242,8 +214,7 @@ const results = await context.semanticSearch('./my-project', 'how does auth work
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `GEMINI_API_KEY` | yes | — | Google AI Studio API key |
-| `MILVUS_ADDRESS` | yes | `localhost:19530` | `host:port` of your Milvus instance |
-| `MILVUS_TOKEN` | no | — | Auth token for Milvus instances with authentication enabled |
+| `LANCEDB_PATH` | no | `~/.gemdex/lance` | Filesystem path for the embedded vector store. All codebases are stored as separate tables under this directory. |
 | `EMBEDDING_MODEL` | no | `gemini-embedding-2` | Override Gemini embedding model |
 | `EMBEDDING_DIMENSION` | no | model default | Force Matryoshka-resized dimension (256/768/1536/3072) |
 | `EMBEDDING_BATCH_SIZE` | no | 100 | Texts per embed request |
@@ -252,7 +223,7 @@ const results = await context.semanticSearch('./my-project', 'how does auth work
 | `INDEX_MULTIMODAL` | no | `false` | Opt in to PDF and image indexing (`.pdf`, `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`) with `gemini-embedding-2` |
 | `CUSTOM_EXTENSIONS` | no | — | Comma-separated extra file extensions (`.vue,.svelte`) |
 | `CUSTOM_IGNORE_PATTERNS` | no | — | Comma-separated extra ignore globs |
-| `CODE_CHUNKS_COLLECTION_NAME_OVERRIDE` | no | — | Readable prefix for Milvus collection names |
+| `CODE_CHUNKS_COLLECTION_NAME_OVERRIDE` | no | — | Readable prefix for LanceDB table names |
 | `GEMDEX_BACKGROUND_SYNC` | no | `true` | Periodic background re-index |
 | `GEMDEX_SYNC_INTERVAL_MS` | no | `300000` | Background sync period |
 | `GEMDEX_TRIGGER_WATCHER` | no | `true` | Watch `~/.gemdex/.sync-trigger` for forced syncs |
@@ -272,7 +243,7 @@ The MCP entry point lands at `packages/mcp/dist/index.js`. Point your MCP client
 
 ## Roadmap
 
-- [ ] pgvector backend (alongside Milvus)
+- [ ] Cross-repo "search from `~`" mode (single global table)
 - [ ] Additional grammars (Vue, Svelte, Zig, Lua, Solidity)
 - [ ] First-class watch mode (no `touch` trigger required)
 - [ ] Per-language re-rankers

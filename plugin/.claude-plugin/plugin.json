@@ -2,8 +2,8 @@
     "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
     "name": "gemdex",
     "displayName": "Gemdex — Semantic Code Search",
-    "version": "0.1.0",
-    "description": "Semantic code search via Gemini embeddings + Milvus. Ships the gemdex MCP server, a PostToolUse hook that auto-reindexes after edits, and a skill that nudges Claude to prefer semantic search over Grep/Glob for intent-based queries.",
+    "version": "0.2.0",
+    "description": "Semantic code search via Gemini embeddings + embedded LanceDB. Ships the gemdex MCP server, a PostToolUse hook that auto-reindexes after edits, and a skill that nudges Claude to prefer semantic search over Grep/Glob for intent-based queries. No Docker required.",
     "author": {
         "name": "Nikhil Anand",
         "url": "https://github.com/anand-92"
@@ -16,7 +16,7 @@
         "code-search",
         "embeddings",
         "gemini",
-        "milvus",
+        "lancedb",
         "mcp",
         "rag"
     ],
@@ -28,17 +28,11 @@
             "sensitive": true,
             "required": true
         },
-        "milvus_address": {
+        "lancedb_path": {
             "type": "string",
-            "title": "Milvus address",
-            "description": "host:port of your Milvus instance (e.g. localhost:19530).",
-            "default": "localhost:19530"
-        },
-        "milvus_token": {
-            "type": "string",
-            "title": "Milvus auth token (optional)",
-            "description": "Auth token for Milvus instances that have authentication enabled. Leave blank for unauthenticated local Milvus.",
-            "sensitive": true
+            "title": "LanceDB path (optional)",
+            "description": "Filesystem path for the embedded vector store. Defaults to ~/.gemdex/lance if left blank.",
+            "default": ""
         }
     },
     "mcpServers": {
@@ -47,8 +41,7 @@
             "args": ["-y", "gemdex-mcp@latest"],
             "env": {
                 "GEMINI_API_KEY": "${user_config.gemini_api_key}",
-                "MILVUS_ADDRESS": "${user_config.milvus_address}",
-                "MILVUS_TOKEN": "${user_config.milvus_token}"
+                "LANCEDB_PATH": "${user_config.lancedb_path}"
             }
         }
     }

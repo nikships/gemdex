@@ -6,8 +6,7 @@ export interface ContextMcpConfig {
     embeddingModel: string;
     geminiApiKey?: string;
     geminiBaseUrl?: string;
-    milvusAddress?: string;
-    milvusToken?: string;
+    lancedbPath?: string;
     collectionNameOverride?: string;
 }
 
@@ -67,7 +66,7 @@ export function createMcpConfig(): ContextMcpConfig {
     console.log(`[DEBUG] 🔍 Environment Variables:`);
     console.log(`[DEBUG]   EMBEDDING_MODEL: ${envManager.get('EMBEDDING_MODEL') || `NOT SET (default: ${DEFAULT_EMBEDDING_MODEL})`}`);
     console.log(`[DEBUG]   GEMINI_API_KEY: ${envManager.get('GEMINI_API_KEY') ? 'SET' : 'NOT SET'}`);
-    console.log(`[DEBUG]   MILVUS_ADDRESS: ${envManager.get('MILVUS_ADDRESS') || 'NOT SET'}`);
+    console.log(`[DEBUG]   LANCEDB_PATH: ${envManager.get('LANCEDB_PATH') || 'NOT SET (default: ~/.gemdex/lance)'}`);
 
     return {
         name: envManager.get('MCP_SERVER_NAME') || "Context MCP Server",
@@ -75,8 +74,7 @@ export function createMcpConfig(): ContextMcpConfig {
         embeddingModel: getEmbeddingModel(),
         geminiApiKey: envManager.get('GEMINI_API_KEY'),
         geminiBaseUrl: envManager.get('GEMINI_BASE_URL'),
-        milvusAddress: envManager.get('MILVUS_ADDRESS'),
-        milvusToken: envManager.get('MILVUS_TOKEN'),
+        lancedbPath: envManager.get('LANCEDB_PATH'),
         collectionNameOverride: envManager.get('CODE_CHUNKS_COLLECTION_NAME_OVERRIDE'),
     };
 }
@@ -87,7 +85,7 @@ export function logConfigurationSummary(config: ContextMcpConfig): void {
     console.log(`[MCP]   Embedding: Gemini / ${config.embeddingModel}`);
     console.log(`[MCP]   Gemini API Key: ${config.geminiApiKey ? '✅ Configured' : '❌ Missing'}`);
     if (config.geminiBaseUrl) console.log(`[MCP]   Gemini Base URL: ${config.geminiBaseUrl}`);
-    console.log(`[MCP]   Milvus Address: ${config.milvusAddress || '[Not configured]'}`);
+    console.log(`[MCP]   LanceDB Path: ${config.lancedbPath || '[default: ~/.gemdex/lance]'}`);
     if (config.collectionNameOverride) console.log(`[MCP]   Collection Name Override: ${config.collectionNameOverride}`);
 }
 
@@ -105,10 +103,11 @@ Optional:
                           Supported: gemini-embedding-2, gemini-embedding-001
   GEMINI_BASE_URL         Custom Gemini base URL
   INDEX_MULTIMODAL        true|false (default: false). Enables PDF/image indexing with gemini-embedding-2.
-  MILVUS_ADDRESS          Milvus host:port (e.g. localhost:19530)
-  MILVUS_TOKEN            Milvus auth token (optional; for Milvus instances with auth enabled)
+  LANCEDB_PATH            Filesystem path for the embedded LanceDB store
+                          (default: ~/.gemdex/lance). All codebases are
+                          stored as separate tables under this directory.
   CODE_CHUNKS_COLLECTION_NAME_OVERRIDE
-                          Readable prefix for Milvus collection names.
+                          Readable prefix for LanceDB table names.
 
   Background sync:
   GEMDEX_BACKGROUND_SYNC   true|false (default: true)

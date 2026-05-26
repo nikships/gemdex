@@ -237,8 +237,10 @@ export class SyncManager {
                     console.error(`[SYNC-DEBUG] Error syncing codebase '${codebasePath}' after ${codebaseElapsed}ms:`, error);
                     console.error(`[SYNC-DEBUG] Error stack:`, error.stack);
 
-                    if (error.message.includes('Failed to query Milvus')) {
-                        // Collection maybe deleted manually, delete the snapshot file
+                    // If the underlying collection has been removed from disk (LanceDB
+                    // raises "Table '...' was not found"), drop the stale local snapshot
+                    // so the next index call starts cleanly.
+                    if (/Table .* was not found/i.test(error.message)) {
                         await FileSynchronizer.deleteSnapshot(codebasePath);
                     }
 

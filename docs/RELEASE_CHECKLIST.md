@@ -7,7 +7,7 @@ Manual steps that drive stars and a clean launch. Run them yourself — they nee
 - [ ] **Set the repo description**
   ```bash
   gh repo edit anand-92/gemdex \
-    --description "Semantic code search MCP for AI coding agents — Gemini embeddings + Milvus hybrid retrieval"
+    --description "Semantic code search MCP for AI coding agents — Gemini embeddings + embedded LanceDB hybrid retrieval"
   ```
 
 - [ ] **Add discoverability topics**
@@ -16,7 +16,7 @@ Manual steps that drive stars and a clean launch. Run them yourself — they nee
     --add-topic mcp \
     --add-topic semantic-search \
     --add-topic gemini \
-    --add-topic milvus \
+    --add-topic lancedb \
     --add-topic ast \
     --add-topic code-search \
     --add-topic claude-code \

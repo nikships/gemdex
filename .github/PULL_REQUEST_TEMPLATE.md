@@ -21,7 +21,7 @@ land your change quickly.
 <!--
 - Unit tests added / updated?
 - Manual repro before & after?
-- Tried against local Milvus?
+- Smoke-tested against a local LanceDB (default ~/.gemdex/lance)?
 -->
 
 ## Checklist
