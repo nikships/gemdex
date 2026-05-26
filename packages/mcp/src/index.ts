@@ -22,7 +22,7 @@ import {
     CallToolRequestSchema
 } from "@modelcontextprotocol/sdk/types.js";
 import { Context } from "gemdex-core";
-import { MilvusVectorDatabase } from "gemdex-core";
+import { LanceDBVectorDatabase } from "gemdex-core";
 
 // Import our modular components
 import { createMcpConfig, logConfigurationSummary, showHelpMessage, ContextMcpConfig } from "./config.js";
@@ -58,10 +58,9 @@ class ContextMcpServer {
         const embedding = createEmbeddingInstance(config);
         logEmbeddingProviderInfo(config, embedding);
 
-        // Initialize vector database
-        const vectorDatabase = new MilvusVectorDatabase({
-            address: config.milvusAddress || 'localhost:19530',
-            ...(config.milvusToken && { token: config.milvusToken })
+        // Initialize vector database (embedded LanceDB; default path ~/.gemdex/lance)
+        const vectorDatabase = new LanceDBVectorDatabase({
+            ...(config.lancedbPath && { uri: config.lancedbPath })
         });
 
         // Initialize Gemdex

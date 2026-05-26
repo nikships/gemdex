@@ -53,16 +53,14 @@ body:
     validations:
       required: true
 
-  - type: dropdown
-    id: milvus
+  - type: input
+    id: lancedb-path
     attributes:
-      label: Milvus deployment
-      options:
-        - Local Docker (milvusdb/milvus standalone)
-        - Self-hosted cluster
-        - Other (please describe in logs)
+      label: LanceDB path
+      description: Where Gemdex is storing its vector tables. Defaults to ~/.gemdex/lance.
+      placeholder: ~/.gemdex/lance
     validations:
-      required: true
+      required: false
 
   - type: input
     id: os
@@ -96,5 +94,5 @@ body:
       options:
         - label: I searched existing issues and didn't find a duplicate.
           required: true
-        - label: I redacted any secrets (API keys, Milvus auth tokens) from logs/config.
+        - label: I redacted any secrets (API keys) from logs/config.
           required: true

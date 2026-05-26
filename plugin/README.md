@@ -6,6 +6,8 @@ This plugin wires the [Gemdex](https://github.com/anand-92/gemdex) semantic code
 - A `PostToolUse` hook on `Edit | Write | MultiEdit` that touches `~/.gemdex/.sync-trigger` so the index re-syncs automatically after Claude edits files.
 - A `code-search` skill that nudges Claude to prefer `search_code` over `Grep`/`Glob` for semantic/intent queries.
 
+No Docker, no daemon — Gemdex now stores its vectors in an embedded LanceDB at `~/.gemdex/lance` by default.
+
 ## Install
 
 From the gemdex repo's marketplace (one-time):
@@ -20,14 +22,13 @@ You'll be prompted for:
 | Field | Required | Notes |
 |-------|----------|-------|
 | `gemini_api_key` | yes | Google AI Studio API key — [get one here](https://aistudio.google.com/apikey). Stored in the system keychain. |
-| `milvus_address` | yes | `host:port` of your Milvus instance. Defaults to `localhost:19530`. |
-| `milvus_token` | optional | Auth token if your Milvus instance has authentication enabled. Stored in the system keychain. |
+| `lancedb_path` | optional | Filesystem path for the embedded vector store. Leave blank to use `~/.gemdex/lance`. |
 
 ## What it does, exactly
 
 ### 1. MCP server registration
 
-`plugin.json` ships an inline `mcpServers.gemdex` entry that runs `npx -y gemdex-mcp@latest`, with `GEMINI_API_KEY`, `MILVUS_ADDRESS`, and `MILVUS_TOKEN` populated from `userConfig`. The server exposes four tools to Claude:
+`plugin.json` ships an inline `mcpServers.gemdex` entry that runs `npx -y gemdex-mcp@latest`, with `GEMINI_API_KEY` and `LANCEDB_PATH` populated from `userConfig`. The server exposes four tools to Claude:
 
 - `index_codebase`
 - `search_code`

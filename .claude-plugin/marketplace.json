@@ -9,8 +9,8 @@
         {
             "name": "gemdex",
             "source": "./plugin",
-            "description": "Semantic code search via Gemini embeddings + Milvus + MCP. Bundles the gemdex MCP server, a PostToolUse hook that auto-reindexes after edits, and a skill that nudges Claude to prefer semantic search over Grep/Glob for intent-based queries.",
-            "version": "0.1.0",
+            "description": "Semantic code search via Gemini embeddings + embedded LanceDB + MCP. Bundles the gemdex MCP server, a PostToolUse hook that auto-reindexes after edits, and a skill that nudges Claude to prefer semantic search over Grep/Glob for intent-based queries. No Docker required.",
+            "version": "0.2.0",
             "homepage": "https://github.com/anand-92/gemdex",
             "license": "MIT",
             "keywords": [
@@ -18,7 +18,7 @@
                 "code-search",
                 "embeddings",
                 "gemini",
-                "milvus",
+                "lancedb",
                 "mcp",
                 "rag"
             ]

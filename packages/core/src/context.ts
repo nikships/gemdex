@@ -519,7 +519,7 @@ export class Context {
     }
 
     private async deleteFileChunks(collectionName: string, relativePath: string): Promise<void> {
-        // Escape backslashes for Milvus query expression (Windows path compatibility)
+        // Escape backslashes for the SQL-style filter expression (Windows path compatibility)
         const escapedPath = relativePath.replace(/\\/g, '\\\\');
         const results = await this.vectorDatabase.query(
             collectionName,
@@ -589,8 +589,8 @@ export class Context {
                 }
             ];
 
-            console.log(`[Context] 🔍 Search request 1 (dense): anns_field="${searchRequests[0].anns_field}", vector_dim=${queryEmbedding.vector.length}, limit=${searchRequests[0].limit}`);
-            console.log(`[Context] 🔍 Search request 2 (sparse): anns_field="${searchRequests[1].anns_field}", query_text="${query}", limit=${searchRequests[1].limit}`);
+            console.log(`[Context] 🔍 Dense request: vector_dim=${queryEmbedding.vector.length}, limit=${searchRequests[0].limit}`);
+            console.log(`[Context] 🔍 FTS request: query_text="${query}", limit=${searchRequests[1].limit}`);
 
             // 3. Execute hybrid search
             console.log(`[Context] 🔍 Executing hybrid search with RRF reranking...`);
@@ -1019,7 +1019,7 @@ export class Context {
 
                 return {
                     id: this.generateId(relativePath, chunk.metadata.startLine || 0, chunk.metadata.endLine || 0, chunk.content),
-                    content: chunk.content, // Full text content for BM25 and storage
+                    content: chunk.content, // Full text content for FTS (BM25) and storage
                     vector: embeddings[index].vector, // Dense vector
                     relativePath,
                     startLine: chunk.metadata.startLine || 0,
@@ -1350,7 +1350,7 @@ export class Context {
         // Always ignore dotfiles/dotdirs to stay aligned with
         // FileSynchronizer.shouldIgnore. If these traversals diverge, files
         // indexed here are never hashed by the synchronizer and their stale
-        // chunks linger in Milvus forever.
+        // chunks linger in the vector store forever.
         if (relativePath.split(path.sep).some(part => part.startsWith('.'))) {
             return true;
         }
