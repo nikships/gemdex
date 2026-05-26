@@ -78,6 +78,55 @@ export class MilvusVectorDatabase implements VectorDatabase {
         }
     }
 
+    private isSuccessStatus(status: any): boolean {
+        if (!status) {
+            return true;
+        }
+
+        return status.error_code === 'Success' || status.error_code === 0 || status.code === 0;
+    }
+
+    private isDuplicateIndexStatus(statusOrError: any): boolean {
+        const reason = statusOrError?.reason || statusOrError?.status?.reason || statusOrError?.message || String(statusOrError);
+        const code = statusOrError?.code || statusOrError?.error_code || statusOrError?.status?.code || statusOrError?.status?.error_code;
+
+        return code === 702 || /index duplicates/i.test(reason);
+    }
+
+    private async hasIndexOnField(collectionName: string, fieldName: string): Promise<boolean> {
+        if (!this.client) {
+            throw new Error('MilvusClient is not initialized. Call ensureInitialized() first.');
+        }
+
+        try {
+            const response = await this.client.describeIndex({
+                collection_name: collectionName,
+                field_name: fieldName,
+            });
+
+            if (!this.isSuccessStatus(response.status)) {
+                return false;
+            }
+
+            return (response.index_descriptions || []).some((index: any) => index.field_name === fieldName);
+        } catch {
+            return false;
+        }
+    }
+
+    private assertSuccessfulIndexCreate(status: any, collectionName: string, fieldName: string): void {
+        if (this.isSuccessStatus(status)) {
+            return;
+        }
+
+        if (fieldName === 'sparse_vector' && this.isDuplicateIndexStatus(status)) {
+            console.log(`[MilvusDB] ℹ️  Sparse vector index for collection '${collectionName}' already exists or was auto-created by Milvus; continuing.`);
+            return;
+        }
+
+        throw new Error(`Index creation failed for field '${fieldName}' in collection '${collectionName}': ${status?.reason || JSON.stringify(status)}`);
+    }
+
     /**
      * Ensure collection is loaded before search/query operations
      */
@@ -132,25 +181,21 @@ export class MilvusVectorDatabase implements VectorDatabase {
                     field_name: fieldName
                 });
 
-                // Debug logging to understand the progress
+                // Check for error status
+                if (indexBuildProgress.status && !this.isSuccessStatus(indexBuildProgress.status)) {
+                    if (fieldName === 'sparse_vector' && this.isDuplicateIndexStatus(indexBuildProgress.status)) {
+                        console.log(`[MilvusDB] ℹ️  Sparse vector index for collection '${collectionName}' already exists or was auto-created by Milvus; treating it as ready.`);
+                        return;
+                    }
+                    throw new Error(`Index creation failed for field '${fieldName}' in collection '${collectionName}': ${indexBuildProgress.status.reason}`);
+                }
+
                 console.log(`[MilvusDB] 📊 Index build progress for '${fieldName}': indexed_rows=${indexBuildProgress.indexed_rows}, total_rows=${indexBuildProgress.total_rows}`);
-                console.log(`[MilvusDB] 📊 Full response:`, JSON.stringify(indexBuildProgress));
 
                 // Check if index building is complete
                 if (indexBuildProgress.indexed_rows === indexBuildProgress.total_rows) {
                     console.log(`[MilvusDB] ✅ Index on field '${fieldName}' is ready! (${indexBuildProgress.indexed_rows}/${indexBuildProgress.total_rows} rows indexed)`);
                     return;
-                }
-
-                // Check for error status
-                if (indexBuildProgress.status && indexBuildProgress.status.error_code !== 'Success') {
-                    // Handle known issue with older Milvus versions where sparse vector index progress returns incorrect error
-                    if (indexBuildProgress.status.reason && indexBuildProgress.status.reason.includes('index duplicates[indexName=]')) {
-                        console.log(`[MilvusDB] ⚠️  Index progress check returned known older Milvus issue: ${indexBuildProgress.status.reason}`);
-                        console.log(`[MilvusDB] ⚠️  This is a known issue with older Milvus versions - treating as index ready`);
-                        return; // Treat as ready since this is a false error
-                    }
-                    throw new Error(`Index creation failed for field '${fieldName}' in collection '${collectionName}': ${indexBuildProgress.status.reason}`);
                 }
 
                 console.log(`[MilvusDB] 📊 Index building in progress: ${indexBuildProgress.indexed_rows}/${indexBuildProgress.total_rows} rows indexed`);
@@ -289,7 +334,8 @@ export class MilvusVectorDatabase implements VectorDatabase {
         };
 
         console.log(`[MilvusDB] 🔧 Creating index for field 'vector' in collection '${collectionName}'...`);
-        await this.client.createIndex(indexParams);
+        const indexStatus = await this.client.createIndex(indexParams);
+        this.assertSuccessfulIndexCreate(indexStatus, collectionName, 'vector');
 
         // Wait for index to be ready before loading collection
         await this.waitForIndexReady(collectionName, 'vector');
@@ -570,7 +616,8 @@ export class MilvusVectorDatabase implements VectorDatabase {
             metric_type: MetricType.COSINE,
         };
         console.log(`[MilvusDB] 🔧 Creating dense vector index for field 'vector' in collection '${collectionName}'...`);
-        await this.client.createIndex(denseIndexParams);
+        const denseIndexStatus = await this.client.createIndex(denseIndexParams);
+        this.assertSuccessfulIndexCreate(denseIndexStatus, collectionName, 'vector');
 
         // Wait for dense vector index to be ready
         await this.waitForIndexReady(collectionName, 'vector');
@@ -583,9 +630,21 @@ export class MilvusVectorDatabase implements VectorDatabase {
             index_type: 'SPARSE_INVERTED_INDEX',
             metric_type: MetricType.BM25,
         };
-        console.log(`[MilvusDB] 🔧 Creating sparse vector index for field 'sparse_vector' in collection '${collectionName}'...`);
+        if (await this.hasIndexOnField(collectionName, 'sparse_vector')) {
+            console.log(`[MilvusDB] ℹ️  Sparse vector index for collection '${collectionName}' already exists or was auto-created by Milvus; skipping explicit createIndex.`);
+        } else {
+            console.log(`[MilvusDB] 🔧 Creating sparse vector index for field 'sparse_vector' in collection '${collectionName}'...`);
 
-        await this.client.createIndex(sparseIndexParams);
+            try {
+                const sparseIndexStatus = await this.client.createIndex(sparseIndexParams);
+                this.assertSuccessfulIndexCreate(sparseIndexStatus, collectionName, 'sparse_vector');
+            } catch (error) {
+                if (!this.isDuplicateIndexStatus(error)) {
+                    throw error;
+                }
+                console.log(`[MilvusDB] ℹ️  Sparse vector index for collection '${collectionName}' already exists or was auto-created by Milvus; continuing.`);
+            }
+        }
 
         // Wait for sparse vector index to be ready
         await this.waitForIndexReady(collectionName, 'sparse_vector');
