@@ -1,0 +1,64 @@
+name: Publish npm Packages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/core/src/**"
+      - "packages/core/package.json"
+      - "packages/mcp/src/**"
+      - "packages/mcp/package.json"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish changed source to npm
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build packages
+        run: pnpm build
+
+      - name: Publish gemdex-core
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          VERSION=$(node -p "require('./packages/core/package.json').version")
+          if npm view "gemdex-core@$VERSION" version >/dev/null 2>&1; then
+            echo "gemdex-core@$VERSION is already published; skipping."
+          else
+            pnpm --filter gemdex-core publish --access public --no-git-checks
+          fi
+
+      - name: Publish gemdex-mcp
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          VERSION=$(node -p "require('./packages/mcp/package.json').version")
+          if npm view "gemdex-mcp@$VERSION" version >/dev/null 2>&1; then
+            echo "gemdex-mcp@$VERSION is already published; skipping."
+          else
+            pnpm --filter gemdex-mcp publish --access public --no-git-checks
+          fi
