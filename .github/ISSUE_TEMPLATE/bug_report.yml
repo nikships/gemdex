@@ -1,0 +1,101 @@
+name: 🐛 Bug report
+description: Something in Gemdex isn't behaving the way the docs say it should.
+title: "[bug] "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug! The more concrete the repro, the faster it gets fixed.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: A clear, concise description of the bug.
+      placeholder: When I run `search_code`, the server crashes with…
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal command sequence or MCP config that triggers the bug.
+      placeholder: |
+        1. `claude mcp add gemdex …`
+        2. Ask the agent to "index this repo"
+        3. …
+      render: bash
+    validations:
+      required: true
+
+  - type: input
+    id: gemdex-version
+    attributes:
+      label: Gemdex version
+      placeholder: gemdex-mcp@0.1.0
+    validations:
+      required: true
+
+  - type: input
+    id: node-version
+    attributes:
+      label: Node.js version
+      placeholder: v20.11.1
+    validations:
+      required: true
+
+  - type: dropdown
+    id: milvus
+    attributes:
+      label: Milvus deployment
+      options:
+        - Local Docker (milvusdb/milvus standalone)
+        - Zilliz Cloud
+        - Self-hosted cluster
+        - Other (please describe in logs)
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: macOS 14.5 / Ubuntu 22.04 / Windows 11
+    validations:
+      required: true
+
+  - type: input
+    id: client
+    attributes:
+      label: MCP client
+      placeholder: Claude Code, Cursor, Codex CLI, Windsurf, Cline, Continue, Zed, custom
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / stack trace
+      description: Paste any relevant server output. **Redact API keys.**
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Final checks
+      options:
+        - label: I searched existing issues and didn't find a duplicate.
+          required: true
+        - label: I redacted any secrets (API keys, Milvus tokens) from logs/config.
+          required: true
