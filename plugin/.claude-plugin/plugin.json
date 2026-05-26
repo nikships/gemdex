@@ -1,0 +1,55 @@
+{
+    "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+    "name": "gemdex",
+    "displayName": "Gemdex — Semantic Code Search",
+    "version": "0.1.0",
+    "description": "Semantic code search via Gemini embeddings + Milvus. Ships the gemdex MCP server, a PostToolUse hook that auto-reindexes after edits, and a skill that nudges Claude to prefer semantic search over Grep/Glob for intent-based queries.",
+    "author": {
+        "name": "Nikhil Anand",
+        "url": "https://github.com/anand-92"
+    },
+    "homepage": "https://github.com/anand-92/gemdex",
+    "repository": "https://github.com/anand-92/gemdex",
+    "license": "MIT",
+    "keywords": [
+        "semantic-search",
+        "code-search",
+        "embeddings",
+        "gemini",
+        "milvus",
+        "mcp",
+        "rag"
+    ],
+    "userConfig": {
+        "gemini_api_key": {
+            "type": "string",
+            "title": "Gemini API key",
+            "description": "Google AI Studio API key. Get one at https://aistudio.google.com/apikey.",
+            "sensitive": true,
+            "required": true
+        },
+        "milvus_address": {
+            "type": "string",
+            "title": "Milvus address",
+            "description": "host:port of your Milvus instance (e.g. localhost:19530).",
+            "default": "localhost:19530"
+        },
+        "milvus_token": {
+            "type": "string",
+            "title": "Milvus auth token (optional)",
+            "description": "Auth token for Milvus instances that have authentication enabled. Leave blank for unauthenticated local Milvus.",
+            "sensitive": true
+        }
+    },
+    "mcpServers": {
+        "gemdex": {
+            "command": "npx",
+            "args": ["-y", "gemdex-mcp@latest"],
+            "env": {
+                "GEMINI_API_KEY": "${user_config.gemini_api_key}",
+                "MILVUS_ADDRESS": "${user_config.milvus_address}",
+                "MILVUS_TOKEN": "${user_config.milvus_token}"
+            }
+        }
+    }
+}

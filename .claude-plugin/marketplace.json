@@ -1,0 +1,27 @@
+{
+    "$schema": "https://json.schemastore.org/claude-code-plugin-marketplace.json",
+    "name": "gemdex",
+    "owner": {
+        "name": "Nikhil Anand",
+        "url": "https://github.com/anand-92"
+    },
+    "plugins": [
+        {
+            "name": "gemdex",
+            "source": "./plugin",
+            "description": "Semantic code search via Gemini embeddings + Milvus + MCP. Bundles the gemdex MCP server, a PostToolUse hook that auto-reindexes after edits, and a skill that nudges Claude to prefer semantic search over Grep/Glob for intent-based queries.",
+            "version": "0.1.0",
+            "homepage": "https://github.com/anand-92/gemdex",
+            "license": "MIT",
+            "keywords": [
+                "semantic-search",
+                "code-search",
+                "embeddings",
+                "gemini",
+                "milvus",
+                "mcp",
+                "rag"
+            ]
+        }
+    ]
+}
