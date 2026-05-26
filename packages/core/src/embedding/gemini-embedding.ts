@@ -1,5 +1,6 @@
 import { GoogleGenAI } from '@google/genai';
 import { Embedding, EmbeddingVector } from './base-embedding';
+import type { EmbeddingContent } from './base-embedding';
 
 type GeminiModelInfo = {
     dimension: number;
@@ -58,9 +59,12 @@ export class GeminiEmbedding extends Embedding {
     }
 
     async embedBatch(texts: string[]): Promise<EmbeddingVector[]> {
-        if (texts.length === 0) return [];
+        return this.embedContentBatch(texts);
+    }
 
-        const processedTexts = this.preprocessTexts(texts);
+    async embedContentBatch(contents: EmbeddingContent[]): Promise<EmbeddingVector[]> {
+        if (contents.length === 0) return [];
+
         const model = this.config.model!;
 
         // gemini-embedding-2 is multimodal and aggregates a flat string array into
@@ -68,12 +72,23 @@ export class GeminiEmbedding extends Embedding {
         // ({ parts: [{ text }] }) tells the API to return one embedding per input.
         // This shape is also valid for gemini-embedding-001, so use it uniformly.
         // Ref: https://ai.google.dev/gemini-api/docs/embeddings#embedding-aggregation
-        const contents = processedTexts.map((text) => ({ parts: [{ text }] }));
+        const requestContents = contents.map((content) => ({
+            parts: [
+                typeof content === 'string'
+                    ? { text: this.preprocessText(content) }
+                    : {
+                        inlineData: {
+                            mimeType: content.inlineData.mimeType,
+                            data: content.inlineData.data,
+                        },
+                    },
+            ],
+        }));
 
         const dim = this.config.outputDimensionality || this.dimension;
         const response = await this.client.models.embedContent({
             model,
-            contents,
+            contents: requestContents,
             config: { outputDimensionality: dim },
         });
 
@@ -81,9 +96,9 @@ export class GeminiEmbedding extends Embedding {
         if (!embeddings) {
             throw new Error('Gemini API returned no embeddings');
         }
-        if (embeddings.length !== processedTexts.length) {
+        if (embeddings.length !== contents.length) {
             throw new Error(
-                `Gemini API returned ${embeddings.length} embeddings for ${processedTexts.length} inputs. ` +
+                `Gemini API returned ${embeddings.length} embeddings for ${contents.length} inputs. ` +
                 `This usually means the model aggregated inputs; check that each input is wrapped in a Content object.`
             );
         }
@@ -103,6 +118,10 @@ export class GeminiEmbedding extends Embedding {
 
     getProvider(): string {
         return 'Gemini';
+    }
+
+    isMultimodal(): boolean {
+        return this.config.model === 'gemini-embedding-2';
     }
 
     setModel(model: string): void {

@@ -150,3 +150,51 @@ test("legacy zero-entry validation does not use row count as indexedFiles", asyn
         assert.equal(info.totalChunks, 42);
     });
 });
+
+test("search_code formats multimodal hits as media references", async () => {
+    await withTempHome(async (tempRoot) => {
+        const codebasePath = path.join(tempRoot, "repo");
+        await mkdir(codebasePath, { recursive: true });
+
+        const snapshotManager = new SnapshotManager();
+        snapshotManager.setCodebaseIndexed(codebasePath, {
+            indexedFiles: 1,
+            totalChunks: 1,
+            status: "completed",
+        });
+        snapshotManager.saveCodebaseSnapshot();
+
+        const context = {
+            getEmbedding: () => ({
+                getProvider: () => "test",
+            }),
+            semanticSearch: async () => [{
+                content: "PDF page 1: guide.pdf\nPage: 1\nMIME type: application/pdf",
+                relativePath: "guide.pdf",
+                startLine: 1,
+                endLine: 1,
+                language: "pdf",
+                score: 0.9,
+                metadata: {
+                    mediaType: "pdf",
+                    page: 1,
+                    mimeType: "application/pdf",
+                },
+            }],
+        };
+
+        const handlers = new ToolHandlers(context as any, snapshotManager);
+        (handlers as any).syncIndexedCodebasesFromCloud = async () => undefined;
+
+        const result = await handlers.handleSearchCode({
+            path: codebasePath,
+            query: "architecture guide",
+            limit: 1,
+        });
+
+        assert.equal(result.isError, undefined);
+        assert.match(result.content[0].text, /PDF page 1/);
+        assert.match(result.content[0].text, /Location: guide\.pdf#page=1/);
+        assert.doesNotMatch(result.content[0].text, /Code snippet/);
+    });
+});

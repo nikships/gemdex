@@ -740,9 +740,23 @@ export class ToolHandlers {
 
             // Format results
             const formattedResults = searchResults.map((result: any, index: number) => {
-                const location = `${result.relativePath}:${result.startLine}-${result.endLine}`;
+                const mediaType = result.metadata?.mediaType;
+                const location = mediaType === 'pdf' && result.metadata?.page
+                    ? `${result.relativePath}#page=${result.metadata.page}`
+                    : `${result.relativePath}:${result.startLine}-${result.endLine}`;
                 const context = truncateContent(result.content, 5000);
                 const codebaseInfo = path.basename(searchCodebasePath);
+
+                if (mediaType) {
+                    const label = mediaType === 'pdf'
+                        ? `PDF page ${result.metadata?.page || 1}`
+                        : `${String(mediaType).charAt(0).toUpperCase()}${String(mediaType).slice(1)} hit`;
+
+                    return `${index + 1}. ${label} [${codebaseInfo}]\n` +
+                        `   Location: ${location}\n` +
+                        `   Rank: ${index + 1}\n` +
+                        `   Context:\n${context}\n`;
+                }
 
                 return `${index + 1}. Code snippet (${result.language}) [${codebaseInfo}]\n` +
                     `   Location: ${location}\n` +
