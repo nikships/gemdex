@@ -87,7 +87,7 @@ export function logConfigurationSummary(config: ContextMcpConfig): void {
     console.log(`[MCP]   Embedding: Gemini / ${config.embeddingModel}`);
     console.log(`[MCP]   Gemini API Key: ${config.geminiApiKey ? '✅ Configured' : '❌ Missing'}`);
     if (config.geminiBaseUrl) console.log(`[MCP]   Gemini Base URL: ${config.geminiBaseUrl}`);
-    console.log(`[MCP]   Milvus Address: ${config.milvusAddress || (config.milvusToken ? '[Auto-resolve from token]' : '[Not configured]')}`);
+    console.log(`[MCP]   Milvus Address: ${config.milvusAddress || '[Not configured]'}`);
     if (config.collectionNameOverride) console.log(`[MCP]   Collection Name Override: ${config.collectionNameOverride}`);
 }
 
@@ -105,8 +105,8 @@ Optional:
                           Supported: gemini-embedding-2, gemini-embedding-001
   GEMINI_BASE_URL         Custom Gemini base URL
   INDEX_MULTIMODAL        true|false (default: false). Enables PDF/image indexing with gemini-embedding-2.
-  MILVUS_ADDRESS          Milvus host:port (default: resolved from MILVUS_TOKEN if available)
-  MILVUS_TOKEN            Milvus auth token (also used for cloud address resolution)
+  MILVUS_ADDRESS          Milvus host:port (e.g. localhost:19530)
+  MILVUS_TOKEN            Milvus auth token (optional; for Milvus instances with auth enabled)
   CODE_CHUNKS_COLLECTION_NAME_OVERRIDE
                           Readable prefix for Milvus collection names.
 

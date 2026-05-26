@@ -14,7 +14,6 @@ All notable changes to this project are documented here. The format follows [Kee
 - Four MCP tools: `index_codebase`, `search_code`, `clear_index`, `get_indexing_status`.
 - Incremental re-indexing via Merkle-tree change detection.
 - File-trigger watcher (`~/.gemdex/.sync-trigger`) for editor-driven re-syncs.
-- Zilliz Cloud support via `MILVUS_TOKEN`.
 - Custom file extensions and ignore patterns via env vars.
 
 [Unreleased]: https://github.com/anand-92/gemdex/compare/v0.1.0...HEAD

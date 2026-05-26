@@ -21,7 +21,7 @@ land your change quickly.
 <!--
 - Unit tests added / updated?
 - Manual repro before & after?
-- Tried against local Milvus / Zilliz Cloud?
+- Tried against local Milvus?
 -->
 
 ## Checklist

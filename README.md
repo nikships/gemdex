@@ -29,7 +29,7 @@
 - 🧠 **Semantically smart** — AST-aware chunks embedded with Gemini Embedding 2 (8K context, 3072 dim, Matryoshka-resizable).
 - 💸 **Token-cheap** — agents query natural language, get back targeted file:line hits instead of dragging in whole files.
 - 🔌 **Plug-and-play** — speaks MCP over stdio, so any compatible client (Claude Code, Cursor, Codex CLI, Windsurf, Cline, Continue, Zed…) can use it instantly.
-- 🌐 **Local-first** — runs against your own Milvus (Docker) by default; Zilliz Cloud is one env var away.
+- 🌐 **Local-first** — runs against your own Milvus (Docker) — no SaaS, no telemetry, no third-party hops.
 - ♻️ **Always fresh** — incremental Merkle-tree change detection + an optional file-trigger watcher keep the index in sync as you code.
 
 ## See it in action
@@ -48,10 +48,7 @@ Find the retry-with-backoff helper.
 
 ## Quickstart (under a minute)
 
-### 1. Get Milvus running
-
-<details>
-<summary>Local Docker (recommended)</summary>
+### 1. Get Milvus running (local Docker)
 
 ```yaml
 # ~/milvus/docker-compose.yml
@@ -80,18 +77,24 @@ services:
 cd ~/milvus && docker compose up -d
 ```
 
-</details>
-
-<details>
-<summary>Zilliz Cloud</summary>
-
-Skip Docker — grab a `MILVUS_TOKEN` from your Zilliz Cloud cluster and pass it in instead of `MILVUS_ADDRESS`. Gemdex auto-resolves the endpoint from the token.
-
-</details>
-
 ### 2. Wire Gemdex into your agent
 
-**Claude Code:**
+**Claude Code (one-command plugin install — recommended):**
+
+```bash
+/plugin marketplace add anand-92/gemdex
+/plugin install gemdex@gemdex
+```
+
+You'll be prompted for `GEMINI_API_KEY` and `MILVUS_ADDRESS` (default `localhost:19530`). Sensitive values are stored in your OS keychain. The plugin ships:
+
+- the `gemdex` MCP server (no local checkout — runs via `npx -y gemdex-mcp@latest`),
+- a `code-search` skill that nudges Claude to prefer `search_code` over `Grep`/`Glob` for semantic queries, and
+- a `PostToolUse` hook that auto-reindexes after every `Edit`/`Write`/`MultiEdit`.
+
+See [`plugin/README.md`](plugin/README.md) for the full layout.
+
+**Claude Code (manual, no plugin):**
 
 ```bash
 claude mcp add gemdex \
@@ -133,6 +136,21 @@ Search for the websocket reconnection logic.
 
 Done. The agent now has a tiny, accurate retrieval layer between itself and your code.
 
+### 4. Nudge your agent to actually use it
+
+Agents won't always reach for a new tool on their own. Drop the excerpt below into your top-level `AGENTS.md` (Codex CLI, Cursor, Windsurf, etc.) and/or `CLAUDE.md` so every session starts with the right instinct:
+
+```markdown
+## Code search
+
+This repo is indexed by **Gemdex** (MCP server `gemdex`). Before grepping, reading large
+files, or guessing at where something lives, call the `search_code` MCP tool with a
+natural-language query (e.g. "websocket reconnection logic", "JWT refresh handler").
+Use `index_codebase` once per fresh checkout and `get_indexing_status` if results
+look stale. Prefer Gemdex over `rg`/`grep` for semantic questions; fall back to
+`rg` only for exact-string lookups.
+```
+
 ## How it works
 
 <p align="center">
@@ -154,7 +172,7 @@ Done. The agent now has a tiny, accurate retrieval layer between itself and your
 | 📐 **Matryoshka dimensions** | drop embedding size to 1536 / 768 / 256 for smaller indexes and faster queries |
 | ♻️ **Incremental sync** | Merkle-tree change detection re-embeds only what moved |
 | ⚡ **Trigger watcher** | `touch ~/.gemdex/.sync-trigger` forces an immediate re-sync — perfect for editor hooks |
-| ☁️ **Cloud or local** | works with self-hosted Milvus *and* Zilliz Cloud out of the box |
+| 🏠 **Local-only** | self-hosted Milvus; no SaaS dependency, no telemetry |
 | 🧰 **4 MCP tools** | `index_codebase`, `search_code`, `clear_index`, `get_indexing_status` |
 | 🔧 **Configurable** | custom extensions, custom ignore patterns, custom embedding model, custom Gemini base URL |
 
@@ -224,8 +242,8 @@ const results = await context.semanticSearch('./my-project', 'how does auth work
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `GEMINI_API_KEY` | yes | — | Google AI Studio API key |
-| `MILVUS_ADDRESS` | one of these | — | `host:port` of Milvus (e.g. `localhost:19530`) |
-| `MILVUS_TOKEN` | one of these | — | Zilliz Cloud token (also resolves the address) |
+| `MILVUS_ADDRESS` | yes | `localhost:19530` | `host:port` of your Milvus instance |
+| `MILVUS_TOKEN` | no | — | Auth token for Milvus instances with authentication enabled |
 | `EMBEDDING_MODEL` | no | `gemini-embedding-2` | Override Gemini embedding model |
 | `EMBEDDING_DIMENSION` | no | model default | Force Matryoshka-resized dimension (256/768/1536/3072) |
 | `EMBEDDING_BATCH_SIZE` | no | 100 | Texts per embed request |

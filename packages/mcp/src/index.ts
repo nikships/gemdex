@@ -60,7 +60,7 @@ class ContextMcpServer {
 
         // Initialize vector database
         const vectorDatabase = new MilvusVectorDatabase({
-            address: config.milvusAddress,
+            address: config.milvusAddress || 'localhost:19530',
             ...(config.milvusToken && { token: config.milvusToken })
         });
 

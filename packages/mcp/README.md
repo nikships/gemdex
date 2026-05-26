@@ -42,7 +42,8 @@ claude mcp add gemdex \
 | Variable | Description |
 |----------|-------------|
 | `GEMINI_API_KEY` | Google AI Studio API key |
-| `MILVUS_ADDRESS` *or* `MILVUS_TOKEN` | Milvus location (`host:port`) or Zilliz Cloud token |
+| `MILVUS_ADDRESS` | Milvus location (`host:port`, defaults to `localhost:19530`) |
+| `MILVUS_TOKEN` | *(optional)* Auth token for Milvus instances with authentication enabled |
 
 See the [main repo](https://github.com/anand-92/gemdex) for all environment variables and configuration options.
 

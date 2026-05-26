@@ -19,10 +19,9 @@ import {
     HybridSearchResult,
     COLLECTION_LIMIT_MESSAGE
 } from './types';
-import { ClusterManager } from './zilliz-utils';
 
 export interface MilvusRestfulConfig {
-    address?: string;
+    address: string;
     token?: string;
     username?: string;
     password?: string;
@@ -87,22 +86,14 @@ export class MilvusRestfulVectorDatabase implements VectorDatabase {
     }
 
     /**
-     * Resolve address from config or token
-     * Common logic for both gRPC and REST implementations
+     * Resolve Milvus address from config.
      */
     protected async resolveAddress(): Promise<string> {
-        let finalConfig = { ...this.config };
-
-        // If address is not provided, get it using token
-        if (!finalConfig.address && finalConfig.token) {
-            finalConfig.address = await ClusterManager.getAddressFromToken(finalConfig.token);
+        if (!this.config.address) {
+            throw new Error('MILVUS_ADDRESS is required (e.g. "localhost:19530")');
         }
 
-        if (!finalConfig.address) {
-            throw new Error('Address is required and could not be resolved from token');
-        }
-
-        return finalConfig.address;
+        return this.config.address;
     }
 
     /**
