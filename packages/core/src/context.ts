@@ -49,9 +49,7 @@ const DEFAULT_SUPPORTED_EXTENSIONS = [
 
 const MULTIMODAL_SUPPORTED_EXTENSIONS = [
     '.pdf',
-    '.png', '.jpg', '.jpeg', '.webp', '.gif',
-    '.mp3', '.wav', '.m4a',
-    '.mp4', '.mov'
+    '.png', '.jpg', '.jpeg', '.webp', '.gif'
 ];
 
 const MEDIA_MIME_TYPES: Record<string, string> = {
@@ -61,11 +59,6 @@ const MEDIA_MIME_TYPES: Record<string, string> = {
     '.jpeg': 'image/jpeg',
     '.webp': 'image/webp',
     '.gif': 'image/gif',
-    '.mp3': 'audio/mpeg',
-    '.wav': 'audio/wav',
-    '.m4a': 'audio/mp4',
-    '.mp4': 'video/mp4',
-    '.mov': 'video/quicktime',
 };
 
 const DEFAULT_INLINE_MEDIA_LIMIT_BYTES = 20 * 1024 * 1024;
@@ -165,6 +158,13 @@ export class Context {
         this.vectorDatabase = config.vectorDatabase;
 
         this.codeSplitter = config.codeSplitter || new AstCodeSplitter(2500, 300);
+
+        if (this.isMultimodalIndexingRequested() && !this.embedding.isMultimodal()) {
+            throw new Error(
+                `INDEX_MULTIMODAL=true requires a media-capable embedding model/provider. ` +
+                `Use Gemini gemini-embedding-2 for PDF and image indexing. Current provider: ${this.embedding.getProvider()}.`
+            );
+        }
 
         // Load custom extensions from environment variables
         const envCustomExtensions = this.getCustomExtensionsFromEnv();
@@ -1102,18 +1102,17 @@ export class Context {
             '.jpg': 'image',
             '.jpeg': 'image',
             '.webp': 'image',
-            '.gif': 'image',
-            '.mp3': 'audio',
-            '.wav': 'audio',
-            '.m4a': 'audio',
-            '.mp4': 'video',
-            '.mov': 'video'
+            '.gif': 'image'
         };
         return languageMap[ext] || 'text';
     }
 
-    private isMultimodalIndexingEnabled(): boolean {
+    private isMultimodalIndexingRequested(): boolean {
         return envManager.get('INDEX_MULTIMODAL')?.toLowerCase() === 'true';
+    }
+
+    private isMultimodalIndexingEnabled(): boolean {
+        return this.isMultimodalIndexingRequested() && this.embedding.isMultimodal();
     }
 
     private isMediaExtension(ext: string): boolean {
@@ -1179,11 +1178,9 @@ export class Context {
         }];
     }
 
-    private getMediaType(ext: string): 'pdf' | 'image' | 'audio' | 'video' {
+    private getMediaType(ext: string): 'pdf' | 'image' {
         if (ext === '.pdf') return 'pdf';
-        if (['.png', '.jpg', '.jpeg', '.webp', '.gif'].includes(ext)) return 'image';
-        if (['.mp3', '.wav', '.m4a'].includes(ext)) return 'audio';
-        return 'video';
+        return 'image';
     }
 
     /**

@@ -9,6 +9,10 @@ class RecordingEmbedding extends Embedding {
     protected maxTokens = 8192;
     public batches: EmbeddingContent[][] = [];
 
+    constructor(private readonly multimodal = false) {
+        super();
+    }
+
     async detectDimension(): Promise<number> {
         return 3;
     }
@@ -36,6 +40,10 @@ class RecordingEmbedding extends Embedding {
 
     getProvider(): string {
         return 'recording';
+    }
+
+    isMultimodal(): boolean {
+        return this.multimodal;
     }
 }
 
@@ -119,7 +127,7 @@ describe('Context multimodal indexing', () => {
             Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=', 'base64')
         );
 
-        const embedding = new RecordingEmbedding();
+        const embedding = new RecordingEmbedding(true);
         const vectorDatabase = createVectorDatabase();
         const context = new Context({
             embedding,
@@ -146,5 +154,14 @@ describe('Context multimodal indexing', () => {
         expect(inlineInputs.map((input) => input.inlineData.mimeType)).toEqual(
             expect.arrayContaining(['application/pdf', 'image/png'])
         );
+    });
+
+    it('fails early when multimodal indexing is enabled with a text-only embedding provider', async () => {
+        process.env.INDEX_MULTIMODAL = 'true';
+
+        expect(() => new Context({
+            embedding: new RecordingEmbedding(false),
+            vectorDatabase: createVectorDatabase(),
+        })).toThrow(/requires a media-capable embedding model\/provider/);
     });
 });

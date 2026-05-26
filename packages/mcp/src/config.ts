@@ -104,9 +104,7 @@ Optional:
   EMBEDDING_MODEL         Gemini model name (default: gemini-embedding-2)
                           Supported: gemini-embedding-2, gemini-embedding-001
   GEMINI_BASE_URL         Custom Gemini base URL
-  INDEX_MULTIMODAL        true|false (default: false). Enables PDF/image/audio/video indexing.
-  MULTIMODAL_INLINE_LIMIT_BYTES
-                          Max media file size for inline embeddings (default: 20971520).
+  INDEX_MULTIMODAL        true|false (default: false). Enables PDF/image indexing with gemini-embedding-2.
   MILVUS_ADDRESS          Milvus host:port (default: resolved from MILVUS_TOKEN if available)
   MILVUS_TOKEN            Milvus auth token (also used for cloud address resolution)
   CODE_CHUNKS_COLLECTION_NAME_OVERRIDE

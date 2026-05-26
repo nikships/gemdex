@@ -98,4 +98,11 @@ export abstract class Embedding {
      * @returns Provider name
      */
     abstract getProvider(): string;
+
+    /**
+     * Whether this embedding provider/model accepts inline non-text content.
+     */
+    isMultimodal(): boolean {
+        return false;
+    }
 }

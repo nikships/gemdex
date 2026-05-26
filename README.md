@@ -231,8 +231,7 @@ const results = await context.semanticSearch('./my-project', 'how does auth work
 | `EMBEDDING_BATCH_SIZE` | no | 100 | Texts per embed request |
 | `GEMINI_BASE_URL` | no | Google default | Custom Gemini endpoint |
 | `HYBRID_MODE` | no | `true` | Disable to use dense-only vector search |
-| `INDEX_MULTIMODAL` | no | `false` | Opt in to PDF/image/audio/video indexing (`.pdf`, `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.mp3`, `.wav`, `.m4a`, `.mp4`, `.mov`) |
-| `MULTIMODAL_INLINE_LIMIT_BYTES` | no | `20971520` | Skip media files larger than this inline embedding limit |
+| `INDEX_MULTIMODAL` | no | `false` | Opt in to PDF and image indexing (`.pdf`, `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`) with `gemini-embedding-2` |
 | `CUSTOM_EXTENSIONS` | no | — | Comma-separated extra file extensions (`.vue,.svelte`) |
 | `CUSTOM_IGNORE_PATTERNS` | no | — | Comma-separated extra ignore globs |
 | `CODE_CHUNKS_COLLECTION_NAME_OVERRIDE` | no | — | Readable prefix for Milvus collection names |

@@ -77,8 +77,8 @@ export class GeminiEmbedding extends Embedding {
                 typeof content === 'string'
                     ? { text: this.preprocessText(content) }
                     : {
-                        inline_data: {
-                            mime_type: content.inlineData.mimeType,
+                        inlineData: {
+                            mimeType: content.inlineData.mimeType,
                             data: content.inlineData.data,
                         },
                     },
@@ -118,6 +118,10 @@ export class GeminiEmbedding extends Embedding {
 
     getProvider(): string {
         return 'Gemini';
+    }
+
+    isMultimodal(): boolean {
+        return this.config.model === 'gemini-embedding-2';
     }
 
     setModel(model: string): void {
