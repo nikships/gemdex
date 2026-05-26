@@ -29,37 +29,6 @@ export class ToolHandlers {
     }
 
     /**
-     * Query Milvus for the real row count of a codebase's collection.
-     * Returns null if the count cannot be determined — callers must NOT write a
-     * snapshot entry in that case. Writing { indexedFiles: 0, totalChunks: 0,
-     * status: 'completed' } for an unknown-state collection poisons the client:
-     * the client treats 0/0 as "not indexed" and triggers force reindex, which
-     * deletes real data and rewrites 0/0 — an infinite loop. See Issue #295.
-     */
-    private async queryCollectionStats(codebasePath: string): Promise<{ indexedFiles: number; totalChunks: number } | null> {
-        try {
-            const collectionName = this.context.getCollectionName(codebasePath);
-            const rowCount = await this.context.getVectorDatabase().getCollectionRowCount(collectionName);
-            if (rowCount < 0) {
-                console.warn(`[SNAPSHOT-RECOVERY] Row count unknown for '${codebasePath}', skipping recovery write`);
-                return null;
-            }
-            if (rowCount === 0) {
-                console.warn(`[SNAPSHOT-RECOVERY] Collection '${collectionName}' truly empty — NOT writing recovered entry (would poison client)`);
-                return null;
-            }
-            // rowCount is chunk count, not file count. Without a metadata query
-            // we don't have the real file count; the snapshot will be corrected
-            // on the next full index. Using rowCount for both is imprecise but
-            // keeps the state non-zero so the client doesn't misread it as empty.
-            return { indexedFiles: rowCount, totalChunks: rowCount };
-        } catch (error) {
-            console.warn(`[SNAPSHOT-RECOVERY] Failed to query stats for '${codebasePath}':`, error);
-            return null;
-        }
-    }
-
-    /**
      * One-shot startup validation: find any legacy 0/0+completed entries on disk
      * (left over from old MCP versions, v1 snapshot migrations, or pre-fix recovery
      * paths) and either heal them with the real Milvus row count or remove them
@@ -116,12 +85,10 @@ export class ToolHandlers {
                 }
 
                 if (rowCount > 0) {
-                    // Heal: rewrite with real row count. rowCount is chunk count;
-                    // without a cheap file-count query we reuse it for both fields.
-                    // Imprecise but keeps the state non-zero and will be corrected
-                    // on the next full index.
+                    // Heal only the chunk count. Row count is chunk count, not
+                    // file count, so never backfill indexedFiles from it.
                     this.snapshotManager.setCodebaseIndexed(codebasePath, {
-                        indexedFiles: rowCount,
+                        indexedFiles: 0,
                         totalChunks: rowCount,
                         status: 'completed' as const,
                     });
@@ -288,22 +255,16 @@ export class ToolHandlers {
                 }
             }
 
-            // Add cloud codebases that are missing from local snapshot (recovery).
-            // Query Milvus for the real row count — if unknown/empty, skip the write
-            // so we don't persist a poisoning 0/0+completed entry (Issue #295).
+            const indexingCodebases = new Set(this.snapshotManager.getIndexingCodebases());
+
+            // Do not recover missing local snapshot entries from Milvus row
+            // counts. A collection can exist while indexing is still in flight,
+            // and row count only proves how many chunks have landed so far.
             for (const cloudCodebase of cloudCodebases) {
-                if (!localCodebases.has(cloudCodebase)) {
-                    const stats = await this.queryCollectionStats(cloudCodebase);
-                    if (stats) {
-                        this.snapshotManager.setCodebaseIndexed(cloudCodebase, {
-                            ...stats,
-                            status: 'completed' as const
-                        });
-                        hasChanges = true;
-                        console.log(`[SYNC-CLOUD] ➕ Recovered codebase from cloud: ${cloudCodebase} (rows=${stats.totalChunks})`);
-                    } else {
-                        console.log(`[SYNC-CLOUD] ⏭️  Skipped recovery for ${cloudCodebase} (row count unknown or zero)`);
-                    }
+                if (!localCodebases.has(cloudCodebase) && indexingCodebases.has(cloudCodebase)) {
+                    console.log(`[SYNC-CLOUD] ⏭️  Skipped recovery for actively indexing codebase: ${cloudCodebase}`);
+                } else if (!localCodebases.has(cloudCodebase)) {
+                    console.log(`[SYNC-CLOUD] ⏭️  Skipped recovery for cloud-only codebase without explicit completion marker: ${cloudCodebase}`);
                 }
             }
 
@@ -396,17 +357,7 @@ export class ToolHandlers {
             const vectorDbHasIndex = await this.context.hasIndex(absolutePath);
             if (snapshotHasIndex !== vectorDbHasIndex) {
                 if (vectorDbHasIndex && !snapshotHasIndex) {
-                    // Query Milvus for real row count. If unknown/empty, log and move on
-                    // without writing 0/0+completed (which would trigger the force-reindex
-                    // loop in Issue #295). The user is about to (re)index anyway.
-                    const stats = await this.queryCollectionStats(absolutePath);
-                    if (stats) {
-                        console.warn(`[INDEX-VALIDATION] Recovering missing snapshot for '${absolutePath}' (rows=${stats.totalChunks})`);
-                        this.snapshotManager.setCodebaseIndexed(absolutePath, { ...stats, status: 'completed' as const });
-                        this.snapshotManager.saveCodebaseSnapshot();
-                    } else {
-                        console.warn(`[INDEX-VALIDATION] VectorDB reports index for '${absolutePath}' but row count unknown/zero — not writing snapshot entry`);
-                    }
+                    console.warn(`[INDEX-VALIDATION] VectorDB reports index for '${absolutePath}' but snapshot is missing — not recovering from row count`);
                 } else if (!vectorDbHasIndex && snapshotHasIndex) {
                     console.warn(`[INDEX-VALIDATION] Clearing stale snapshot for '${absolutePath}'`);
                     this.snapshotManager.removeCodebaseCompletely(absolutePath);
@@ -692,28 +643,18 @@ export class ToolHandlers {
 
             if (!isIndexed && !isIndexing) {
                 // Fallback: check VectorDB directly in case snapshot is out of sync.
-                // Only recover the snapshot when we can confirm a real row count —
-                // writing 0/0+completed for an unverifiable collection poisons the
-                // client into a force-reindex loop (Issue #295).
+                // A collection with rows is not an indexing completion marker, so
+                // do not recover the snapshot or search it as completed here.
                 const hasVectorIndex = await this.context.hasIndex(absolutePath);
                 if (hasVectorIndex) {
-                    const stats = await this.queryCollectionStats(absolutePath);
-                    if (stats) {
-                        console.warn(`[SEARCH] Snapshot missing but VectorDB has index for '${absolutePath}', recovering snapshot (rows=${stats.totalChunks})`);
-                        this.snapshotManager.setCodebaseIndexed(absolutePath, { ...stats, status: 'completed' as const });
-                        this.snapshotManager.saveCodebaseSnapshot();
-                        searchCodebasePath = absolutePath;
-                        isIndexed = true;
-                        // Continue with search (don't return error)
-                    } else {
-                        return {
-                            content: [{
-                                type: "text",
-                                text: `Error: Codebase '${absolutePath}' is not indexed. Please index it first using the index_codebase tool.`
-                            }],
-                            isError: true
-                        };
-                    }
+                    console.warn(`[SEARCH] Snapshot missing but VectorDB has index for '${absolutePath}' — not treating row count as completed indexing`);
+                    return {
+                        content: [{
+                            type: "text",
+                            text: `Error: Codebase '${absolutePath}' is not indexed. Please index it first using the index_codebase tool.`
+                        }],
+                        isError: true
+                    };
                 } else {
                     return {
                         content: [{
