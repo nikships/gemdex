@@ -4,6 +4,15 @@ export interface EmbeddingVector {
     dimension: number;
 }
 
+export interface InlineEmbeddingData {
+    mimeType: string;
+    data: string;
+}
+
+export type EmbeddingContent = string | {
+    inlineData: InlineEmbeddingData;
+};
+
 /**
  * Abstract base class for embedding implementations
  */
@@ -63,6 +72,22 @@ export abstract class Embedding {
     abstract embedBatch(texts: string[]): Promise<EmbeddingVector[]>;
 
     /**
+     * Generate embedding vectors for text or inline binary media.
+     * Providers that support media should override this method. The default
+     * keeps existing text-only embedders working without changing embedBatch.
+     */
+    async embedContentBatch(contents: EmbeddingContent[]): Promise<EmbeddingVector[]> {
+        const texts = contents.map((content) => {
+            if (typeof content !== 'string') {
+                throw new Error(`${this.getProvider()} embedding does not support inline media content`);
+            }
+            return content;
+        });
+
+        return this.embedBatch(texts);
+    }
+
+    /**
      * Get embedding vector dimension
      * @returns Vector dimension
      */
@@ -73,4 +98,4 @@ export abstract class Embedding {
      * @returns Provider name
      */
     abstract getProvider(): string;
-} 
+}

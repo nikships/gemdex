@@ -8,6 +8,7 @@ import {
     EmbeddingVector,
     GeminiEmbedding
 } from './embedding';
+import type { EmbeddingContent } from './embedding';
 import {
     VectorDatabase,
     VectorDocument,
@@ -45,6 +46,29 @@ const DEFAULT_SUPPORTED_EXTENSIONS = [
     // '.txt',  '.json', '.yaml', '.yml', '.xml', '.html', '.htm',
     // '.css', '.scss', '.less', '.sql', '.sh', '.bash', '.env'
 ];
+
+const MULTIMODAL_SUPPORTED_EXTENSIONS = [
+    '.pdf',
+    '.png', '.jpg', '.jpeg', '.webp', '.gif',
+    '.mp3', '.wav', '.m4a',
+    '.mp4', '.mov'
+];
+
+const MEDIA_MIME_TYPES: Record<string, string> = {
+    '.pdf': 'application/pdf',
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.webp': 'image/webp',
+    '.gif': 'image/gif',
+    '.mp3': 'audio/mpeg',
+    '.wav': 'audio/wav',
+    '.m4a': 'audio/mp4',
+    '.mp4': 'video/mp4',
+    '.mov': 'video/quicktime',
+};
+
+const DEFAULT_INLINE_MEDIA_LIMIT_BYTES = 20 * 1024 * 1024;
 
 const DEFAULT_IGNORE_PATTERNS = [
     // Common build output and dependency directories
@@ -144,10 +168,12 @@ export class Context {
 
         // Load custom extensions from environment variables
         const envCustomExtensions = this.getCustomExtensionsFromEnv();
+        const multimodalExtensions = this.isMultimodalIndexingEnabled() ? MULTIMODAL_SUPPORTED_EXTENSIONS : [];
 
         // Combine default extensions with config extensions and env extensions
         const allSupportedExtensions = [
             ...DEFAULT_SUPPORTED_EXTENSIONS,
+            ...multimodalExtensions,
             ...(config.supportedExtensions || []),
             ...(config.customExtensions || []),
             ...envCustomExtensions
@@ -172,6 +198,9 @@ export class Context {
         console.log(`[Context] 🔧 Initialized with ${this.supportedExtensions.length} supported extensions and ${this.ignorePatterns.length} ignore patterns`);
         if (envCustomExtensions.length > 0) {
             console.log(`[Context] 📎 Loaded ${envCustomExtensions.length} custom extensions from environment: ${envCustomExtensions.join(', ')}`);
+        }
+        if (multimodalExtensions.length > 0) {
+            console.log(`[Context] 🖼️ Multimodal indexing enabled for: ${multimodalExtensions.join(', ')}`);
         }
         if (envCustomIgnorePatterns.length > 0) {
             console.log(`[Context] 🚫 Loaded ${envCustomIgnorePatterns.length} custom ignore patterns from environment: ${envCustomIgnorePatterns.join(', ')}`);
@@ -587,7 +616,8 @@ export class Context {
                 startLine: result.document.startLine,
                 endLine: result.document.endLine,
                 language: result.document.metadata.language || 'unknown',
-                score: result.score
+                score: result.score,
+                metadata: result.document.metadata
             }));
 
             const dedupedResults = this.deduplicateResults(results);
@@ -616,7 +646,8 @@ export class Context {
                 startLine: result.document.startLine,
                 endLine: result.document.endLine,
                 language: result.document.metadata.language || 'unknown',
-                score: result.score
+                score: result.score,
+                metadata: result.document.metadata
             }));
 
             const dedupedResults = this.deduplicateResults(results);
@@ -813,7 +844,7 @@ export class Context {
                 if (entry.isDirectory()) {
                     await traverseDirectory(fullPath);
                 } else if (entry.isFile()) {
-                    const ext = path.extname(entry.name);
+                    const ext = path.extname(entry.name).toLowerCase();
                     if (supportedExtensions.includes(ext)) {
                         files.push(fullPath);
                     }
@@ -860,15 +891,25 @@ export class Context {
             const filePath = filePaths[i];
 
             try {
-                const content = await fs.promises.readFile(filePath, 'utf-8');
-                const language = this.getLanguageFromExtension(path.extname(filePath));
-                const chunks = await splitter.split(content, language, filePath);
+                const ext = path.extname(filePath).toLowerCase();
+                let chunks: CodeChunk[];
+                let contentLength = 0;
+
+                if (this.isMediaExtension(ext)) {
+                    chunks = await this.createMediaChunks(filePath);
+                    contentLength = chunks.reduce((sum, chunk) => sum + chunk.content.length, 0);
+                } else {
+                    const content = await fs.promises.readFile(filePath, 'utf-8');
+                    contentLength = content.length;
+                    const language = this.getLanguageFromExtension(ext);
+                    chunks = await splitter.split(content, language, filePath);
+                }
 
                 // Log files with many chunks or large content
                 if (chunks.length > 50) {
-                    console.warn(`[Context] ⚠️  File ${filePath} generated ${chunks.length} chunks (${Math.round(content.length / 1024)}KB)`);
-                } else if (content.length > 100000) {
-                    console.log(`📄 Large file ${filePath}: ${Math.round(content.length / 1024)}KB -> ${chunks.length} chunks`);
+                    console.warn(`[Context] ⚠️  File ${filePath} generated ${chunks.length} chunks (${Math.round(contentLength / 1024)}KB)`);
+                } else if (contentLength > 100000) {
+                    console.log(`📄 Large file ${filePath}: ${Math.round(contentLength / 1024)}KB -> ${chunks.length} chunks`);
                 }
 
                 // Add chunks to buffer
@@ -962,8 +1003,8 @@ export class Context {
         const isHybrid = this.getIsHybrid();
 
         // Generate embedding vectors
-        const chunkContents = chunks.map(chunk => chunk.content);
-        const embeddings = await this.embedding.embedBatch(chunkContents);
+        const chunkContents = chunks.map(chunk => chunk.embeddingContent || chunk.content);
+        const embeddings = await this.embedding.embedContentBatch(chunkContents);
 
         if (isHybrid === true) {
             // Create hybrid vector documents
@@ -973,7 +1014,7 @@ export class Context {
                 }
 
                 const relativePath = path.relative(codebasePath, chunk.metadata.filePath);
-                const fileExtension = path.extname(chunk.metadata.filePath);
+                const fileExtension = path.extname(chunk.metadata.filePath).toLowerCase();
                 const { filePath, startLine, endLine, ...restMetadata } = chunk.metadata;
 
                 return {
@@ -1003,7 +1044,7 @@ export class Context {
                 }
 
                 const relativePath = path.relative(codebasePath, chunk.metadata.filePath);
-                const fileExtension = path.extname(chunk.metadata.filePath);
+                const fileExtension = path.extname(chunk.metadata.filePath).toLowerCase();
                 const { filePath, startLine, endLine, ...restMetadata } = chunk.metadata;
 
                 return {
@@ -1055,9 +1096,94 @@ export class Context {
             '.mm': 'objective-c',
             '.dart': 'dart',
             '.sol': 'solidity',
-            '.ipynb': 'jupyter'
+            '.ipynb': 'jupyter',
+            '.pdf': 'pdf',
+            '.png': 'image',
+            '.jpg': 'image',
+            '.jpeg': 'image',
+            '.webp': 'image',
+            '.gif': 'image',
+            '.mp3': 'audio',
+            '.wav': 'audio',
+            '.m4a': 'audio',
+            '.mp4': 'video',
+            '.mov': 'video'
         };
         return languageMap[ext] || 'text';
+    }
+
+    private isMultimodalIndexingEnabled(): boolean {
+        return envManager.get('INDEX_MULTIMODAL')?.toLowerCase() === 'true';
+    }
+
+    private isMediaExtension(ext: string): boolean {
+        return Object.prototype.hasOwnProperty.call(MEDIA_MIME_TYPES, ext);
+    }
+
+    private getInlineMediaLimitBytes(): number {
+        const configured = parseInt(envManager.get('MULTIMODAL_INLINE_LIMIT_BYTES') || '', 10);
+        return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_INLINE_MEDIA_LIMIT_BYTES;
+    }
+
+    private async createMediaChunks(filePath: string): Promise<CodeChunk[]> {
+        if (!this.isMultimodalIndexingEnabled()) {
+            throw new Error(`Media file ${filePath} requires INDEX_MULTIMODAL=true`);
+        }
+
+        const ext = path.extname(filePath).toLowerCase();
+        const mimeType = MEDIA_MIME_TYPES[ext];
+        if (!mimeType) {
+            throw new Error(`Unsupported media extension: ${ext}`);
+        }
+
+        const stats = await fs.promises.stat(filePath);
+        const inlineLimit = this.getInlineMediaLimitBytes();
+        if (stats.size > inlineLimit) {
+            throw new Error(`Media file is ${stats.size} bytes, above MULTIMODAL_INLINE_LIMIT_BYTES=${inlineLimit}`);
+        }
+
+        const data = await fs.promises.readFile(filePath);
+        const mediaType = this.getMediaType(ext);
+        const displayName = mediaType === 'pdf'
+            ? `PDF page 1`
+            : `${mediaType.charAt(0).toUpperCase()}${mediaType.slice(1)} file`;
+        const content = [
+            `${displayName}: ${path.basename(filePath)}`,
+            mediaType === 'pdf' ? 'Page: 1' : undefined,
+            `MIME type: ${mimeType}`,
+            `Path: ${filePath}`
+        ].filter(Boolean).join('\n');
+
+        const metadata: CodeChunk['metadata'] = {
+            startLine: 1,
+            endLine: 1,
+            language: mediaType,
+            filePath,
+            mediaType,
+            mimeType,
+            byteLength: stats.size,
+        };
+        if (mediaType === 'pdf') {
+            metadata.page = 1;
+        }
+
+        return [{
+            content,
+            embeddingContent: {
+                inlineData: {
+                    mimeType,
+                    data: data.toString('base64'),
+                },
+            } satisfies EmbeddingContent,
+            metadata,
+        }];
+    }
+
+    private getMediaType(ext: string): 'pdf' | 'image' | 'audio' | 'video' {
+        if (ext === '.pdf') return 'pdf';
+        if (['.png', '.jpg', '.jpeg', '.webp', '.gif'].includes(ext)) return 'image';
+        if (['.mp3', '.wav', '.m4a'].includes(ext)) return 'audio';
+        return 'video';
     }
 
     /**

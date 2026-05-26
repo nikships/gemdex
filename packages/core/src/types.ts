@@ -11,4 +11,5 @@ export interface SemanticSearchResult {
     endLine: number;
     language: string;
     score: number;
+    metadata?: Record<string, any>;
 }

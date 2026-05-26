@@ -1,11 +1,15 @@
+import type { EmbeddingContent } from '../embedding';
+
 // Interface definitions
 export interface CodeChunk {
     content: string;
+    embeddingContent?: EmbeddingContent;
     metadata: {
         startLine: number;
         endLine: number;
         language?: string;
         filePath?: string;
+        [key: string]: any;
     };
 }
 
