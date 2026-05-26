@@ -38,8 +38,13 @@ function translateFilter(expr: string): string {
         out = out.replace(re, `\`${col}\``);
     }
     // Existing callers may pass Python-style `==` for equality; LanceDB /
-    // DataFusion only recognise `=`. Translate while preserving `!=`, `<=`, `>=`.
-    out = out.replace(/([^!<>=])==([^=])/g, '$1=$2');
+    // DataFusion only recognise `=`. Translate while preserving `!=`, `<=`,
+    // `>=`, `===` (left alone — not a valid operator), and the contents of
+    // string literals (which may legitimately contain `==`).
+    out = out.replace(
+        /'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|!=|<=|>=|===|==/g,
+        match => (match === '==' ? '=' : match),
+    );
     return out;
 }
 
@@ -61,6 +66,9 @@ export class LanceDBVectorDatabase implements VectorDatabase {
     private connectionPromise: Promise<lancedb.Connection>;
     /** Collections where the FTS index on `content` has been built (per process). */
     private ftsBuilt = new Set<string>();
+    /** In-flight FTS index creation promises, keyed by collection. Deduplicates
+     *  concurrent `ensureFtsIndex` calls so we don't race `createIndex`. */
+    private ftsPromises = new Map<string, Promise<void>>();
 
     constructor(config: LanceDBConfig = {}) {
         const uri = config.uri ?? path.join(os.homedir(), '.gemdex', 'lance');
@@ -91,21 +99,30 @@ export class LanceDBVectorDatabase implements VectorDatabase {
 
     private async ensureFtsIndex(table: lancedb.Table, collectionName: string): Promise<void> {
         if (this.ftsBuilt.has(collectionName)) return;
-        try {
-            const indices = await table.listIndices();
-            const hasFts = indices.some((idx: any) => {
-                const columns = idx?.columns ?? idx?.column ?? [];
-                const arr = Array.isArray(columns) ? columns : [columns];
-                return arr.includes('content');
-            });
-            if (!hasFts) {
-                console.log(`[LanceDB] 🔧 Creating FTS index on 'content' for '${collectionName}'...`);
-                await table.createIndex('content', { config: lancedb.Index.fts() });
-            }
-            this.ftsBuilt.add(collectionName);
-        } catch (error) {
-            console.warn(`[LanceDB] ⚠️  Could not ensure FTS index on '${collectionName}':`, error);
+        let pending = this.ftsPromises.get(collectionName);
+        if (!pending) {
+            pending = (async () => {
+                try {
+                    const indices = await table.listIndices();
+                    const hasFts = indices.some((idx: any) => {
+                        const columns = idx?.columns ?? idx?.column ?? [];
+                        const arr = Array.isArray(columns) ? columns : [columns];
+                        return arr.includes('content');
+                    });
+                    if (!hasFts) {
+                        console.log(`[LanceDB] 🔧 Creating FTS index on 'content' for '${collectionName}'...`);
+                        await table.createIndex('content', { config: lancedb.Index.fts() });
+                    }
+                    this.ftsBuilt.add(collectionName);
+                } catch (error) {
+                    console.warn(`[LanceDB] ⚠️  Could not ensure FTS index on '${collectionName}':`, error);
+                } finally {
+                    this.ftsPromises.delete(collectionName);
+                }
+            })();
+            this.ftsPromises.set(collectionName, pending);
         }
+        return pending;
     }
 
     private rowToDocument(row: StoredRow): VectorDocument {
@@ -167,6 +184,7 @@ export class LanceDBVectorDatabase implements VectorDatabase {
         if (!existing.includes(collectionName)) return;
         await db.dropTable(collectionName);
         this.ftsBuilt.delete(collectionName);
+        this.ftsPromises.delete(collectionName);
         console.log(`[LanceDB] 🗑️  Dropped collection '${collectionName}'.`);
     }
 
@@ -241,36 +259,39 @@ export class LanceDBVectorDatabase implements VectorDatabase {
         const filter = options?.filterExpr?.trim() ? translateFilter(options.filterExpr) : undefined;
         const rrfK = options?.rerank?.params?.k ?? DEFAULT_RRF_K;
 
-        const promises: Promise<{ source: 'dense' | 'fts'; rows: StoredRow[] }>[] = [];
+        // Kick off dense and FTS in parallel. The FTS branch lazily ensures
+        // its index (deduped via `ftsPromises`) and degrades to an empty list
+        // if the search itself fails (e.g. index not yet trained).
+        let densePromise: Promise<StoredRow[]> = Promise.resolve([]);
+        let ftsPromise: Promise<StoredRow[]> = Promise.resolve([]);
 
         if (denseReq) {
             const queryVector = denseReq.data as number[];
             let vecQuery = table.query().nearestTo(queryVector).limit(candidateLimit);
             if (filter) vecQuery = vecQuery.where(filter);
-            promises.push(
-                vecQuery.toArray().then(rows => ({ source: 'dense', rows: rows as StoredRow[] })),
-            );
+            densePromise = vecQuery.toArray() as Promise<StoredRow[]>;
         }
 
         if (sparseReq) {
             const queryText = sparseReq.data as string;
-            await this.ensureFtsIndex(table, collectionName);
-            let ftsQuery = table.query().fullTextSearch(queryText, { columns: ['content'] }).limit(candidateLimit);
-            if (filter) ftsQuery = ftsQuery.where(filter);
-            try {
-                const rows = (await ftsQuery.toArray()) as StoredRow[];
-                promises.push(Promise.resolve({ source: 'fts', rows }));
-            } catch (error) {
-                // FTS will fail if the index hasn't finished building yet (or the
-                // collection is empty). Degrade gracefully to dense-only.
-                console.warn(`[LanceDB] ⚠️  FTS search failed for '${collectionName}'; falling back to dense-only:`, error);
-            }
+            ftsPromise = this.ensureFtsIndex(table, collectionName)
+                .then(async () => {
+                    let ftsQuery = table
+                        .query()
+                        .fullTextSearch(queryText, { columns: ['content'] })
+                        .limit(candidateLimit);
+                    if (filter) ftsQuery = ftsQuery.where(filter);
+                    return (await ftsQuery.toArray()) as StoredRow[];
+                })
+                .catch(error => {
+                    // FTS will fail if the index hasn't finished building yet (or the
+                    // collection is empty). Degrade gracefully to dense-only.
+                    console.warn(`[LanceDB] ⚠️  FTS search failed for '${collectionName}'; falling back to dense-only:`, error);
+                    return [];
+                });
         }
 
-        const [denseResult, ftsResult] = await Promise.all([
-            promises[0] ?? Promise.resolve({ source: 'dense' as const, rows: [] }),
-            promises[1] ?? Promise.resolve({ source: 'fts' as const, rows: [] }),
-        ]);
+        const [denseRows, ftsRows] = await Promise.all([densePromise, ftsPromise]);
 
         // Reciprocal Rank Fusion: score(id) = sum over rankings: 1 / (k + rank)
         const fused = new Map<string, { row: StoredRow; score: number }>();
@@ -287,8 +308,8 @@ export class LanceDBVectorDatabase implements VectorDatabase {
                 }
             });
         };
-        addRanked(denseResult.rows);
-        addRanked(ftsResult.rows);
+        addRanked(denseRows);
+        addRanked(ftsRows);
 
         const sorted = Array.from(fused.values())
             .sort((a, b) => b.score - a.score)

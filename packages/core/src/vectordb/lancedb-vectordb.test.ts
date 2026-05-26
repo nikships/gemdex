@@ -94,6 +94,24 @@ describe('LanceDBVectorDatabase', () => {
         expect(results[0].document.id).toBe('a');
     });
 
+    it('preserves == inside string literals when translating filters', async () => {
+        const collection = 'test_string_literal_equals';
+        await db.createCollection(collection, DIM);
+        // A relativePath that contains '==' inside the literal value — the
+        // filter translator must leave the literal alone and only rewrite
+        // the operator.
+        await db.insert(collection, [
+            makeDoc('a', 1, 'kept', 'src/a==b.ts'),
+            makeDoc('b', 1, 'other', 'src/b.ts'),
+        ]);
+        const results = await db.search(collection, makeVector(1), {
+            topK: 5,
+            filterExpr: `relativePath == 'src/a==b.ts'`,
+        });
+        expect(results).toHaveLength(1);
+        expect(results[0].document.id).toBe('a');
+    });
+
     it('deletes rows by id', async () => {
         const collection = 'test_delete';
         await db.createCollection(collection, DIM);
