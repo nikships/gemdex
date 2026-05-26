@@ -18,10 +18,16 @@ jobs:
     name: Publish changed source to npm
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      # Need write access so the auto-bump step can push the version bump
+      # commit back to main. Without this, `git push` here fails with 403.
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Use the default GITHUB_TOKEN; pushes made with it do NOT re-trigger
+          # this workflow (GitHub policy), so the auto-bump commit won't loop.
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -35,8 +41,56 @@ jobs:
           cache: "pnpm"
           registry-url: "https://registry.npmjs.org"
 
+      - name: Configure git for auto-bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      # Auto-bump policy:
+      #   - Read each package's current version from its package.json.
+      #   - If EITHER package's version already exists on npm, patch-bump BOTH
+      #     packages in lockstep. Keeping versions aligned matters because
+      #     gemdex-mcp depends on gemdex-core via `workspace:*`, which pnpm
+      #     rewrites at publish time to the concrete core version; lockstep
+      #     means `npx gemdex-mcp@X.Y.Z` always pulls a matching core.
+      #   - If neither version is on npm (i.e. a human pre-bumped or this is a
+      #     brand-new version), publish as-is.
+      - name: Auto-bump versions if already published
+        id: bump
+        run: |
+          set -euo pipefail
+          CORE_VERSION=$(node -p "require('./packages/core/package.json').version")
+          MCP_VERSION=$(node -p "require('./packages/mcp/package.json').version")
+          echo "Current versions: core=$CORE_VERSION, mcp=$MCP_VERSION"
+
+          core_exists=""
+          mcp_exists=""
+          if npm view "gemdex-core@$CORE_VERSION" version >/dev/null 2>&1; then
+            core_exists="yes"
+          fi
+          if npm view "gemdex-mcp@$MCP_VERSION" version >/dev/null 2>&1; then
+            mcp_exists="yes"
+          fi
+
+          if [ -n "$core_exists" ] || [ -n "$mcp_exists" ]; then
+            echo "At least one current version is already published; auto-bumping patch on both packages."
+            pnpm --filter gemdex-core exec npm version patch --no-git-tag-version --allow-same-version
+            pnpm --filter gemdex-mcp  exec npm version patch --no-git-tag-version --allow-same-version
+            NEW_CORE=$(node -p "require('./packages/core/package.json').version")
+            NEW_MCP=$(node -p "require('./packages/mcp/package.json').version")
+            echo "Bumped to: core=$NEW_CORE, mcp=$NEW_MCP"
+            echo "bumped=true" >> "$GITHUB_OUTPUT"
+            echo "core=$NEW_CORE" >> "$GITHUB_OUTPUT"
+            echo "mcp=$NEW_MCP"   >> "$GITHUB_OUTPUT"
+          else
+            echo "Neither current version is on npm; publishing as-is."
+            echo "bumped=false" >> "$GITHUB_OUTPUT"
+            echo "core=$CORE_VERSION" >> "$GITHUB_OUTPUT"
+            echo "mcp=$MCP_VERSION"   >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build packages
         run: pnpm build
@@ -62,3 +116,17 @@ jobs:
           else
             pnpm --filter gemdex-mcp publish --access public --no-git-checks
           fi
+
+      # Commit the auto-bump back to main so the repo stays in sync with what
+      # was just published. Marked [skip ci] for defense-in-depth even though
+      # pushes with GITHUB_TOKEN already don't trigger workflows.
+      - name: Push auto-bump commit
+        if: steps.bump.outputs.bumped == 'true'
+        run: |
+          set -euo pipefail
+          git add packages/core/package.json packages/mcp/package.json
+          git commit -m "chore: bump gemdex-core@${{ steps.bump.outputs.core }}, gemdex-mcp@${{ steps.bump.outputs.mcp }} [skip ci]
+
+          Auto-bumped by publish workflow because the prior version was already
+          on npm. See run ${{ github.run_id }}."
+          git push origin HEAD:main
