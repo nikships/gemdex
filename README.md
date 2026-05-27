@@ -117,21 +117,29 @@ Done. The agent now has a tiny, accurate retrieval layer between itself and your
 ```markdown
 ## Code search (Gemdex)
 
-This repo is indexed by **Gemdex** (MCP server `gemdex`). For any question about
-code by meaning or intent — "where does X happen?", "find the retry logic",
-"how is auth handled?" — call the `search_code` MCP tool **before** `Grep`,
-`Read`, or guessing at filenames.
+`gemdex` MCP exposes `search_code` (hybrid semantic + BM25). Prefer it for intent
+queries ("where does X happen?", "find the retry logic"); use `Grep` for known
+strings, symbols, log lines, and file globs. If `search_code` isn't in your
+toolset, the MCP isn't connected — just use `Grep`/`Read` and don't bring
+Gemdex up unless asked.
 
-Workflow:
-1. `search_code(path=<absolute repo path>, query=<natural language>)` first.
-2. If results look stale or empty, call `get_indexing_status`; reindex with
-   `index_codebase` if the codebase isn't covered.
-3. Only fall back to `Grep`/`Glob` for exact-string lookups (known symbols,
-   error literals, log lines, file globs).
-
-Each hit's `Scores:` line shows `dense=#<rank>` (semantic) and `bm25=#<rank>`
-(lexical). If both ranks are weak (>10) or one is `—` with a low fused score,
-re-phrase the query or fall back to `Grep`.
+- **First search this session:** call `get_indexing_status(path=<abs repo path>)`.
+  - `indexed` → go.
+  - `indexing` → search anyway; flag that results may be partial.
+  - `indexfailed` → surface the error, fall back to `Grep`.
+  - `not indexed` → call `index_codebase(path=...)` if the user is actively
+    working in this repo; otherwise just `Grep` — don't auto-index a path the
+    user didn't ask about.
+- **Search:** `search_code(path=..., query=<natural language>, limit=5–15)`.
+- **Read each hit's `Scores:` line** (`fused=… · dense=#N · bm25=#N`). Both
+  ranks ≤ 5 → high confidence. All ranks > 15 → either the codebase doesn't
+  have it OR the index is stale. Disambiguate by `Read`ing the cited
+  `file:line` — if the content has drifted, refresh with
+  `index_codebase(path=..., force=true)` and re-search; otherwise it's a
+  genuine miss, fall back to `Grep`.
+- **Drift during long sessions:** most clients auto-refresh after edits via a
+  `PostToolUse` hook on `~/.gemdex/.sync-trigger`. If yours doesn't, refresh
+  manually when results stop matching reality.
 ```
 
 **For Codex CLI, Cursor, Windsurf, Cline, Continue, Zed** — paste the same snippet into your client's root instructions file. The convention is `AGENTS.md` at the repo root; check your client's docs if unsure.
