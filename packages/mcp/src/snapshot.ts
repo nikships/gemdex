@@ -492,9 +492,24 @@ export class SnapshotManager {
     }
 
     /**
-     * Get complete codebase information
+     * Get complete codebase information. Reads from the on-disk snapshot so
+     * info written by other MCP server processes is visible (the in-memory
+     * map is populated at startup only). Falls back to memory when the file
+     * is missing or unreadable.
      */
     public getCodebaseInfo(codebasePath: string): CodebaseInfo | undefined {
+        try {
+            if (fs.existsSync(this.snapshotFilePath)) {
+                const snapshotData = fs.readFileSync(this.snapshotFilePath, 'utf8');
+                const snapshot: CodebaseSnapshot = JSON.parse(snapshotData);
+                if (this.isV2Format(snapshot)) {
+                    const info = snapshot.codebases[codebasePath];
+                    if (info) return info;
+                }
+            }
+        } catch (error) {
+            console.warn(`[SNAPSHOT-DEBUG] Error reading codebase info from file for ${codebasePath}:`, error);
+        }
         return this.codebaseInfoMap.get(codebasePath);
     }
 

@@ -175,14 +175,27 @@ Gemdex up unless asked.
 | 🧬 **Hybrid retrieval** | dense vector + BM25 (LanceDB FTS) fused via Reciprocal Rank Fusion; switch to dense-only with one env var |
 | 📐 **Matryoshka dimensions** | drop embedding size to 1536 / 768 / 256 for smaller indexes and faster queries |
 | ♻️ **Incremental sync** | Merkle-tree change detection re-embeds only what moved |
-| ⚡ **Trigger watcher** | `touch ~/.gemdex/.sync-trigger` forces an immediate re-sync — perfect for editor hooks |
+| ⚡ **Trigger watcher** | Editor hooks write the workspace path into `~/.gemdex/.sync-trigger`; gemdex scopes the re-sync to that codebase. An empty file (legacy `touch`) still works — it just re-syncs every indexed codebase. |
 | 🪶 **Truly embedded** | LanceDB persists in a single directory; no Docker, no daemon, no SaaS dependency, no telemetry |
 | 🧰 **4 MCP tools** | `index_codebase`, `search_code`, `clear_index`, `get_indexing_status` |
 | 🔧 **Configurable** | custom extensions, custom ignore patterns, custom embedding model, custom Gemini base URL |
 
 ## Auto-reindex on every edit (Claude Code)
 
-Drop this into `~/.claude/settings.json` and the index stays fresh as you save files:
+The easiest path is the bundled plugin (`/plugin install gemdex@gemdex`) — its `PostToolUse` script reads the editor's `cwd` from the hook payload and writes it into `~/.gemdex/.sync-trigger`, so gemdex's watcher re-syncs only the codebase you're editing in.
+
+If you don't want the plugin, you can still wire the hook by hand in `~/.claude/settings.json`. The first form is the new workspace-scoped protocol; the second is the legacy "force a full re-sync" shape and still works:
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      { "matcher": "Edit|Write|MultiEdit",
+        "hooks": [{ "type": "command", "command": "jq -r .cwd > ~/.gemdex/.sync-trigger" }] }
+    ]
+  }
+}
+```
 
 ```json
 {
@@ -195,7 +208,7 @@ Drop this into `~/.claude/settings.json` and the index stays fresh as you save f
 }
 ```
 
-Equivalent hooks work in Cursor, Codex CLI, and any client that can run a shell command on save.
+Equivalent hooks work in Cursor, Codex CLI, and any client that can run a shell command on save — write the editing workspace's absolute path as the first line of `~/.gemdex/.sync-trigger` (or leave it empty to fall back to syncing every indexed codebase).
 
 ## Where Gemdex fits
 
