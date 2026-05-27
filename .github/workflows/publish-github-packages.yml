@@ -1,0 +1,95 @@
+name: Publish to GitHub Packages
+
+# Runs after "Publish npm Packages" finishes successfully so the same
+# (possibly auto-bumped) versions land on both npmjs.org AND GitHub Packages.
+# We mirror under the @anand-92 scope because GitHub Packages' npm registry
+# only accepts scoped names; the canonical unscoped `gemdex-core` and
+# `gemdex-mcp` continue to be the npmjs.org distribution that the plugin
+# manifests reference via `npx -y gemdex-mcp@latest`.
+#
+# `workflow_dispatch` is included so the first publish (which has no
+# upstream run to chain off of) can be kicked off from the Actions UI.
+
+on:
+  workflow_run:
+    workflows: ["Publish npm Packages"]
+    types: [completed]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish scoped packages to GitHub Packages
+    runs-on: ubuntu-latest
+    # Skip if the upstream npm publish failed. workflow_dispatch runs do not
+    # populate workflow_run, so the `!= 'failure'` form passes through manual
+    # invocations.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout latest main
+        uses: actions/checkout@v4
+        with:
+          # workflow_run defaults to the SHA that triggered the upstream
+          # workflow (pre-bump). The upstream npm workflow may have pushed an
+          # auto-bump commit afterwards, so we explicitly fetch the current
+          # tip of main to publish the same version that just went to npm.
+          ref: main
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.4
+
+      - name: Setup Node.js (auth for GitHub Packages)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@anand-92"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build packages
+        run: pnpm build
+
+      - name: Rewrite package.json files for the @anand-92 scope
+        run: node scripts/prepare-gh-packages.mjs
+
+      - name: Refresh workspace graph after rename
+        # The renames invalidate the frozen lockfile for these workspace
+        # entries; a relaxed install reattaches them under their new names so
+        # `pnpm --filter` and `workspace:*` resolution both see the scoped
+        # packages.
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Publish @anand-92/gemdex-core
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./packages/core/package.json').version")
+          if npm view "@anand-92/gemdex-core@$VERSION" version >/dev/null 2>&1; then
+            echo "@anand-92/gemdex-core@$VERSION already on GitHub Packages; skipping."
+          else
+            pnpm --filter @anand-92/gemdex-core publish --no-git-checks
+          fi
+
+      - name: Publish @anand-92/gemdex-mcp
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./packages/mcp/package.json').version")
+          if npm view "@anand-92/gemdex-mcp@$VERSION" version >/dev/null 2>&1; then
+            echo "@anand-92/gemdex-mcp@$VERSION already on GitHub Packages; skipping."
+          else
+            pnpm --filter @anand-92/gemdex-mcp publish --no-git-checks
+          fi
