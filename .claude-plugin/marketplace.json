@@ -10,7 +10,7 @@
             "name": "gemdex",
             "source": "./plugin",
             "description": "Semantic code search via Gemini embeddings + embedded LanceDB + MCP. Bundles the gemdex MCP server, a PostToolUse hook that auto-reindexes after edits, and a skill that nudges Claude to prefer semantic search over Grep/Glob for intent-based queries. No Docker required.",
-            "version": "0.2.0",
+            "version": "0.2.1",
             "homepage": "https://github.com/anand-92/gemdex",
             "license": "MIT",
             "keywords": [
@@ -27,7 +27,7 @@
             "name": "gemdex-droid",
             "source": "./plugin-droid",
             "description": "Droid-native build of Gemdex. Same MCP server + skill as the Claude plugin, but the PostToolUse auto-reindex hook uses Droid's single-`command` shape with `${DROID_PLUGIN_ROOT}` so it actually executes under `droid` (the Claude variant silently drops `args[]`). Install this one if you're on Factory Droid.",
-            "version": "0.2.0",
+            "version": "0.2.1",
             "homepage": "https://github.com/anand-92/gemdex",
             "license": "MIT",
             "keywords": [

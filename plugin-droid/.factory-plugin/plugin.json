@@ -1,7 +1,7 @@
 {
     "name": "gemdex-droid",
     "displayName": "Gemdex — Semantic Code Search (Droid)",
-    "version": "0.2.0",
+    "version": "0.2.1",
     "description": "Droid-native build of Gemdex semantic code search. Same MCP server + skill as the Claude Code plugin, but the PostToolUse auto-reindex hook is written in Droid's single-`command` shape with `${DROID_PLUGIN_ROOT}` so it actually executes under `droid` (the Claude variant silently drops `args[]`).",
     "author": {
         "name": "Nikhil Anand",

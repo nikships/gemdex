@@ -2,7 +2,7 @@
     "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
     "name": "gemdex",
     "displayName": "Gemdex — Semantic Code Search",
-    "version": "0.2.0",
+    "version": "0.2.1",
     "description": "Semantic code search via Gemini embeddings + embedded LanceDB. Ships the gemdex MCP server, a PostToolUse hook that auto-reindexes after edits, and a skill that nudges Claude to prefer semantic search over Grep/Glob for intent-based queries. No Docker required.",
     "author": {
         "name": "Nikhil Anand",
