@@ -46,6 +46,15 @@ Find the retry-with-backoff helper.
 
 …and instead of grep-spraying or stuffing your repo into the prompt, Gemdex hands back the three files that actually implement it.
 
+## 💰 Pricing — it's a no-brainer
+
+> **TL;DR:** Even with heavy daily use, Gemdex caps out around **$4–6/month** in Gemini API usage.
+
+- 🎁 **Already paying for Google AI Pro ($20/mo)?** You get **$10/mo of free Gemini API credit** bundled into the plan — see [Google's announcement](https://blog.google/innovation-and-ai/technology/developers-tools/gdp-premium-ai-pro-ultra/). That credit alone covers Gemdex with room to spare. Adding Gemdex is genuinely free for you.
+- 💸 **Not on the Pro plan?** Still a no-brainer. The few dollars/month Gemdex costs pays itself back many times over by **slashing the tokens your coding agent burns** on every turn — meaning a smaller bill on your Claude / Cursor / Codex / Windsurf subscription *and* faster, more accurate answers from your agent.
+
+Either way: cheaper bills, smarter agents.
+
 ## Quickstart (under a minute)
 
 There is **no setup step** for the vector store anymore — LanceDB is embedded
