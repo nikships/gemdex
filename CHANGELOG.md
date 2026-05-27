@@ -4,6 +4,9 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Added
+- **`gemdex-droid` plugin** — a Droid-native sibling of the Claude Code plugin at `plugin-droid/`. Same MCP server + `code-search` skill, but `hooks/hooks.json` uses Droid's single-`command` shape with `${DROID_PLUGIN_ROOT}` so the PostToolUse auto-reindex hook actually fires under `droid`. The original `gemdex` plugin at `plugin/` is unchanged so Claude Code installs keep working as before.
+
 ## [0.2.0] - 2026-05-26
 
 ### Changed
