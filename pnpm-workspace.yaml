@@ -4,3 +4,15 @@ packages:
 
 onlyBuiltDependencies:
   - "@lancedb/lancedb"
+
+# jest-runtime 30.4.x calls `clearMocksOnScope` on its bundled jest-mock,
+# but no published jest-mock exposes that method (latest is 30.4.1).
+# Pin every jest package to the last release before the mismatch landed.
+overrides:
+  jest: 30.3.0
+  jest-runtime: 30.3.0
+  jest-mock: 30.3.0
+  jest-circus: 30.3.0
+  jest-cli: 30.3.0
+  jest-config: 30.3.0
+  jest-snapshot: 30.3.0

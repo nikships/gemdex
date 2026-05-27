@@ -53,9 +53,9 @@ You'll be prompted for:
 
 ### 2. Auto-reindex hook
 
-`hooks/hooks.json` registers a `PostToolUse` matcher for `Edit | Create | ApplyPatch | Write | MultiEdit` that runs `node "${DROID_PLUGIN_ROOT}/scripts/touch-sync-trigger.js"`. The script `mkdir -p`s `~/.gemdex` and `utimes`-touches `~/.gemdex/.sync-trigger`. Gemdex's built-in `fs.watch` debounces these for 2 s and kicks off an incremental re-index.
+`hooks/hooks.json` registers a `PostToolUse` matcher for `Edit | Create | ApplyPatch | Write | MultiEdit` that runs `node "${DROID_PLUGIN_ROOT}/scripts/touch-sync-trigger.js"`. Droid pipes the hook payload (including `cwd`) to the script on stdin; the script `mkdir -p`s `~/.gemdex` and writes the editor's workspace path into `~/.gemdex/.sync-trigger` as a single line. Gemdex's built-in `fs.watch` debounces those changes for 2 s, reads the workspace line, and runs `reindexByChange` against just the matching indexed codebase. An empty file (e.g. a hand-rolled `touch ~/.gemdex/.sync-trigger` hook from before this change) still works — it falls back to syncing every indexed codebase.
 
-The Node script is cross-platform and never fails the hook — if the touch can't happen, the gemdex periodic background sync still catches the change.
+The Node script is cross-platform and never fails the hook — if the write can't happen, the gemdex periodic background sync still catches the change.
 
 ### 3. Search-preference skill
 
@@ -79,10 +79,11 @@ plugin-droid/
 
 ## Verifying the hook fires
 
-After installing in Droid, run any `Edit`/`Create`/`Write` and check the trigger file's mtime:
+After installing in Droid, run any `Edit`/`Create`/`Write` and check the trigger file:
 
 ```bash
 stat -f "%Sm" ~/.gemdex/.sync-trigger
+cat ~/.gemdex/.sync-trigger
 ```
 
-It should be updated to within a few seconds of your edit. If it isn't, the hook isn't firing — open an issue with `droid --version` and a snippet of the stderr from your session log.
+The mtime should be updated to within a few seconds of your edit, and the contents should be the absolute path of the workspace you were editing in. If the mtime moves but the file is empty, the hook fired but Droid didn't pipe the JSON payload to stdin — open an issue with `droid --version` and a snippet of the stderr from your session log. If nothing moves, the hook isn't firing at all.

@@ -1,7 +1,13 @@
 #!/usr/bin/env node
-// Touch ~/.gemdex/.sync-trigger so the gemdex MCP server kicks off
-// an immediate incremental re-index. Cross-platform replacement for
-// `touch ~/.gemdex/.sync-trigger` used by the Claude Code PostToolUse hook.
+// Write the workspace path into ~/.gemdex/.sync-trigger so the gemdex MCP
+// server kicks off an immediate incremental re-index scoped to just that
+// codebase. Used by the Claude Code PostToolUse hook.
+//
+// Claude Code passes the hook payload as JSON on stdin. We extract `cwd`
+// and write it into the trigger file as a single line. The MCP watcher
+// reads that line and runs `reindexByChange` for the matching indexed
+// codebase only. An empty file is the legacy "no workspace info" signal
+// and the watcher falls back to a sync across every indexed codebase.
 
 const fs = require('node:fs');
 const os = require('node:os');
@@ -10,19 +16,45 @@ const path = require('node:path');
 const dir = path.join(os.homedir(), '.gemdex');
 const file = path.join(dir, '.sync-trigger');
 
+function readStdinSync() {
+    // Avoid blocking when no JSON payload is piped (e.g. manual invocation
+    // from a terminal). isTTY is true exactly when stdin is not a pipe.
+    if (process.stdin.isTTY) return '';
+    try {
+        return fs.readFileSync(0, 'utf8');
+    } catch {
+        return '';
+    }
+}
+
+function extractCwd(stdinText) {
+    if (!stdinText) return '';
+    try {
+        const obj = JSON.parse(stdinText);
+        if (obj && typeof obj.cwd === 'string') {
+            return obj.cwd.trim();
+        }
+    } catch {
+        // Not JSON or malformed — treat as no workspace info.
+    }
+    return '';
+}
+
 try {
     fs.mkdirSync(dir, { recursive: true });
-    const now = new Date();
-    try {
-        // Update mtime if the file already exists (gemdex's fs.watch reacts to this).
-        fs.utimesSync(file, now, now);
-    } catch {
-        // File doesn't exist yet — create it.
-        fs.closeSync(fs.openSync(file, 'a'));
-    }
+    const cwd = extractCwd(readStdinSync());
+    // Write atomically via temp-and-rename so concurrent readers (gemdex's
+    // fs.watch debounce) never see a truncated mid-write file. rename(2) is
+    // atomic on the same filesystem. The temp name includes pid + timestamp
+    // so concurrent hook invocations from independent sessions don't clobber
+    // each other's temp files. The rename to the trigger file is what bumps
+    // its mtime; gemdex's fs.watch reacts to that.
+    const tempFile = `${file}.tmp.${process.pid}.${Date.now()}`;
+    fs.writeFileSync(tempFile, cwd ? `${cwd}\n` : '', 'utf8');
+    fs.renameSync(tempFile, file);
 } catch (err) {
     // Never fail the hook for this; gemdex's periodic background sync
     // will still catch the change.
-    process.stderr.write(`gemdex: failed to touch sync trigger: ${err && err.message ? err.message : err}\n`);
+    process.stderr.write(`gemdex: failed to write sync trigger: ${err && err.message ? err.message : err}\n`);
     process.exit(0);
 }

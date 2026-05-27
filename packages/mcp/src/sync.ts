@@ -156,9 +156,9 @@ export class SyncManager {
         }
     }
 
-    public async handleSyncIndex(): Promise<void> {
+    public async handleSyncIndex(targetCodebasePath?: string): Promise<void> {
         const syncStartTime = Date.now();
-        console.log(`[SYNC-DEBUG] handleSyncIndex() called at ${new Date().toISOString()}`);
+        console.log(`[SYNC-DEBUG] handleSyncIndex(${targetCodebasePath ? `target=${targetCodebasePath}` : 'all'}) called at ${new Date().toISOString()}`);
 
         const indexedCodebases = this.snapshotManager.getIndexedCodebases();
 
@@ -167,7 +167,19 @@ export class SyncManager {
             return;
         }
 
-        console.log(`[SYNC-DEBUG] Found ${indexedCodebases.length} indexed codebases:`, indexedCodebases);
+        let codebasesToSync: string[];
+        if (targetCodebasePath) {
+            const matched = this.snapshotManager.findIndexedCodebasePath(targetCodebasePath);
+            if (!matched) {
+                console.log(`[SYNC-DEBUG] Target path '${targetCodebasePath}' is not an indexed codebase. Skipping targeted sync; the codebase the user is editing in is not tracked by gemdex.`);
+                return;
+            }
+            codebasesToSync = [matched];
+            console.log(`[SYNC-DEBUG] Targeted sync — resolved '${targetCodebasePath}' to indexed codebase '${matched}'`);
+        } else {
+            codebasesToSync = indexedCodebases;
+            console.log(`[SYNC-DEBUG] Found ${indexedCodebases.length} indexed codebases:`, indexedCodebases);
+        }
 
         if (this.isSyncing) {
             console.log('[SYNC-DEBUG] Index sync already in progress. Skipping.');
@@ -179,16 +191,16 @@ export class SyncManager {
         }
 
         this.isSyncing = true;
-        console.log(`[SYNC-DEBUG] Starting index sync for all ${indexedCodebases.length} codebases...`);
+        console.log(`[SYNC-DEBUG] Starting index sync for ${codebasesToSync.length} codebase(s)...`);
 
         try {
             let totalStats = { added: 0, removed: 0, modified: 0 };
 
-            for (let i = 0; i < indexedCodebases.length; i++) {
-                const codebasePath = indexedCodebases[i];
+            for (let i = 0; i < codebasesToSync.length; i++) {
+                const codebasePath = codebasesToSync[i];
                 const codebaseStartTime = Date.now();
 
-                console.log(`[SYNC-DEBUG] [${i + 1}/${indexedCodebases.length}] Starting sync for codebase: '${codebasePath}'`);
+                console.log(`[SYNC-DEBUG] [${i + 1}/${codebasesToSync.length}] Starting sync for codebase: '${codebasePath}'`);
 
                 // Check if codebase path still exists
                 try {
@@ -330,9 +342,29 @@ export class SyncManager {
     }
 
     /**
+     * Read the workspace path out of ~/.gemdex/.sync-trigger. The PostToolUse
+     * hook writes the editor's `cwd` into the file on every Write/Edit so we
+     * can scope the sync to one codebase. Empty / unreadable file means "no
+     * workspace info" and the caller falls back to a sync across every
+     * indexed codebase.
+     */
+    private readTriggerTarget(triggerPath: string): string | undefined {
+        try {
+            const content = fs.readFileSync(triggerPath, 'utf8');
+            if (!content) return undefined;
+            const firstLine = content.split(/\r?\n/).map(s => s.trim()).find(Boolean);
+            return firstLine || undefined;
+        } catch {
+            return undefined;
+        }
+    }
+
+    /**
      * Watch for trigger file changes to enable instant re-index.
-     * Claude Code PostToolUse hooks can touch ~/.gemdex/.sync-trigger
-     * after Write/Edit operations to trigger immediate re-indexing.
+     * The Claude Code / Droid PostToolUse hooks write the editor's workspace
+     * path into ~/.gemdex/.sync-trigger after every Write/Edit. When the file
+     * carries a path, the sync is scoped to the matching indexed codebase; an
+     * empty file falls back to syncing every indexed codebase.
      */
     private setupTriggerWatcher(): void {
         if (!this.isTriggerWatcherEnabled()) {
@@ -364,10 +396,15 @@ export class SyncManager {
 
                 if (this.triggerDebounceTimer) clearTimeout(this.triggerDebounceTimer);
                 this.triggerDebounceTimer = setTimeout(() => {
-                    console.log('[SYNC] 🔔 Trigger file detected, starting instant re-index...');
+                    const target = this.readTriggerTarget(triggerPath);
+                    if (target) {
+                        console.log(`[SYNC] 🔔 Trigger file detected for workspace '${target}', starting targeted re-index...`);
+                    } else {
+                        console.log('[SYNC] 🔔 Trigger file detected (no workspace path), starting full re-index...');
+                    }
                     // Fire-and-forget with explicit catch so an unhandled rejection
                     // can't crash the process from inside the setTimeout callback.
-                    void this.handleSyncIndex().catch((error) => {
+                    void this.handleSyncIndex(target).catch((error) => {
                         const errorMessage = error instanceof Error ? error.message : String(error);
                         if (errorMessage.includes('Failed to query collection')) {
                             console.log('[SYNC-DEBUG] Collection not yet established during trigger sync; will retry on next cycle.');
