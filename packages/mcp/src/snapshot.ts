@@ -498,17 +498,21 @@ export class SnapshotManager {
      * is missing or unreadable.
      */
     public getCodebaseInfo(codebasePath: string): CodebaseInfo | undefined {
+        // Attempt the read directly rather than gating on fs.existsSync — the
+        // existsSync gate adds a redundant syscall and races with concurrent
+        // writers. ENOENT just means "no snapshot yet"; everything else is
+        // worth logging.
         try {
-            if (fs.existsSync(this.snapshotFilePath)) {
-                const snapshotData = fs.readFileSync(this.snapshotFilePath, 'utf8');
-                const snapshot: CodebaseSnapshot = JSON.parse(snapshotData);
-                if (this.isV2Format(snapshot)) {
-                    const info = snapshot.codebases[codebasePath];
-                    if (info) return info;
-                }
+            const snapshotData = fs.readFileSync(this.snapshotFilePath, 'utf8');
+            const snapshot: CodebaseSnapshot = JSON.parse(snapshotData);
+            if (this.isV2Format(snapshot)) {
+                const info = snapshot.codebases[codebasePath];
+                if (info) return info;
             }
-        } catch (error) {
-            console.warn(`[SNAPSHOT-DEBUG] Error reading codebase info from file for ${codebasePath}:`, error);
+        } catch (error: any) {
+            if (error?.code !== 'ENOENT') {
+                console.warn(`[SNAPSHOT-DEBUG] Error reading codebase info from file for ${codebasePath}:`, error);
+            }
         }
         return this.codebaseInfoMap.get(codebasePath);
     }

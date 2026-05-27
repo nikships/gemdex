@@ -43,10 +43,15 @@ function extractCwd(stdinText) {
 try {
     fs.mkdirSync(dir, { recursive: true });
     const cwd = extractCwd(readStdinSync());
-    // Write atomically. writeFileSync truncates + writes, which also bumps
-    // mtime — the gemdex fs.watch reacts to this the same way it did when
-    // this script only touched the file.
-    fs.writeFileSync(file, cwd ? `${cwd}\n` : '', 'utf8');
+    // Write atomically via temp-and-rename so concurrent readers (gemdex's
+    // fs.watch debounce) never see a truncated mid-write file. rename(2) is
+    // atomic on the same filesystem. The temp name includes pid + timestamp
+    // so concurrent hook invocations from independent sessions don't clobber
+    // each other's temp files. The rename to the trigger file is what bumps
+    // its mtime; gemdex's fs.watch reacts to that.
+    const tempFile = `${file}.tmp.${process.pid}.${Date.now()}`;
+    fs.writeFileSync(tempFile, cwd ? `${cwd}\n` : '', 'utf8');
+    fs.renameSync(tempFile, file);
 } catch (err) {
     // Never fail the hook for this; gemdex's periodic background sync
     // will still catch the change.
