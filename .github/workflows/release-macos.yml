@@ -159,7 +159,7 @@ jobs:
           name: ${{ steps.release.outputs.name }}
           prerelease: ${{ steps.release.outputs.prerelease }}
           fail_on_unmatched_files: true
-          files: ${{ env.DMG_PATH }}#Gemdex Memory (macOS, Apple Silicon — signed & notarized)
+          files: ${{ env.DMG_PATH }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
