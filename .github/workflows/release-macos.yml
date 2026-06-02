@@ -97,7 +97,7 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
-          APP="zig-out/package/gemdex-memory-${{ steps.meta.outputs.version }}-macos-ReleaseFast.app"
+          APP="zig-out/package/Gemdex Memory.app"
           DMG="zig-out/package/Gemdex-Memory-${{ steps.meta.outputs.version }}-macos-arm64.dmg"
 
           IDENTITY=$(security find-identity -v -p codesigning build.keychain \

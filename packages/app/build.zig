@@ -66,6 +66,10 @@ pub fn build(b: *std.Build) void {
     if (web_engine == .chromium and selected_platform == .@"null") {
         @panic("-Dweb-engine=chromium requires -Dplatform=macos, linux, or windows");
     }
+    const package_output = switch (package_target) {
+        .macos => "zig-out/package/Gemdex Memory.app",
+        .windows, .linux => b.fmt("zig-out/package/{s}-0.3.0-{s}-{s}{s}", .{ app_exe_name, @tagName(package_target), optimize_name, packageSuffix(package_target) }),
+    };
 
     const zero_native_mod = zeroNativeModule(b, target, optimize, zero_native_path);
     const options = b.addOptions();
@@ -130,7 +134,7 @@ pub fn build(b: *std.Build) void {
         "--optimize",
         optimize_name,
         "--output",
-        b.fmt("zig-out/package/{s}-0.3.0-{s}-{s}{s}", .{ app_exe_name, @tagName(package_target), optimize_name, packageSuffix(package_target) }),
+        package_output,
         "--binary",
     });
     package.addFileArg(exe.getEmittedBin());
