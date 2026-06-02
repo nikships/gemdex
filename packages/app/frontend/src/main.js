@@ -10,6 +10,12 @@ import "./styles.css";
  */
 
 const els = {
+  app: document.querySelector("#app"),
+  setup: document.querySelector("#setup"),
+  setupForm: document.querySelector("#setup-form"),
+  apiKeyInput: document.querySelector("#api-key-input"),
+  apiKeySave: document.querySelector("#api-key-save"),
+  setupError: document.querySelector("#setup-error"),
   status: document.querySelector("#status"),
   list: document.querySelector("#memory-list"),
   empty: document.querySelector("#empty"),
@@ -267,8 +273,52 @@ function wireEvents() {
   els.filter.addEventListener("input", renderList);
 }
 
+function showSetup(show) {
+  els.setup.hidden = !show;
+  els.app.hidden = show;
+  if (show) els.apiKeyInput.focus();
+}
+
+async function isConfigured() {
+  const body = await api("/config");
+  return Boolean(body && body.configured);
+}
+
+async function submitApiKey(event) {
+  event.preventDefault();
+  const apiKey = els.apiKeyInput.value.trim();
+  if (apiKey.length === 0) return;
+  els.apiKeySave.disabled = true;
+  els.setupError.hidden = true;
+  try {
+    const body = await api("/config", {
+      method: "POST",
+      body: JSON.stringify({ apiKey }),
+    });
+    if (!body || !body.configured) throw new Error("Key was not accepted.");
+    els.apiKeyInput.value = "";
+    showSetup(false);
+    await loadMemories();
+  } catch (err) {
+    els.setupError.textContent = err.message;
+    els.setupError.hidden = false;
+  } finally {
+    els.apiKeySave.disabled = false;
+  }
+}
+
+async function loadMemories() {
+  try {
+    await refreshList();
+    setStatus(`${memories.length} ${memories.length === 1 ? "memory" : "memories"}`);
+  } catch (err) {
+    setStatus(`Error: ${err.message}`, true);
+  }
+}
+
 async function init() {
   wireEvents();
+  els.setupForm.addEventListener("submit", submitApiKey);
   apiBase = await resolveApiBase();
   setStatus("waiting for memory store…");
   const healthy = await waitForHealth();
@@ -276,11 +326,12 @@ async function init() {
     setStatus("Could not reach the memory store sidecar.", true);
     return;
   }
-  try {
-    await refreshList();
-    setStatus(`${memories.length} ${memories.length === 1 ? "memory" : "memories"}`);
-  } catch (err) {
-    setStatus(`Error: ${err.message}`, true);
+  if (await isConfigured()) {
+    showSetup(false);
+    await loadMemories();
+  } else {
+    setStatus("API key required");
+    showSetup(true);
   }
 }
 

@@ -47,7 +47,7 @@ before(async () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gemdex-serve-test-"));
     const db = new LanceDBVectorDatabase({ uri: tmpDir });
     const store = new MemoryStore({ embedding: new FakeEmbedding(), vectorDatabase: db });
-    server = createServer(store);
+    server = createServer({ config: {} as any, store });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const addr = server.address() as AddressInfo;
     base = `http://127.0.0.1:${addr.port}`;
@@ -62,6 +62,30 @@ test("GET /health returns ok", async () => {
     const res = await fetch(`${base}/health`);
     assert.equal(res.status, 200);
     assert.deepEqual(await res.json(), { ok: true });
+});
+
+test("GET /config reports configured when a store is present", async () => {
+    const res = await fetch(`${base}/config`);
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { configured: true });
+});
+
+test("data routes answer 503 needsKey when no store is configured", async () => {
+    const bare = createServer({ config: {} as any, store: null });
+    await new Promise<void>((resolve) => bare.listen(0, "127.0.0.1", resolve));
+    const addr = bare.address() as AddressInfo;
+    const bareBase = `http://127.0.0.1:${addr.port}`;
+    try {
+        const cfg = await fetch(`${bareBase}/config`);
+        assert.deepEqual(await cfg.json(), { configured: false });
+
+        const res = await fetch(`${bareBase}/memories`);
+        assert.equal(res.status, 503);
+        const body = (await res.json()) as { needsKey?: boolean };
+        assert.equal(body.needsKey, true);
+    } finally {
+        await new Promise<void>((resolve) => bare.close(() => resolve()));
+    }
 });
 
 test("CRUD lifecycle: create, list, get, update, delete", async () => {

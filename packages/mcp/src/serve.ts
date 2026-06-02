@@ -1,7 +1,31 @@
 import * as http from "http";
-import { MemoryStore } from "gemdex-core";
-import { createConfig } from "./config.js";
+import { MemoryStore, envManager } from "gemdex-core";
+import { createConfig, GemdexConfig } from "./config.js";
 import { createMemoryStore } from "./memory.js";
+
+/**
+ * Mutable server context. The sidecar boots even when no GEMINI_API_KEY is
+ * configured yet (a .app launched from Finder doesn't inherit the user's
+ * interactive shell env), so the desktop app can prompt for the key and POST
+ * it to /config. Until then `store` is null and the data routes answer 503.
+ */
+interface ServeContext {
+    config: GemdexConfig;
+    store: MemoryStore | null;
+}
+
+function buildStore(config: GemdexConfig): MemoryStore | null {
+    if (!config.geminiApiKey) return null;
+    return createMemoryStore(config);
+}
+
+/** Persist the key to ~/.gemdex/.env, expose it to this process, and (re)build the store. */
+function configureApiKey(ctx: ServeContext, apiKey: string): void {
+    envManager.set('GEMINI_API_KEY', apiKey);
+    process.env.GEMINI_API_KEY = apiKey;
+    ctx.config = createConfig();
+    ctx.store = buildStore(ctx.config);
+}
 
 /**
  * `gemdex serve` — the localhost HTTP/JSON sidecar that backs the desktop
@@ -81,7 +105,7 @@ function readBody(req: http.IncomingMessage): Promise<any> {
     });
 }
 
-export function createServer(store: MemoryStore): http.Server {
+export function createServer(ctx: ServeContext): http.Server {
     return http.createServer(async (req, res) => {
         const method = req.method ?? 'GET';
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -98,6 +122,37 @@ export function createServer(store: MemoryStore): http.Server {
                 sendJson(res, 200, { ok: true });
                 return;
             }
+
+            // GET /config — is a GEMINI_API_KEY configured yet?
+            if (method === 'GET' && pathname === '/config') {
+                sendJson(res, 200, { configured: ctx.store !== null });
+                return;
+            }
+
+            // POST /config — set the GEMINI_API_KEY (persisted to ~/.gemdex/.env)
+            if (method === 'POST' && pathname === '/config') {
+                const body = await readBody(req);
+                const apiKey = typeof body?.apiKey === 'string' ? body.apiKey.trim() : '';
+                if (apiKey.length === 0) {
+                    sendJson(res, 400, { error: "'apiKey' is required" });
+                    return;
+                }
+                try {
+                    configureApiKey(ctx, apiKey);
+                    sendJson(res, 200, { configured: ctx.store !== null });
+                } catch (error: any) {
+                    sendJson(res, 500, { error: error?.message ?? 'Failed to configure API key' });
+                }
+                return;
+            }
+
+            // Every remaining route needs an embedding-backed store. Until a
+            // key is configured, tell the app to prompt for one.
+            if (ctx.store === null) {
+                sendJson(res, 503, { error: 'GEMINI_API_KEY not configured', needsKey: true });
+                return;
+            }
+            const store = ctx.store;
 
             // GET /memories — list summaries (sorted by updatedAt desc)
             if (method === 'GET' && pathname === '/memories') {
@@ -182,8 +237,9 @@ export function createServer(store: MemoryStore): http.Server {
 export async function runServe(args: string[]): Promise<void> {
     const { port } = parseArgs(args);
     const config = createConfig();
-    const store = createMemoryStore(config);
-    const server = createServer(store);
+    // Boot even without a key; the desktop app will POST one to /config.
+    const ctx: ServeContext = { config, store: buildStore(config) };
+    const server = createServer(ctx);
 
     await new Promise<void>((resolve) => {
         server.listen(port, '127.0.0.1', () => {

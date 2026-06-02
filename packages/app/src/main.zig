@@ -51,35 +51,44 @@ const App = struct {
         };
     }
 
-    /// Build the sidecar argv. Defaults to `npx -y gemdex serve --port 0`
-    /// (no manual step required when system Node is present). For local
-    /// development, set GEMDEX_SERVE_CMD to a node entry script and we run it
-    /// with the local `node`.
-    fn buildArgv(self: *@This(), buf: *[6][]const u8) []const []const u8 {
+    /// Build the sidecar argv. We launch through the user's login shell
+    /// (`$SHELL -lc`) so the sidecar inherits the real interactive PATH: a
+    /// .app launched from Finder/Dock gets only a minimal PATH
+    /// (`/usr/bin:/bin:/usr/sbin:/sbin`), which has neither Homebrew nor nvm,
+    /// so a bare `npx`/`node` would not be found. A login shell sources the
+    /// profile where `brew shellenv` (etc.) live and recovers it.
+    ///
+    /// Defaults to `npx -y gemdex-mcp serve --port 0` (no manual install when
+    /// system Node is present). For local development, set GEMDEX_SERVE_CMD to
+    /// a node entry script to run that instead.
+    fn buildArgv(self: *@This(), buf: *[3][]const u8) []const []const u8 {
+        const shell = blk: {
+            if (self.env_map.get("SHELL")) |s| {
+                if (s.len > 0) break :blk s;
+            }
+            break :blk "/bin/zsh";
+        };
+        buf[0] = shell;
+        buf[1] = "-lc";
+
+        // GEMDEX_SERVE_CMD is inherited by the child shell, so the command
+        // strings can reference it directly. `exec` lets the shell hand its
+        // pid to Node so our `stop()` kill actually reaps the sidecar.
         if (self.env_map.get("GEMDEX_SERVE_CMD")) |cmd| {
             if (cmd.len > 0) {
-                buf[0] = "node";
-                buf[1] = cmd;
-                buf[2] = "serve";
-                buf[3] = "--port";
-                buf[4] = "0";
-                return buf[0..5];
+                buf[2] = "exec node \"$GEMDEX_SERVE_CMD\" serve --port 0";
+                return buf[0..3];
             }
         }
-        buf[0] = "npx";
-        buf[1] = "-y";
-        buf[2] = "gemdex";
-        buf[3] = "serve";
-        buf[4] = "--port";
-        buf[5] = "0";
-        return buf[0..6];
+        buf[2] = "exec npx -y gemdex-mcp serve --port 0";
+        return buf[0..3];
     }
 
     fn start(context: *anyopaque, runtime: *zero_native.Runtime) anyerror!void {
         _ = runtime;
         const self: *@This() = @ptrCast(@alignCast(context));
 
-        var argv_buf: [6][]const u8 = undefined;
+        var argv_buf: [3][]const u8 = undefined;
         const argv = self.buildArgv(&argv_buf);
 
         const child = std.process.spawn(self.io, .{

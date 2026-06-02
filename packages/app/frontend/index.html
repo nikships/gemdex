@@ -7,12 +7,25 @@
     <title>Gemdex Memory</title>
   </head>
   <body>
-    <div id="app">
+    <div id="setup" class="setup" hidden>
+      <div class="setup-card">
+        <img class="logo-mark" src="/brand/logo-mark.png" alt="gemdex" />
+        <img class="wordmark" src="/brand/wordmark.png" alt="gemdex — remember once, recall everywhere" />
+        <p class="setup-sub">Enter your Google&nbsp;AI <code>GEMINI_API_KEY</code> to unlock your memory layer. It's stored locally in <code>~/.gemdex/.env</code> and used to embed memories.</p>
+        <form id="setup-form" class="setup-form">
+          <input id="api-key-input" class="title-input" type="password" placeholder="GEMINI_API_KEY" autocomplete="off" spellcheck="false" />
+          <button type="submit" id="api-key-save" class="primary">Save &amp; continue</button>
+        </form>
+        <p id="setup-error" class="setup-error" hidden></p>
+      </div>
+    </div>
+
+    <div id="app" hidden>
       <header class="topbar">
         <div class="brand">
-          <span class="logo">◆</span>
+          <img class="logo-mark" src="/brand/logo-mark.png" alt="gemdex" />
           <div>
-            <h1>Gemdex Memory</h1>
+            <img class="wordmark" src="/brand/wordmark.png" alt="gemdex" />
             <p class="sub" id="status">connecting…</p>
           </div>
         </div>
@@ -33,6 +46,7 @@
 
         <section class="detail-pane" id="detail">
           <div class="placeholder" id="placeholder">
+            <img src="/brand/empty-chest.png" alt="" />
             <p>Select a memory to view, or create a new one.</p>
           </div>
 
