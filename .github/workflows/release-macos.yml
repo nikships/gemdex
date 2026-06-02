@@ -139,11 +139,9 @@ jobs:
           if [ -n "$TAG_INPUT" ]; then
             echo "tag=$TAG_INPUT" >> "$GITHUB_OUTPUT"
             echo "name=Gemdex Memory $TAG_INPUT" >> "$GITHUB_OUTPUT"
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
           else
             echo "tag=desktop-latest" >> "$GITHUB_OUTPUT"
-            echo "name=Gemdex Memory — latest desktop build (${GITHUB_SHA::7})" >> "$GITHUB_OUTPUT"
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "name=Gemdex Memory ${{ steps.meta.outputs.version }} (build ${GITHUB_SHA::7})" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Refresh rolling desktop-latest tag
@@ -157,7 +155,8 @@ jobs:
         with:
           tag_name: ${{ steps.release.outputs.tag }}
           name: ${{ steps.release.outputs.name }}
-          prerelease: ${{ steps.release.outputs.prerelease }}
+          prerelease: false
+          make_latest: true
           fail_on_unmatched_files: true
           files: ${{ env.DMG_PATH }}
         env:
