@@ -1,12 +1,13 @@
 {
     "name": "gemdex-mcp",
-    "version": "0.2.3",
-    "description": "MCP server for semantic code search — Gemini embeddings + embedded LanceDB",
+    "version": "0.3.0",
+    "description": "MCP memory layer for AI coding agents — save/recall/update memories via Gemini embeddings + embedded LanceDB",
     "type": "module",
     "main": "dist/index.js",
     "types": "dist/index.d.ts",
     "bin": {
-        "gemdex-mcp": "dist/index.js"
+        "gemdex-mcp": "dist/index.js",
+        "gemdex": "dist/index.js"
     },
     "scripts": {
         "build": "pnpm clean && tsc --build --force",

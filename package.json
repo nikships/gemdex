@@ -1,7 +1,7 @@
 {
     "name": "gemdex",
-    "version": "0.1.0",
-    "description": "Semantic code search MCP for AI coding agents — Gemini embeddings + LanceDB",
+    "version": "0.3.0",
+    "description": "A global, persistent memory layer for AI coding agents — Gemini embeddings + LanceDB + MCP",
     "private": true,
     "scripts": {
         "build": "pnpm -r build",

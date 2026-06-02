@@ -1,6 +1,7 @@
 # gemdex-mcp
 
-MCP server for semantic code search — Gemini embeddings + embedded LanceDB.
+MCP memory layer for AI coding agents — `save_memory` / `recall` /
+`update_memory` backed by Gemini embeddings + embedded LanceDB.
 
 Part of [Gemdex](https://github.com/anand-92/gemdex).
 
@@ -12,7 +13,7 @@ claude mcp add gemdex \
   -- npx -y gemdex-mcp@latest
 ```
 
-No Docker, no daemon. LanceDB lives at `~/.gemdex/lance` by default.
+No Docker, no daemon. Memories live at `~/.gemdex/lance` by default.
 
 ## Install for any MCP client
 
@@ -32,19 +33,31 @@ No Docker, no daemon. LanceDB lives at `~/.gemdex/lance` by default.
 
 ## Tools
 
-- `index_codebase` — index a directory
-- `search_code` — natural-language semantic + BM25 hybrid search
-- `clear_index` — drop the LanceDB table for a codebase
-- `get_indexing_status` — progress + last-completed timestamps
+- `save_memory(content, title?)` — persist a new memory; returns its `id`.
+- `recall(query, limit?)` — retrieve full memories by natural language (hybrid
+  semantic + BM25), ranked by relevance. Never returns fragments.
+- `update_memory(id, content, title?)` — revise an existing memory in place.
+
+Deletion is intentionally **not** an agent tool — it's a human action in the
+Gemdex desktop app.
+
+## Desktop sidecar
+
+The same binary also runs the localhost HTTP manager API used by the desktop app:
+
+```bash
+npx gemdex serve --port 0   # 127.0.0.1 only; --port 0 = OS picks a free port
+```
 
 ## Required env
 
 | Variable | Description |
 |----------|-------------|
-| `GEMINI_API_KEY` | Google AI Studio API key |
-| `LANCEDB_PATH` | *(optional)* Custom directory for the embedded vector store (default `~/.gemdex/lance`) |
+| `GEMINI_API_KEY` | Google AI Studio API key (needed to embed on save/recall/update) |
+| `LANCEDB_PATH` | *(optional)* Custom directory for the embedded store (default `~/.gemdex/lance`) |
 
-See the [main repo](https://github.com/anand-92/gemdex) for all environment variables and configuration options.
+See the [main repo](https://github.com/anand-92/gemdex) for all environment
+variables and configuration options.
 
 ## License
 

@@ -1,7 +1,7 @@
 {
     "name": "gemdex-core",
-    "version": "0.2.3",
-    "description": "Semantic code indexing engine — Gemini embeddings + embedded LanceDB vector store",
+    "version": "0.3.0",
+    "description": "Memory layer engine for AI coding agents — Gemini embeddings + embedded LanceDB hybrid retrieval",
     "main": "dist/index.js",
     "types": "dist/index.d.ts",
     "scripts": {
@@ -17,27 +17,11 @@
         "@google/genai": "^1.9.0",
         "@lancedb/lancedb": "^0.21.0",
         "apache-arrow": "^17.0.0",
-        "fs-extra": "^11.0.0",
-        "glob": "^10.0.0",
-        "langchain": "^0.3.27",
-        "tree-sitter": "^0.21.1",
-        "tree-sitter-cpp": "^0.22.0",
-        "tree-sitter-go": "^0.21.0",
-        "tree-sitter-java": "^0.21.0",
-        "tree-sitter-javascript": "^0.21.0",
-        "tree-sitter-python": "^0.21.0",
-        "tree-sitter-c-sharp": "^0.21.0",
-        "tree-sitter-rust": "^0.21.0",
-        "tree-sitter-typescript": "^0.21.0",
-        "tree-sitter-scala": "^0.24.0",
         "typescript": "^5.0.0"
     },
     "devDependencies": {
-        "@types/fs-extra": "^11.0.0",
         "@types/jest": "^30.0.0",
-        "@types/mock-fs": "^4.13.4",
         "jest": "^30.0.0",
-        "mock-fs": "^5.5.0",
         "ts-jest": "^29.4.0"
     },
     "files": [

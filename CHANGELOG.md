@@ -4,17 +4,26 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
-## [0.2.1] - 2026-05-27
-
-### Added
-- **`gemdex-droid` plugin** — a Droid-native sibling of the Claude Code plugin at `plugin-droid/`. Same MCP server + `code-search` skill, but `hooks/hooks.json` uses Droid's single-`command` shape with `${DROID_PLUGIN_ROOT}` so the PostToolUse auto-reindex hook actually fires under `droid`. The original `gemdex` plugin at `plugin/` is unchanged so Claude Code installs keep working as before.
+## [0.3.0] - 2026-06-02
 
 ### Changed
-- **Trigger file now carries the workspace path.** The Claude Code and Droid plugin hooks read the hook payload's `cwd` from stdin and write it into `~/.gemdex/.sync-trigger` as a single line. The MCP server's watcher reads that line and scopes the incremental re-index to the matching indexed codebase via `findIndexedCodebasePath` (best-match, so subdirectories of an indexed root work too), instead of looping through every indexed codebase on every edit. An empty trigger file is still valid — that's the legacy `touch ~/.gemdex/.sync-trigger` shape and the watcher falls back to syncing every indexed codebase, so existing hand-rolled hooks keep working.
+- **Repurposed Gemdex from a per-repo code-search index into a global, persistent memory layer for AI coding agents.** You now deliberately save/recall/update memories that persist across every repo and session. The Gemini + LanceDB hybrid retrieval engine is reused as-is.
+- MCP tool surface is now three tools: `save_memory`, `recall`, and `update_memory`. Recall uses **parent-document chunking** — long memories are split into retrieval chunks for sharp hybrid matching, but recall always returns the full parent memory, never a fragment.
+- `gemdex-core` now exports a `MemoryStore` (parent-document chunking over the existing `GeminiEmbedding` + `LanceDBVectorDatabase`).
 
-### Fixed
-- **Multi-process snapshot reads no longer drop other processes' index options.** `SnapshotManager.getCodebaseInfo` now reads `~/.gemdex/mcp-codebase-snapshot.json` from disk (matching how `getIndexedCodebases` already worked) and only falls back to the in-memory map when the file is missing. Before this, an MCP server that booted before another process had indexed a codebase would call `reindexByChange` for that codebase with empty `requestCustomExtensions` / `requestIgnorePatterns`, filtering all files out and wiping the merkle to an empty set on the next background sync.
-- **Local test pipeline runs again.** Pinned every `jest 30.x` package to `30.3.0` via a workspace-level `overrides` block. The published `jest-runtime@30.4.x` calls `clearMocksOnScope` on its bundled `jest-mock@30.4.1` — a method that does not exist in any released `jest-mock` — so `jest --runInBand` crashed during module setup for every suite. Pinning back to `30.3.0` restores a consistent API surface across the jest packages until upstream republishes `jest-mock`.
+### Added
+- `gemdex serve` run-mode: a localhost-only HTTP/JSON sidecar (list/get/create/update/delete/export/import) backing the desktop manager app. Binds `127.0.0.1` and prints a `PORT=<n>` handshake line for the shell.
+- `packages/app`: a [zero-native](https://www.npmjs.com/package/zero-native) desktop app to manage the memory layer (browse / create / edit / delete / export / import). The Zig shell spawns the sidecar on launch and kills it on exit; no user command required.
+- A `gemdex` bin alias on `gemdex-mcp` so `npx gemdex serve` works.
+- `memory` Claude Code skill nudging the agent to save/recall/update **only when explicitly told**.
+
+### Removed
+- All code-search MCP tools: `index_codebase`, `search_code`, `clear_index`, `get_indexing_status`.
+- File-derived indexing: AST/tree-sitter splitters and grammars, LangChain character splitter, Merkle incremental sync, file watcher / `~/.gemdex/.sync-trigger`, periodic background sync, multimodal (PDF/image) indexing, per-repo snapshot manager, and per-repo table naming.
+- The `gemdex-core` `Context` class and the MCP `snapshot.ts` / `sync.ts` / `splitter.ts` / code-search `handlers.ts`.
+- Code-search environment variables: `INDEX_MULTIMODAL`, `CUSTOM_EXTENSIONS`, `CUSTOM_IGNORE_PATTERNS`, `GEMDEX_BACKGROUND_SYNC`, `GEMDEX_SYNC_INTERVAL_MS`, `GEMDEX_TRIGGER_WATCHER`, `CODE_CHUNKS_COLLECTION_NAME_OVERRIDE`, and splitter selection.
+- The `code-search` plugin skill and the `PostToolUse` auto-reindex hook.
+- Unused `gemdex-core` dependencies: tree-sitter grammars, `langchain`, `glob`, `fs-extra`, `mock-fs`.
 
 ## [0.2.0] - 2026-05-26
 
@@ -40,7 +49,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - File-trigger watcher (`~/.gemdex/.sync-trigger`) for editor-driven re-syncs.
 - Custom file extensions and ignore patterns via env vars.
 
-[Unreleased]: https://github.com/anand-92/gemdex/compare/v0.2.1...HEAD
-[0.2.1]: https://github.com/anand-92/gemdex/compare/v0.2.0...v0.2.1
+[Unreleased]: https://github.com/anand-92/gemdex/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/anand-92/gemdex/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/anand-92/gemdex/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/anand-92/gemdex/releases/tag/v0.1.0

@@ -9,37 +9,19 @@
         {
             "name": "gemdex",
             "source": "./plugin",
-            "description": "Semantic code search via Gemini embeddings + embedded LanceDB + MCP. Bundles the gemdex MCP server, a PostToolUse hook that auto-reindexes after edits, and a skill that nudges Claude to prefer semantic search over Grep/Glob for intent-based queries. No Docker required.",
-            "version": "0.2.1",
+            "description": "A global, persistent memory layer for AI coding agents via Gemini embeddings + embedded LanceDB + MCP. Bundles the gemdex MCP server (save_memory, recall, update_memory) and a skill that nudges the agent to save/recall/update only when explicitly told. No Docker required.",
+            "version": "0.3.0",
             "homepage": "https://github.com/anand-92/gemdex",
             "license": "MIT",
             "keywords": [
-                "semantic-search",
-                "code-search",
+                "memory",
+                "memory-layer",
+                "agent-memory",
                 "embeddings",
                 "gemini",
                 "lancedb",
                 "mcp",
                 "rag"
-            ]
-        },
-        {
-            "name": "gemdex-droid",
-            "source": "./plugin-droid",
-            "description": "Droid-native build of Gemdex. Same MCP server + skill as the Claude plugin, but the PostToolUse auto-reindex hook uses Droid's single-`command` shape with `${DROID_PLUGIN_ROOT}` so it actually executes under `droid` (the Claude variant silently drops `args[]`). Install this one if you're on Factory Droid.",
-            "version": "0.2.1",
-            "homepage": "https://github.com/anand-92/gemdex",
-            "license": "MIT",
-            "keywords": [
-                "semantic-search",
-                "code-search",
-                "embeddings",
-                "gemini",
-                "lancedb",
-                "mcp",
-                "rag",
-                "droid",
-                "factory"
             ]
         }
     ]

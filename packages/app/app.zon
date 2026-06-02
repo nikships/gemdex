@@ -1,0 +1,37 @@
+.{
+    .id = "com.gemdex.memory",
+    .name = "gemdex-memory",
+    .display_name = "Gemdex Memory",
+    .version = "0.3.0",
+    .icons = .{ "assets/icon.icns" },
+    .platforms = .{ "macos", "linux" },
+    .permissions = .{},
+    .capabilities = .{ "webview", "js_bridge" },
+    .bridge = .{
+        .commands = .{
+            .{ .name = "gemdex.getApiBase", .origins = .{ "zero://app", "zero://inline", "http://127.0.0.1:5173" } },
+        },
+    },
+    .frontend = .{
+        .dist = "frontend/dist",
+        .entry = "index.html",
+        .spa_fallback = true,
+        .dev = .{
+            .url = "http://127.0.0.1:5173/",
+            .command = .{ "npm", "--prefix", "frontend", "run", "dev", "--", "--host", "127.0.0.1" },
+            .ready_path = "/",
+            .timeout_ms = 30000,
+        },
+    },
+    .security = .{
+        .navigation = .{
+            .allowed_origins = .{ "zero://app", "zero://inline", "http://127.0.0.1:5173" },
+            .external_links = .{ .action = "deny" },
+        },
+    },
+    .web_engine = "system",
+    .cef = .{ .dir = "third_party/cef/macos", .auto_install = false },
+    .windows = .{
+        .{ .label = "main", .title = "Gemdex Memory", .width = 1040, .height = 720, .restore_state = true },
+    },
+}

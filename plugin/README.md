@@ -1,12 +1,16 @@
 # Gemdex — Claude Code plugin
 
-This plugin wires the [Gemdex](https://github.com/anand-92/gemdex) semantic code search MCP server into Claude Code, with:
+This plugin wires the [Gemdex](https://github.com/anand-92/gemdex) **memory
+layer** MCP server into Claude Code, with:
 
-- The `gemdex` MCP server (registered via `npx -y gemdex-mcp@latest` — no local checkout needed).
-- A `PostToolUse` hook on `Edit | Write | MultiEdit` that writes the editor's workspace path into `~/.gemdex/.sync-trigger` so the matching indexed codebase re-syncs automatically after Claude edits files.
-- A `code-search` skill that nudges Claude to prefer `search_code` over `Grep`/`Glob` for semantic/intent queries.
+- The `gemdex` MCP server (registered via `npx -y gemdex-mcp@latest` — no local
+  checkout needed), exposing `save_memory`, `recall`, and `update_memory`.
+- A `memory` skill that nudges Claude to save / recall / update **only when the
+  user explicitly points at memory** — never proactively.
 
-No Docker, no daemon — Gemdex now stores its vectors in an embedded LanceDB at `~/.gemdex/lance` by default.
+No Docker, no daemon — Gemdex stores its memories in an embedded LanceDB at
+`~/.gemdex/lance` by default. Memory is one global pool, shared across every
+repo and session.
 
 ## Install
 
@@ -22,28 +26,30 @@ You'll be prompted for:
 | Field | Required | Notes |
 |-------|----------|-------|
 | `gemini_api_key` | yes | Google AI Studio API key — [get one here](https://aistudio.google.com/apikey). Stored in the system keychain. |
-| `lancedb_path` | optional | Filesystem path for the embedded vector store. Leave blank to use `~/.gemdex/lance`. |
+| `lancedb_path` | optional | Filesystem path for the embedded memory store. Leave blank to use `~/.gemdex/lance`. |
 
 ## What it does, exactly
 
 ### 1. MCP server registration
 
-`plugin.json` ships an inline `mcpServers.gemdex` entry that runs `npx -y gemdex-mcp@latest`, with `GEMINI_API_KEY` and `LANCEDB_PATH` populated from `userConfig`. The server exposes four tools to Claude:
+`plugin.json` ships an inline `mcpServers.gemdex` entry that runs
+`npx -y gemdex-mcp@latest`, with `GEMINI_API_KEY` and `LANCEDB_PATH` populated
+from `userConfig`. The server exposes three tools to Claude:
 
-- `index_codebase`
-- `search_code`
-- `get_indexing_status`
-- `clear_index`
+- `save_memory(content, title?)` — persist a new memory; returns its `id`.
+- `recall(query, limit?)` — retrieve full memories by natural language.
+- `update_memory(id, content, title?)` — revise an existing memory in place.
 
-### 2. Auto-reindex hook
+Deletion is intentionally **not** an agent tool — it's a human action in the
+Gemdex desktop app.
 
-`hooks/hooks.json` registers a `PostToolUse` matcher for `Edit | Write | MultiEdit` that runs `node ${CLAUDE_PLUGIN_ROOT}/scripts/touch-sync-trigger.js`. Claude Code pipes the hook payload (including `cwd`) to the script on stdin; the script `mkdir -p`s `~/.gemdex` and writes the editor's workspace path into `~/.gemdex/.sync-trigger` as a single line. Gemdex's built-in `fs.watch` debounces those changes for 2 s, reads the workspace line, and runs `reindexByChange` against just the matching indexed codebase. An empty file (e.g. a hand-rolled `touch ~/.gemdex/.sync-trigger` hook from before this change) still works — it falls back to syncing every indexed codebase.
+### 2. Memory skill
 
-The Node script is cross-platform (works on macOS, Linux, and Windows) and never fails the hook — if the write can't happen, the gemdex periodic background sync still catches the change.
-
-### 3. Search-preference skill
-
-`skills/code-search/SKILL.md` ships a model-invoked skill whose **description** is the persistent nudge: "Use the Gemdex `search_code` MCP tool before Grep/Glob when the user is asking about code by intent or meaning…". The skill body documents the four tools and the exact workflow (initial `index_codebase`, semantic queries via `search_code`, fall back to `Grep` only for exact strings).
+`skills/memory/SKILL.md` ships a model-invoked skill whose **description** is
+the persistent nudge: save when the user says remember/save, recall when the
+user points at memory ("check your memory layer", "how do we usually do X"),
+update to revise — and **explicit only**, never auto-capture or recall
+unprompted.
 
 ## Layout
 
@@ -51,12 +57,8 @@ The Node script is cross-platform (works on macOS, Linux, and Windows) and never
 plugin/
 ├── .claude-plugin/
 │   └── plugin.json
-├── hooks/
-│   └── hooks.json
-├── scripts/
-│   └── touch-sync-trigger.js
 ├── skills/
-│   └── code-search/
+│   └── memory/
 │       └── SKILL.md
 └── README.md
 ```

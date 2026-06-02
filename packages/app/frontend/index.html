@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' http://127.0.0.1:* http://127.0.0.1:5173 ws://127.0.0.1:5173" />
+    <title>Gemdex Memory</title>
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <div class="brand">
+          <span class="logo">◆</span>
+          <div>
+            <h1>Gemdex Memory</h1>
+            <p class="sub" id="status">connecting…</p>
+          </div>
+        </div>
+        <div class="actions">
+          <button id="new-btn" class="primary">New memory</button>
+          <button id="export-btn">Export</button>
+          <button id="import-btn">Import</button>
+          <input id="import-file" type="file" accept=".json,.jsonl,application/json" hidden />
+        </div>
+      </header>
+
+      <main class="layout">
+        <aside class="list-pane">
+          <input id="filter" class="filter" type="text" placeholder="Filter by title…" />
+          <ul id="memory-list" class="memory-list"></ul>
+          <p id="empty" class="empty" hidden>No memories yet. Create one, or save from your agent.</p>
+        </aside>
+
+        <section class="detail-pane" id="detail">
+          <div class="placeholder" id="placeholder">
+            <p>Select a memory to view, or create a new one.</p>
+          </div>
+
+          <form id="editor" class="editor" hidden>
+            <input id="title-input" class="title-input" type="text" placeholder="Title (optional — auto-derived if blank)" />
+            <textarea id="content-input" class="content-input" placeholder="Memory content. A one-line fact or a 300-line playbook — anything."></textarea>
+            <div class="editor-footer">
+              <div class="meta" id="meta"></div>
+              <div class="editor-actions">
+                <button type="button" id="delete-btn" class="danger" hidden>Delete</button>
+                <button type="submit" id="save-btn" class="primary">Save</button>
+              </div>
+            </div>
+          </form>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

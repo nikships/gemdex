@@ -1,0 +1,5 @@
+zig-out/
+.zig-cache/
+frontend/dist/
+frontend/node_modules/
+third_party/

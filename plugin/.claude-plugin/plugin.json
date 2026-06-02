@@ -1,9 +1,9 @@
 {
     "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
     "name": "gemdex",
-    "displayName": "Gemdex — Semantic Code Search",
-    "version": "0.2.1",
-    "description": "Semantic code search via Gemini embeddings + embedded LanceDB. Ships the gemdex MCP server, a PostToolUse hook that auto-reindexes after edits, and a skill that nudges Claude to prefer semantic search over Grep/Glob for intent-based queries. No Docker required.",
+    "displayName": "Gemdex — Memory Layer",
+    "version": "0.3.0",
+    "description": "A global, persistent memory layer for AI coding agents. Ships the gemdex MCP server (save_memory, recall, update_memory) backed by Gemini embeddings + embedded LanceDB, and a skill that nudges the agent to save/recall/update only when explicitly told. Memories are one global pool, shared across every repo and session. No Docker required.",
     "author": {
         "name": "Nikhil Anand",
         "url": "https://github.com/anand-92"
@@ -12,8 +12,9 @@
     "repository": "https://github.com/anand-92/gemdex",
     "license": "MIT",
     "keywords": [
-        "semantic-search",
-        "code-search",
+        "memory",
+        "memory-layer",
+        "agent-memory",
         "embeddings",
         "gemini",
         "lancedb",
@@ -31,7 +32,7 @@
         "lancedb_path": {
             "type": "string",
             "title": "LanceDB path (optional)",
-            "description": "Filesystem path for the embedded vector store. Defaults to ~/.gemdex/lance if left blank.",
+            "description": "Filesystem path for the embedded memory store. Defaults to ~/.gemdex/lance if left blank.",
             "default": ""
         }
     },
