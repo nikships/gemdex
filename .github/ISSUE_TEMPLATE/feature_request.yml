@@ -1,5 +1,5 @@
 name: ✨ Feature request
-description: Propose a new capability, language, integration, or workflow.
+description: Propose a new capability, integration, or workflow.
 title: "[feature] "
 labels: ["enhancement", "needs-triage"]
 body:
@@ -29,4 +29,4 @@ body:
     id: extra
     attributes:
       label: Additional context
-      description: Links, screenshots, example codebases, anything else useful.
+      description: Links, screenshots, example memories, anything else useful.

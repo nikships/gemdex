@@ -1,6 +1,6 @@
 # Contributing to Gemdex
 
-Thanks for considering a contribution. Gemdex is built and maintained by people who'd rather not stuff entire repos into LLM prompts, and we love any help making semantic code search better.
+Thanks for considering a contribution. Gemdex is built and maintained by people who'd rather not re-teach their agent the same thing every session, and we love any help making the memory layer better.
 
 ## Quick links
 
@@ -28,7 +28,7 @@ pnpm install
 pnpm build
 ```
 
-The vector store is embedded (LanceDB), so there's no daemon to start — it
+The memory store is embedded (LanceDB), so there's no daemon to start — it
 persists at `~/.gemdex/lance` by default.
 
 Set the env vars used by tests / dev runs:
@@ -60,15 +60,21 @@ export GEMINI_API_KEY=your-key
 - Required configuration must fail fast at startup with a clear error — never silently fall back to a broken default.
 - Keep public API surfaces (`gemdex-core` exports, MCP tool schemas) small and documented.
 
-## Adding a language
+## Where things live
 
-Most "add support for X" requests come down to a missing tree-sitter grammar:
+The monorepo is small — find the right layer before you change anything:
 
-1. Add the `tree-sitter-<language>` dependency in `packages/core/package.json`.
-2. Register the grammar in `packages/core/src/splitter/`.
-3. Add the file extensions to the default ignore/allow lists in `packages/core/src/context.ts`.
-4. Add a small unit test that splits a sample file from that language.
-5. Mention the new language in the README "AST-aware chunking" line.
+- `packages/core` (`gemdex-core`) — the engine: `GeminiEmbedding`,
+  `LanceDBVectorDatabase` (hybrid dense + BM25 + RRF), and `memory/` (the
+  `MemoryStore` + parent-document chunker). Reuse these layers; don't reach
+  around `MemoryStore` for store access.
+- `packages/mcp` (`gemdex-mcp`) — the MCP stdio server (the three tools) plus
+  `serve.ts`, the localhost HTTP sidecar that backs the desktop app.
+- `packages/app` — the zero-native desktop manager (Zig shell + web frontend).
+  No memory logic lives in Zig.
+- `plugin/` — the Claude Code plugin (the `memory` skill + manifest).
+
+When adding behaviour, add a unit test next to the code it covers.
 
 ## Commit / PR style
 

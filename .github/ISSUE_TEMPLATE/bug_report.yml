@@ -13,7 +13,7 @@ body:
     attributes:
       label: What happened?
       description: A clear, concise description of the bug.
-      placeholder: When I run `search_code`, the server crashes with…
+      placeholder: When I run `recall`, the server crashes with…
     validations:
       required: true
 
@@ -31,7 +31,7 @@ body:
       description: Minimal command sequence or MCP config that triggers the bug.
       placeholder: |
         1. `claude mcp add gemdex …`
-        2. Ask the agent to "index this repo"
+        2. Ask the agent to "save this to memory" / "recall …"
         3. …
       render: bash
     validations:
@@ -57,7 +57,7 @@ body:
     id: lancedb-path
     attributes:
       label: LanceDB path
-      description: Where Gemdex is storing its vector tables. Defaults to ~/.gemdex/lance.
+      description: Where Gemdex is storing its memory layer. Defaults to ~/.gemdex/lance.
       placeholder: ~/.gemdex/lance
     validations:
       required: false

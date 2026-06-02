@@ -7,26 +7,24 @@ Manual steps that drive stars and a clean launch. Run them yourself — they nee
 - [ ] **Set the repo description**
   ```bash
   gh repo edit anand-92/gemdex \
-    --description "Semantic code search MCP for AI coding agents — Gemini embeddings + embedded LanceDB hybrid retrieval"
+    --description "Memory layer MCP for AI coding agents — durable save/recall/update on Gemini embeddings + embedded LanceDB hybrid retrieval"
   ```
 
 - [ ] **Add discoverability topics**
   ```bash
   gh repo edit anand-92/gemdex \
     --add-topic mcp \
-    --add-topic semantic-search \
+    --add-topic memory \
+    --add-topic agent-memory \
     --add-topic gemini \
     --add-topic lancedb \
-    --add-topic ast \
-    --add-topic code-search \
     --add-topic claude-code \
     --add-topic cursor \
     --add-topic vector-search \
     --add-topic rag \
     --add-topic embeddings \
     --add-topic developer-tools \
-    --add-topic ai-coding-assistant \
-    --add-topic tree-sitter
+    --add-topic ai-coding-assistant
   ```
 
 - [ ] **Enable Discussions**
@@ -69,9 +67,9 @@ Manual steps that drive stars and a clean launch. Run them yourself — they nee
   - `modelcontextprotocol/servers` (community list)
   - `wong2/awesome-mcp-servers`
   - Any Cursor / Claude / Codex community resource lists
-- [ ] **Show HN** — `Show HN: Gemdex – Semantic code search MCP for AI coding agents`. Best window: weekday morning Pacific.
+- [ ] **Show HN** — `Show HN: Gemdex – A memory layer MCP for AI coding agents`. Best window: weekday morning Pacific.
 - [ ] **r/LocalLLaMA, r/ClaudeAI, r/cursor** — short post with the hero image + 30-second demo block.
-- [ ] **Twitter / X + Bluesky thread** — hero image, 3-bullet pitch, gif of the search mockup, link, ask for stars.
+- [ ] **Twitter / X + Bluesky thread** — hero image, 3-bullet pitch, gif of a save → recall flow, link, ask for stars.
 - [ ] **Dev.to / Hashnode** — write the "Why we built Gemdex" post; cross-post.
 - [ ] **MCP Discord servers** — Anthropic MCP, OpenAI Codex CLI, Cursor.
 
