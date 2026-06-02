@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-06-02
+
+### Added
+- Desktop app first-launch setup for `GEMINI_API_KEY`, persisted locally in `~/.gemdex/.env`.
+- README screenshots for the desktop setup and memory manager screens.
+
+### Changed
+- Desktop app sidecar startup now runs through the user's login shell so Finder/Dock launches inherit the expected Node/npm PATH.
+- Refreshed frontend brand artwork and converted app illustration assets to transparent PNGs.
+- Published `gemdex-core` and `gemdex-mcp` packages at `0.3.2`.
+
 ## [0.3.0] - 2026-06-02
 
 Gemdex is a global, persistent memory layer for AI coding agents: deliberately save, recall, and update memories that persist across every repo and session, backed by Gemini embeddings and an embedded LanceDB hybrid store.
@@ -15,5 +26,6 @@ Gemdex is a global, persistent memory layer for AI coding agents: deliberately s
 - **`packages/app`** — a [zero-native](https://www.npmjs.com/package/zero-native) desktop app to manage the memory layer (browse / create / edit / delete / export / import). The Zig shell spawns the sidecar on launch and kills it on exit; no user command required.
 - **Claude Code plugin** — registers the `gemdex` MCP server and ships a `memory` skill that nudges the agent to save/recall/update **only when the user explicitly points at memory**.
 
-[Unreleased]: https://github.com/anand-92/gemdex/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/anand-92/gemdex/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/anand-92/gemdex/compare/v0.3.0...v0.3.2
 [0.3.0]: https://github.com/anand-92/gemdex/releases/tag/v0.3.0
