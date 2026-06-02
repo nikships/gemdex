@@ -1,0 +1,168 @@
+name: Release (macOS · signed + notarized DMG)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/app/**"
+      - "packages/core/**"
+      - "packages/mcp/**"
+      - ".github/workflows/release-macos.yml"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. v0.3.1). Leave blank for the rolling desktop-latest build."
+        required: false
+        default: ""
+
+concurrency:
+  group: release-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build · sign · notarize · DMG · release
+    runs-on: macos-14 # Apple Silicon (arm64)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install zero-native CLI + framework
+        run: npm install -g zero-native@0.2.0
+
+      - name: Install Zig 0.16
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Install create-dmg
+        run: brew install create-dmg
+
+      - name: Resolve zero-native framework path
+        id: zn
+        run: echo "path=$(npm root -g)/zero-native" >> "$GITHUB_OUTPUT"
+
+      - name: Read app version from manifest
+        id: meta
+        run: |
+          APP_VERSION=$(grep -E '\.version[[:space:]]*=' packages/app/app.zon | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "version=$APP_VERSION" >> "$GITHUB_OUTPUT"
+          echo "App version: $APP_VERSION"
+
+      - name: Import Developer ID certificate into a temp keychain
+        env:
+          MAC_CERTS: ${{ secrets.MAC_CERTS }}
+          CERT_PASSWORD: ${{ secrets.CERT_PASSWORD }}
+        run: |
+          if [ -z "$MAC_CERTS" ]; then
+            echo "::error::MAC_CERTS secret is empty — cannot sign."
+            exit 1
+          fi
+          KEYCHAIN=build.keychain
+          KEYCHAIN_PW=$(uuidgen)
+          security create-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
+          # Keep the login/system keychains in the search list so codesign can
+          # still find the Apple intermediate certs.
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed s/\"//g)
+          echo "$MAC_CERTS" | base64 --decode > cert.p12
+          security import cert.p12 -k "$KEYCHAIN" -P "$CERT_PASSWORD" -T /usr/bin/codesign -A
+          rm -f cert.p12
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PW" "$KEYCHAIN"
+          echo "Signing identities available:"
+          security find-identity -v -p codesigning "$KEYCHAIN"
+
+      - name: Build frontend
+        working-directory: packages/app/frontend
+        run: npm install && npm run build
+
+      - name: Build app package (ReleaseFast)
+        working-directory: packages/app
+        run: zig build package -Doptimize=ReleaseFast "-Dzero-native-path=${{ steps.zn.outputs.path }}"
+
+      - name: Sign · notarize · staple · DMG
+        working-directory: packages/app
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          APP="zig-out/package/gemdex-memory-${{ steps.meta.outputs.version }}-macos-ReleaseFast.app"
+          DMG="zig-out/package/Gemdex-Memory-${{ steps.meta.outputs.version }}-macos-arm64.dmg"
+
+          IDENTITY=$(security find-identity -v -p codesigning build.keychain \
+            | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.*)"/\1/')
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::No Developer ID Application identity found in keychain."
+            exit 1
+          fi
+          echo "Signing identity: $IDENTITY"
+
+          echo "==> Signing app (hardened runtime)"
+          codesign --deep --force --verify --verbose \
+            --sign "$IDENTITY" \
+            --options runtime \
+            --entitlements macos/entitlements.plist \
+            --timestamp \
+            "$APP"
+
+          echo "==> Notarizing app"
+          ditto -c -k --keepParent "$APP" /tmp/gemdex-app.zip
+          xcrun notarytool submit /tmp/gemdex-app.zip \
+            --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+
+          echo "==> Stapling app"
+          xcrun stapler staple "$APP"
+          spctl --assess -vv --type execute "$APP"
+
+          echo "==> Building + notarizing DMG"
+          SIGN_IDENTITY="$IDENTITY" VOLUME_NAME="Gemdex Memory" \
+            bash macos/package-dmg.sh "$APP" "$DMG"
+
+          echo "DMG_PATH=packages/app/$DMG" >> "$GITHUB_ENV"
+          echo "DMG_NAME=$(basename "$DMG")" >> "$GITHUB_ENV"
+
+      - name: Determine release target
+        id: release
+        run: |
+          TAG_INPUT="${{ github.event.inputs.tag }}"
+          if [ -n "$TAG_INPUT" ]; then
+            echo "tag=$TAG_INPUT" >> "$GITHUB_OUTPUT"
+            echo "name=Gemdex Memory $TAG_INPUT" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=desktop-latest" >> "$GITHUB_OUTPUT"
+            echo "name=Gemdex Memory — latest desktop build (${GITHUB_SHA::7})" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Refresh rolling desktop-latest tag
+        if: steps.release.outputs.tag == 'desktop-latest'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release delete desktop-latest -y --cleanup-tag || true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release.outputs.tag }}
+          name: ${{ steps.release.outputs.name }}
+          prerelease: ${{ steps.release.outputs.prerelease }}
+          fail_on_unmatched_files: true
+          files: ${{ env.DMG_PATH }}#Gemdex Memory (macOS, Apple Silicon — signed & notarized)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cleanup keychain
+        if: always()
+        run: security delete-keychain build.keychain || true
