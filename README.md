@@ -18,7 +18,7 @@
 </div>
 
 <p align="center">
-  <img src="assets/hero.jpg" alt="A developer storing knowledge into the Gemdex memory device" width="100%" />
+  <img src="assets/hero.jpg" alt="A developer writing knowledge into the Gemdex memory layer, recalled across every repo and machine" width="100%" />
 </p>
 
 ## Why Gemdex
@@ -166,7 +166,7 @@ in the desktop app. All three tools embed via Gemini and require
 ## How it works
 
 <p align="center">
-  <img src="assets/architecture.jpg" alt="Gemdex architecture: agent → MCP → memory store → LanceDB; desktop app → sidecar → same store" width="100%" />
+  <img src="assets/architecture.jpg" alt="Gemdex pipeline: save memory → chunker → Gemini embed → LanceDB → recall via MCP" width="100%" />
 </p>
 
 1. **Save** — `content` is split into retrieval **chunks**; each chunk is
