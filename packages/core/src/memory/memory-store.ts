@@ -37,7 +37,7 @@ const LIST_FETCH_LIMIT = 100000;
  *
  * Recall ranks chunks then resolves + dedupes back to whole parent memories,
  * so the caller never receives a fragment (the "parent document retriever"
- * pattern — see docs/MEMORY-LAYER-REVAMP.md §4.2).
+ * pattern).
  */
 interface ParentMeta {
     title: string;

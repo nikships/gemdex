@@ -2,9 +2,7 @@
 
 Gemdex is a **global, persistent memory layer for AI coding agents**: explicit
 `save_memory` / `recall` / `update_memory` over Gemini embeddings + an embedded
-LanceDB hybrid (dense + BM25) store. It is **not** a code-search tool — that was
-the pre-0.3.0 product and has been fully removed. If you find lingering
-code-search references (indexing, AST splitters, sync/watchers), they're stale.
+LanceDB hybrid (dense + BM25) store.
 
 ## Monorepo layout
 
@@ -50,8 +48,7 @@ builds to `packages/mcp/dist/index.js`.
 Needs **Zig 0.16** and the `zero-native` CLI/framework. You don't know
 zero-native from general knowledge — load its skill first:
 `npx zero-native skills get core --full` (and `automation` for smoke tests).
-See `packages/app/README.md` and `docs/MEMORY-LAYER-REVAMP.md` §7 for the
-shell↔sidecar handshake and CSP policy.
+See `packages/app/README.md` for the shell↔sidecar handshake and CSP policy.
 
 ## Conventions
 
@@ -59,11 +56,4 @@ shell↔sidecar handshake and CSP policy.
 - Reuse the embedding + vectordb layers; don't reach around `MemoryStore` for
   store access.
 - The sidecar binds **localhost only** (`127.0.0.1`), never `0.0.0.0`.
-- Keep changes scoped; don't reintroduce removed code-search machinery or add
-  speculative config.
-
-## Design reference
-
-`docs/MEMORY-LAYER-REVAMP.md` is the authoritative spec (model, tool contracts,
-desktop architecture, removal checklist, open decisions). Read it before
-non-trivial changes.
+- Keep changes scoped; don't add speculative config.

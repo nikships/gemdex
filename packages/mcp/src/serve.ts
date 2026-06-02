@@ -5,10 +5,9 @@ import { createMemoryStore } from "./memory.js";
 
 /**
  * `gemdex serve` — the localhost HTTP/JSON sidecar that backs the desktop
- * manager app (docs/MEMORY-LAYER-REVAMP.md §7.2.1). It wraps the same
- * gemdex-core MemoryStore + LanceDB store the MCP server uses, binds
- * 127.0.0.1 only, and exposes the management surface (no semantic search —
- * that is MCP-only).
+ * manager app. It wraps the same gemdex-core MemoryStore + LanceDB store the
+ * MCP server uses, binds 127.0.0.1 only, and exposes the management surface
+ * (no semantic search — that is MCP-only).
  *
  * Using localhost HTTP (not the Zig bridge) sidesteps the bridge's 16 KiB
  * request/response cap so a 300-line memory is never truncated.
