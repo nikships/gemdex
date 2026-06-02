@@ -197,6 +197,24 @@ is a fast local manager. On launch the app spawns its own Node sidecar
 (`gemdex serve`) over localhost and opens directly into the manager. **You never
 run a sidecar command.**
 
+### First launch
+
+If `GEMINI_API_KEY` is not configured yet, the app prompts once and stores it
+locally in `~/.gemdex/.env`.
+
+<p align="center">
+  <img src="assets/app-screenshot-setup.png" alt="Gemdex Memory first-launch API key setup screen" width="100%" />
+</p>
+
+### Memory manager
+
+After setup, the app opens into the local manager for browsing, editing,
+exporting, and importing memories.
+
+<p align="center">
+  <img src="assets/app-screenshot-manager.png" alt="Gemdex Memory desktop manager showing stored memories and the empty detail state" width="100%" />
+</p>
+
 ```bash
 # from packages/app — requires Zig 0.16 and the zero-native CLI
 cd packages/app
