@@ -94,6 +94,7 @@ pub fn build(b: *std.Build) void {
     const app_mod = localModule(b, target, optimize, "src/main.zig");
     app_mod.addImport("zero-native", zero_native_mod);
     app_mod.addImport("runner", runner_mod);
+    app_mod.addImport("build_options", options_mod);
     const exe = b.addExecutable(.{
         .name = app_exe_name,
         .root_module = app_mod,
@@ -254,6 +255,20 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
                 app_mod.addRPath(.{ .cwd_relative = "@executable_path/Frameworks" });
             },
         }
+        // Sparkle auto-updates (both web engines). The vendored framework lives
+        // in third_party/sparkle (gitignored, fetched in CI). `gemdex_sparkle_start`
+        // in src/sparkle_host.m is called from main.zig's start(). Packaged builds
+        // load Sparkle from Contents/Frameworks (embed-sparkle.sh); `zig build run`
+        // loads it straight from the source tree via the second rpath below.
+        const sparkle_dir = "third_party/sparkle";
+        const sparkle_fwk_arg = b.fmt("-F{s}", .{b.pathFromRoot(sparkle_dir)});
+        const sparkle_sdk_include = if (b.sysroot) |sysroot| b.fmt("-I{s}/usr/include", .{sysroot}) else "";
+        const sparkle_flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-ObjC", "-mmacosx-version-min=11.0", "-isysroot", sysroot, sparkle_sdk_include, sparkle_fwk_arg } else &.{ "-fobjc-arc", "-ObjC", "-mmacosx-version-min=11.0", sparkle_fwk_arg };
+        app_mod.addCSourceFile(.{ .file = b.path("src/sparkle_host.m"), .flags = sparkle_flags });
+        app_mod.addFrameworkPath(b.path(sparkle_dir));
+        app_mod.linkFramework("Sparkle", .{});
+        app_mod.addRPath(.{ .cwd_relative = "@executable_path/../Frameworks" });
+        app_mod.addRPath(b.path(sparkle_dir));
         if (b.sysroot) |sysroot| {
             app_mod.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }) });
         }

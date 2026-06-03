@@ -13,7 +13,9 @@ LanceDB hybrid (dense + BM25) store.
   `serve.ts`, the localhost HTTP sidecar (`gemdex serve`) for the desktop app.
 - `packages/app` — zero-native desktop manager (Zig shell + web frontend).
   Browse/create/edit/delete/export/import. The Zig shell spawns/kills the Node
-  sidecar; **no memory logic lives in Zig**.
+  sidecar; **no memory logic lives in Zig**. macOS builds ship Sparkle
+  auto-updates (`src/sparkle_host.m`, vendored `third_party/sparkle`,
+  `macos/embed-sparkle.sh`) — see `packages/app/README.md`.
 - `plugin/` — Claude Code plugin (the `memory` skill + manifest).
 
 ## The memory model (don't break these invariants)

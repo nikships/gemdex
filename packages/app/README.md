@@ -39,6 +39,34 @@ allow.
 
 The user never runs a sidecar command — the app spawns it automatically.
 
+## Auto-updates (Sparkle)
+
+The packaged macOS app ships with [Sparkle](https://sparkle-project.org) for
+in-place auto-updates of the native shell + frontend. (The Node sidecar is
+pulled fresh on each launch via `npx -y gemdex-mcp`, so Sparkle only updates
+the `.app` itself.)
+
+- **Init:** `src/sparkle_host.m` exposes `gemdex_sparkle_start()`, called from
+  `main.zig`'s `start()` (on the main thread, Sparkle's required init point).
+  It lazily creates and retains an `SPUStandardUpdaterController`; config comes
+  entirely from Info.plist.
+- **Framework:** vendored under `third_party/sparkle/` (gitignored; pinned to
+  2.9.2, fetched in CI). `build.zig` compiles `sparkle_host.m`, links
+  `Sparkle.framework`, and adds two rpaths: `@executable_path/../Frameworks`
+  (packaged) and the source tree (so `zig build run` finds it).
+- **Packaging:** `macos/embed-sparkle.sh` runs after `zig build package` and
+  before the outer `codesign --deep`. It copies the framework into
+  `Contents/Frameworks/`, injects `SUFeedURL` / `SUPublicEDKey` /
+  `SUEnableAutomaticChecks` / `SUScheduledCheckInterval` into Info.plist, and
+  codesigns Sparkle inside-out (XPC services + `Updater.app` + `Autoupdate`
+  first, then the framework).
+- **Feed:** the release workflow generates a `sign_update`-signed `appcast.xml`
+  and publishes it alongside the DMG, so `SUFeedURL`
+  (`…/releases/latest/download/appcast.xml`) always points at the newest build.
+- **Keys:** the EdDSA public key lives in Info.plist (`embed-sparkle.sh`); the
+  private key is the `SPARKLE_PRIVATE_KEY` GitHub Actions secret. Re-key with
+  `third_party/sparkle/bin/generate_keys` and update both.
+
 ## Requirements
 
 - **Zig 0.16** (the zero-native template targets 0.16 APIs).

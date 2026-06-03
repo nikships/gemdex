@@ -6,6 +6,18 @@ pub const panic = std.debug.FullPanic(zero_native.debug.capturePanic);
 
 const bridge_origins = [_][]const u8{ "zero://app", "zero://inline", "http://127.0.0.1:5173" };
 
+/// Kick off Sparkle's updater (defined in src/sparkle_host.m). Lazily creates
+/// and retains an SPUStandardUpdaterController; the feed URL + EdDSA public key
+/// come from Info.plist. Idempotent and main-thread-safe.
+///
+/// Gated on the zero-native build platform (not host OS): `sparkle_host.m` is
+/// only compiled — and the `gemdex_sparkle_start` symbol only linked — in the
+/// macOS branch of `build.zig`. `-Dplatform=null` on a Mac still targets
+/// os.tag=macos, so we must key off build_options.platform to avoid an
+/// unresolved symbol there.
+const sparkle_enabled = std.mem.eql(u8, @import("build_options").platform, "macos");
+extern fn gemdex_sparkle_start() void;
+
 const command_policies = [_]zero_native.BridgeCommandPolicy{
     .{ .name = "gemdex.getApiBase", .origins = &bridge_origins },
 };
@@ -114,6 +126,10 @@ const App = struct {
 
         self.api_base = std.fmt.bufPrint(&self.api_base_buf, "http://127.0.0.1:{d}", .{port}) catch "";
         std.debug.print("[gemdex] sidecar ready at {s}\n", .{self.api_base});
+
+        // Start Sparkle's auto-updater. `start` runs on the main thread from
+        // zero-native's launch event, which is Sparkle's required init point.
+        if (sparkle_enabled) gemdex_sparkle_start();
     }
 
     fn stop(context: *anyopaque, runtime: *zero_native.Runtime) anyerror!void {

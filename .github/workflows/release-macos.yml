@@ -46,6 +46,23 @@ jobs:
       - name: Install create-dmg
         run: brew install create-dmg
 
+      - name: Fetch Sparkle (framework + tools)
+        working-directory: packages/app
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SPARKLE_VERSION: "2.9.2"
+        run: |
+          set -euo pipefail
+          mkdir -p third_party/sparkle
+          gh release download "$SPARKLE_VERSION" \
+            --repo sparkle-project/Sparkle \
+            --pattern "Sparkle-*.tar.xz" \
+            --dir third_party/sparkle --clobber
+          tar -xf third_party/sparkle/Sparkle-*.tar.xz -C third_party/sparkle
+          rm -f third_party/sparkle/Sparkle-*.tar.xz
+          test -d third_party/sparkle/Sparkle.framework
+          test -x third_party/sparkle/bin/sign_update
+
       - name: Resolve zero-native framework path
         id: zn
         run: echo "path=$(npm root -g)/zero-native" >> "$GITHUB_OUTPUT"
@@ -108,6 +125,9 @@ jobs:
           fi
           echo "Signing identity: $IDENTITY"
 
+          echo "==> Embedding + signing Sparkle (inside-out, before outer sign)"
+          SIGN_IDENTITY="$IDENTITY" bash macos/embed-sparkle.sh "$APP"
+
           echo "==> Signing app (hardened runtime)"
           codesign --deep --force --verify --verbose \
             --sign "$IDENTITY" \
@@ -144,6 +164,54 @@ jobs:
             echo "name=Gemdex Memory ${{ steps.meta.outputs.version }} (build ${GITHUB_SHA::7})" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Generate signed appcast.xml
+        working-directory: packages/app
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          APP_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "$SPARKLE_PRIVATE_KEY" ]; then
+            echo "::error::SPARKLE_PRIVATE_KEY secret is empty — cannot sign the appcast."
+            exit 1
+          fi
+          DMG="zig-out/package/$DMG_NAME"
+          KEY_FILE="$(mktemp)"
+          trap 'rm -f "$KEY_FILE"' EXIT
+          printf '%s' "$SPARKLE_PRIVATE_KEY" > "$KEY_FILE"
+
+          # sign_update emits: sparkle:edSignature="..." length="..."
+          ENCLOSURE_ATTRS="$(./third_party/sparkle/bin/sign_update --ed-key-file "$KEY_FILE" "$DMG")"
+          echo "Enclosure attrs: $ENCLOSURE_ATTRS"
+
+          # make_latest keeps this URL pointing at the newest release's asset, so
+          # it matches the SUFeedURL baked into the app (…/latest/download/…).
+          DMG_URL="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/${DMG_NAME}"
+          PUB_DATE="$(date -u +'%a, %d %b %Y %H:%M:%S +0000')"
+
+          APPCAST="zig-out/package/appcast.xml"
+          cat > "$APPCAST" <<EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
+            <channel>
+              <title>Gemdex Memory</title>
+              <link>https://github.com/${GITHUB_REPOSITORY}</link>
+              <description>Gemdex Memory desktop app updates.</description>
+              <language>en</language>
+              <item>
+                <title>Version ${APP_VERSION}</title>
+                <pubDate>${PUB_DATE}</pubDate>
+                <sparkle:version>${APP_VERSION}</sparkle:version>
+                <sparkle:shortVersionString>${APP_VERSION}</sparkle:shortVersionString>
+                <sparkle:minimumSystemVersion>11.0</sparkle:minimumSystemVersion>
+                <enclosure url="${DMG_URL}" type="application/octet-stream" ${ENCLOSURE_ATTRS} />
+              </item>
+            </channel>
+          </rss>
+          EOF
+          echo "APPCAST_PATH=packages/app/$APPCAST" >> "$GITHUB_ENV"
+          echo "==> appcast.xml:"; cat "$APPCAST"
+
       - name: Refresh rolling desktop-latest tag
         if: steps.release.outputs.tag == 'desktop-latest'
         env:
@@ -158,7 +226,9 @@ jobs:
           prerelease: false
           make_latest: true
           fail_on_unmatched_files: true
-          files: ${{ env.DMG_PATH }}
+          files: |
+            ${{ env.DMG_PATH }}
+            ${{ env.APPCAST_PATH }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
