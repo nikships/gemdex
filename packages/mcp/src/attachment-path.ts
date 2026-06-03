@@ -27,7 +27,11 @@ export interface AttachmentPathInput {
 /** Expand a leading `~`, strip a `file://` URL, and resolve against cwd. */
 function normalizePath(raw: string): string {
     if (raw.startsWith("file://")) {
-        return fileURLToPath(raw);
+        try {
+            return fileURLToPath(raw);
+        } catch {
+            throw new AttachmentValidationError(`Invalid file:// URL: '${raw}'.`);
+        }
     }
     let p = raw;
     if (p === "~" || p.startsWith("~/")) {

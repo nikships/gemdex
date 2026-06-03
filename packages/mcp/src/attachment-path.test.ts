@@ -41,6 +41,13 @@ test("rejects an attachment carrying both data and path", async () => {
     );
 });
 
+test("rejects an invalid file:// URL with a clear validation error", async () => {
+    await assert.rejects(
+        () => resolveAttachmentInputs([{ path: "file://%%not-a-url" }]),
+        (err: unknown) => err instanceof AttachmentValidationError && /Invalid file:\/\/ URL/.test((err as Error).message),
+    );
+});
+
 test("rejects a missing file", async () => {
     const missing = path.join(os.tmpdir(), `gemdex-missing-${Date.now()}.png`);
     await assert.rejects(
