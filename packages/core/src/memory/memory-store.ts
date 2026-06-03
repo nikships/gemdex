@@ -292,16 +292,30 @@ export class MemoryStore {
             );
         }
 
+        // Guard BEFORE any destructive work: an empty payload must never wipe an
+        // existing memory on an update/import overwrite.
+        if (text.trim().length === 0 && validated.length === 0) {
+            throw new Error('Cannot persist an empty memory (no content and no attachments)');
+        }
+
         await this.ensureCollection();
-        // Clean slate for this id (no-op for a fresh save; clears prior state on
-        // update/import overwrite).
+        const title = MemoryStore.resolveTitle(explicitTitle, text, validated);
+
+        // Embed FIRST — this is the failure-prone (network) step. Computing the
+        // vectors before deleting the prior rows/blobs means a failed
+        // update/import leaves the existing memory intact instead of destroying
+        // it. (Overwrite is still not fully atomic, but the failure window
+        // shrinks to the local LanceDB insert.)
+        const chunks = text.trim().length > 0 ? chunkMemory(text, this.chunkOptions) : [];
+        const chunkVectors = await this.embedChunks(chunks);
+        const attachmentVectors = await this.embedAttachments(validated);
+
+        // Embedding succeeded — only now is it safe to clear prior state for this id.
         await this.deleteChunkRows(id);
         await this.blobStore.deleteParent(id);
 
-        const title = MemoryStore.resolveTitle(explicitTitle, text, validated);
-
         try {
-            // Persist blob bytes first so metadata can reference them.
+            // Persist blob bytes so metadata can reference them.
             const stored: StoredAttachment[] = [];
             for (let i = 0; i < validated.length; i++) {
                 const att = validated[i];
@@ -318,18 +332,10 @@ export class MemoryStore {
 
             const meta: ParentMeta = { title, fullContent: text, createdAt, updatedAt, attachments: stored };
 
-            const chunks = text.trim().length > 0 ? chunkMemory(text, this.chunkOptions) : [];
-            const chunkVectors = await this.embedChunks(chunks);
-            const attachmentVectors = await this.embedAttachments(validated);
-
             const rows = [
                 ...this.buildChunkRows(id, chunks, chunkVectors, meta),
                 ...this.buildAttachmentRows(id, stored, attachmentVectors, meta),
             ];
-
-            if (rows.length === 0) {
-                throw new Error('Cannot persist an empty memory (no content and no attachments)');
-            }
 
             await this.db.insertHybrid(this.collectionName, rows);
 
@@ -342,7 +348,7 @@ export class MemoryStore {
                 updatedAt,
             };
         } catch (error) {
-            // Don't leave orphan blobs behind if embedding/insertion failed.
+            // Don't leave orphan blobs behind if blob writes or the insert failed.
             await this.blobStore.deleteParent(id).catch(() => undefined);
             throw error;
         }

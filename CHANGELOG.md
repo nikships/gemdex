@@ -8,7 +8,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - **Multimodal attachments (backend).** `save_memory` and `update_memory` accept an optional `attachments` array of inline base64 media (PNG/JPEG image, MP3/WAV audio, MP4/MOV video, PDF), embedded via `gemini-embedding-2` and recallable by text query. Each attachment is one embedding unit; its caption (or the memory title) backs the BM25 branch.
 - On-disk blob storage for attachment bytes under `~/.gemdex/blobs` (a `FileBlobStore`), keeping the LanceDB table lean. Attachments round-trip through `export`/`import`.
 - `gemdex serve` now accepts attachments on create/update and streams raw attachment bytes at `GET /memories/:id/attachments/:attachmentId`.
-- Attachment validation (mimeType allowlist, per-modality count caps — ≤ 6 images, 1 PDF — and a per-attachment byte ceiling) with a clear error when attachments are supplied to a non-multimodal embedding model.
+- Attachment validation (mimeType allowlist, per-modality count caps — ≤6 images, ≤1 audio, ≤1 video, ≤1 PDF — and a per-attachment byte ceiling) with a clear error when attachments are supplied to a non-multimodal embedding model.
 
 ### Changed
 - `content` is now optional for `save_memory`/`update_memory` when at least one attachment is supplied; `update_memory` preserves omitted fields (text, title, attachments) instead of requiring `content`.

@@ -91,6 +91,16 @@ export function validateAttachments(
 ): ValidatedAttachment[] {
     const result: ValidatedAttachment[] = [];
     const counts: Record<AttachmentKind, number> = { image: 0, audio: 0, video: 0, pdf: 0 };
+    const capFor: Record<AttachmentKind, number> = {
+        image: limits.maxImages,
+        audio: limits.maxAudio,
+        video: limits.maxVideo,
+        pdf: limits.maxPdf,
+    };
+    const labelFor: Record<AttachmentKind, string> = { image: 'image', audio: 'audio', video: 'video', pdf: 'PDF' };
+    // base64 inflates bytes by ~4/3; reject oversized payloads by string length
+    // BEFORE allocating the decoded Buffer so a huge input can't OOM the process.
+    const maxBase64Len = Math.ceil(limits.maxBytesPerAttachment * 1.37) + 256;
 
     attachments.forEach((att, i) => {
         if (!att || typeof att.mimeType !== 'string' || typeof att.data !== 'string') {
@@ -103,6 +113,20 @@ export function validateAttachments(
         if (!kind) {
             throw new AttachmentValidationError(
                 `Unsupported attachment mimeType '${att.mimeType}'. Supported: ${SUPPORTED_MIME_TYPES.join(', ')}.`,
+            );
+        }
+
+        // Enforce the per-modality cap and the size ceiling before decoding, so
+        // an over-cap or oversized payload never gets fully decoded into memory.
+        counts[kind] += 1;
+        if (counts[kind] > capFor[kind]) {
+            throw new AttachmentValidationError(
+                `Too many ${labelFor[kind]} attachments (${counts[kind]}); max ${capFor[kind]} per memory.`,
+            );
+        }
+        if (att.data.length > maxBase64Len) {
+            throw new AttachmentValidationError(
+                `Attachment #${i + 1} (${att.mimeType}) exceeds the ${limits.maxBytesPerAttachment}-byte per-attachment limit.`,
             );
         }
 
@@ -119,7 +143,6 @@ export function validateAttachments(
             );
         }
 
-        counts[kind] += 1;
         const caption = typeof att.caption === 'string' ? att.caption.trim() : '';
         result.push({
             kind,
@@ -129,19 +152,6 @@ export function validateAttachments(
             ...(caption.length > 0 && { caption }),
         });
     });
-
-    if (counts.image > limits.maxImages) {
-        throw new AttachmentValidationError(`Too many image attachments (${counts.image}); max ${limits.maxImages} per memory.`);
-    }
-    if (counts.audio > limits.maxAudio) {
-        throw new AttachmentValidationError(`Too many audio attachments (${counts.audio}); max ${limits.maxAudio} per memory.`);
-    }
-    if (counts.video > limits.maxVideo) {
-        throw new AttachmentValidationError(`Too many video attachments (${counts.video}); max ${limits.maxVideo} per memory.`);
-    }
-    if (counts.pdf > limits.maxPdf) {
-        throw new AttachmentValidationError(`Too many PDF attachments (${counts.pdf}); max ${limits.maxPdf} per memory.`);
-    }
 
     return result;
 }

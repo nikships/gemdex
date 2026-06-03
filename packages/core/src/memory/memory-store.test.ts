@@ -213,6 +213,18 @@ class FakeMultimodalEmbedding extends Embedding {
     }
 }
 
+/** A multimodal embedding whose calls always fail — used to simulate a network error mid-write. */
+class ThrowingEmbedding extends Embedding {
+    protected maxTokens = 8192;
+    async detectDimension(): Promise<number> { return DIM; }
+    getDimension(): number { return DIM; }
+    getProvider(): string { return 'Throwing'; }
+    isMultimodal(): boolean { return true; }
+    async embed(): Promise<EmbeddingVector> { throw new Error('embedding backend unavailable'); }
+    async embedBatch(): Promise<EmbeddingVector[]> { throw new Error('embedding backend unavailable'); }
+    async embedContentBatch(): Promise<EmbeddingVector[]> { throw new Error('embedding backend unavailable'); }
+}
+
 describe('MemoryStore (attachments)', () => {
     let dbDir: string;
     let blobDir: string;
@@ -333,5 +345,26 @@ describe('MemoryStore (attachments)', () => {
         const hit = results.find((r) => r.id === mem.id);
         expect(hit).toBeDefined();
         expect(hit!.attachments).toHaveLength(1);
+    });
+
+    it('preserves the existing memory when a re-embed fails mid-update', async () => {
+        const mem = await store.save({ content: 'original text', attachments: [{ ...png('keepbytes'), caption: 'keep' }] });
+
+        // A second store over the SAME db + blobs whose embedding always throws,
+        // simulating a network failure during the update's re-embed step.
+        const failing = new MemoryStore({
+            embedding: new ThrowingEmbedding(),
+            vectorDatabase: new LanceDBVectorDatabase({ uri: dbDir }),
+            blobStore: new FileBlobStore(blobDir),
+        });
+        await expect(failing.update(mem.id, { content: 'replacement text' })).rejects.toThrow(/embedding backend/i);
+
+        // The original memory and its attachment bytes must survive the failed update.
+        const after = await store.get(mem.id);
+        expect(after).not.toBeNull();
+        expect(after!.content).toBe('original text');
+        expect(after!.attachments).toHaveLength(1);
+        const blob = await store.readAttachment(mem.id, after!.attachments[0].id);
+        expect(blob!.data.toString()).toBe('keepbytes');
     });
 });

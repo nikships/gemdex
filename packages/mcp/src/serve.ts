@@ -89,14 +89,18 @@ function sendBytes(res: http.ServerResponse, status: number, buf: Buffer, conten
     res.end(buf);
 }
 
-function readBody(req: http.IncomingMessage): Promise<any> {
+// Default JSON body ceiling. Routes that accept inline base64 attachments pass
+// a larger limit (ATTACHMENT_BODY_LIMIT) since media payloads are much bigger.
+const DEFAULT_BODY_LIMIT = 50 * 1024 * 1024; // 50 MiB
+const ATTACHMENT_BODY_LIMIT = 100 * 1024 * 1024; // 100 MiB for create/update/import with media
+
+function readBody(req: http.IncomingMessage, maxBytes: number = DEFAULT_BODY_LIMIT): Promise<any> {
     return new Promise((resolve, reject) => {
         const chunks: Buffer[] = [];
         let size = 0;
-        const MAX = 50 * 1024 * 1024; // 50 MiB ceiling for import payloads
         req.on('data', (chunk: Buffer) => {
             size += chunk.length;
-            if (size > MAX) {
+            if (size > maxBytes) {
                 reject(new Error('Request body too large'));
                 req.destroy();
                 return;
@@ -177,7 +181,7 @@ export function createServer(ctx: ServeContext): http.Server {
 
             // POST /memories — create (text and/or inline media attachments)
             if (method === 'POST' && pathname === '/memories') {
-                const body = await readBody(req);
+                const body = await readBody(req, ATTACHMENT_BODY_LIMIT);
                 if (body?.attachments !== undefined && !Array.isArray(body.attachments)) {
                     sendJson(res, 400, { error: "'attachments' must be an array" });
                     return;
@@ -207,7 +211,7 @@ export function createServer(ctx: ServeContext): http.Server {
 
             // POST /import — restore/merge (upsert by id)
             if (method === 'POST' && pathname === '/import') {
-                const body = await readBody(req);
+                const body = await readBody(req, ATTACHMENT_BODY_LIMIT);
                 const records = Array.isArray(body?.records) ? body.records : [];
                 const result = await store.importRecords(records);
                 sendJson(res, 200, result);
@@ -249,7 +253,7 @@ export function createServer(ctx: ServeContext): http.Server {
                 }
 
                 if (method === 'PUT') {
-                    const body = await readBody(req);
+                    const body = await readBody(req, ATTACHMENT_BODY_LIMIT);
                     if (body?.attachments !== undefined && !Array.isArray(body.attachments)) {
                         sendJson(res, 400, { error: "'attachments' must be an array" });
                         return;
@@ -284,8 +288,15 @@ export function createServer(ctx: ServeContext): http.Server {
 
             sendJson(res, 404, { error: `No route for ${method} ${pathname}` });
         } catch (error: any) {
+            const message = error?.message ?? 'Internal error';
+            // readBody rejects with this when the payload exceeds the cap — a
+            // client error (oversized attachments), not a server fault.
+            if (message === 'Request body too large') {
+                sendJson(res, 413, { error: message });
+                return;
+            }
             console.error('[serve] request error:', error);
-            sendJson(res, 500, { error: error?.message ?? 'Internal error' });
+            sendJson(res, 500, { error: message });
         }
     });
 }

@@ -84,7 +84,15 @@ export class FileBlobStore implements BlobStore {
     }
 
     async deleteParent(parentId: string): Promise<void> {
-        const dir = path.join(this.root, FileBlobStore.safeSegment(parentId));
+        const segment = FileBlobStore.safeSegment(parentId);
+        // `safeSegment` permits '.' and '..' (only allowed chars), so guard
+        // explicitly: a '.'/'..' parentId would otherwise resolve to the store
+        // root or its parent and recursively delete unrelated data.
+        const dir = path.resolve(this.root, segment);
+        const rootResolved = path.resolve(this.root);
+        if (segment === '.' || segment === '..' || dir === rootResolved || !dir.startsWith(rootResolved + path.sep)) {
+            throw new Error(`Refusing to delete blobs outside store root: ${parentId}`);
+        }
         await fs.rm(dir, { recursive: true, force: true });
     }
 }

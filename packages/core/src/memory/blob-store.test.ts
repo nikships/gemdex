@@ -44,4 +44,12 @@ describe('FileBlobStore', () => {
     it('refuses to read outside the store root', async () => {
         await expect(store.get('../../etc/passwd')).rejects.toThrow(/outside store root/i);
     });
+
+    it('refuses to deleteParent with a "." or ".." traversal segment', async () => {
+        const ref = await store.put('keep', '0', Buffer.from('safe-bytes'));
+        await expect(store.deleteParent('..')).rejects.toThrow(/outside store root/i);
+        await expect(store.deleteParent('.')).rejects.toThrow(/outside store root/i);
+        // The store root and its existing blobs are untouched.
+        expect(await store.has(ref)).toBe(true);
+    });
 });
