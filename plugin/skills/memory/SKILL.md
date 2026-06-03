@@ -14,14 +14,30 @@ isn't connected — don't bring it up unless asked.
 
 ## The three tools
 
-- `save_memory(content, title?)` — persist a new memory. Returns its `id`.
-- `recall(query, limit?)` — retrieve full memories by natural language, ranked
-  by relevance. Default `limit` ~10.
-- `update_memory(id, content, title?)` — replace an existing memory in place
-  under the same `id`.
+- `save_memory(content, title?, attachments?)` — persist a new memory. Returns its `id`.
+- `recall(query, limit?, attachments?)` — retrieve full memories by natural
+  language (and/or media), ranked by relevance. Default `limit` ~10.
+- `update_memory(id, content?, title?, attachments?)` — replace an existing
+  memory in place under the same `id`.
 
 There is **no delete tool** — deletion is a deliberate human action in the
 Gemdex desktop app. The agent saves, recalls, and edits; the human manages.
+
+### Attaching media (image / audio / video / PDF)
+
+`save_memory`, `update_memory`, and `recall` accept an optional `attachments`
+array. Each attachment is **either** a local file `path` **or** inline base64
+`data` — prefer `path`: the local server reads and encodes the bytes, so you
+never emit base64 in the tool call.
+
+> "Remember this screenshot — it's the login bug." (file at /tmp/login-bug.png)
+→ `save_memory(content="login bug repro", attachments=[{ path: "/tmp/login-bug.png" }])`
+
+> "Find the memory that matches this diagram." (file at ./arch.png)
+→ `recall(attachments=[{ path: "./arch.png" }])`
+
+`mimeType` is inferred from the file extension (png/jpg/jpeg, mp3/wav, mp4/mov,
+pdf); pass it explicitly to override. Requires the gemini-embedding-2 model.
 
 ## When to use them — EXPLICIT ONLY
 

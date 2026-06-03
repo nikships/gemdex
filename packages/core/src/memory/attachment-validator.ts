@@ -28,6 +28,35 @@ const MIME_TO_KIND: Record<string, AttachmentKind> = {
 /** Every mimeType accepted as an attachment. */
 export const SUPPORTED_MIME_TYPES: string[] = Object.keys(MIME_TO_KIND);
 
+/**
+ * File-extension → mimeType, for inferring an attachment's type from a local
+ * path when the caller does not pass `mimeType` explicitly. Every value here is
+ * one of the supported types above, so an inferred mimeType always validates.
+ */
+const EXT_TO_MIME: Record<string, string> = {
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.mp3': 'audio/mp3',
+    '.wav': 'audio/wav',
+    '.mp4': 'video/mp4',
+    '.mov': 'video/quicktime',
+    '.qt': 'video/quicktime',
+    '.pdf': 'application/pdf',
+};
+
+/** Every file extension that maps to a supported attachment mimeType. */
+export const SUPPORTED_ATTACHMENT_EXTENSIONS: string[] = Object.keys(EXT_TO_MIME);
+
+/** Infer a supported mimeType from a file path's extension, or undefined. */
+export function inferMimeTypeFromPath(filePath: string): string | undefined {
+    if (typeof filePath !== 'string') return undefined;
+    const lastDot = filePath.lastIndexOf('.');
+    if (lastDot < 0) return undefined;
+    const ext = filePath.slice(lastDot).toLowerCase();
+    return EXT_TO_MIME[ext];
+}
+
 export interface AttachmentLimits {
     /** Max image attachments per memory (Gemini caps image at 6 per request). */
     maxImages: number;

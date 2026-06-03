@@ -1,4 +1,5 @@
 import { MemoryStore } from "gemdex-core";
+import { resolveAttachmentInputs } from "./attachment-path.js";
 
 type ToolResult = { content: Array<{ type: "text"; text: string }>; isError?: boolean };
 
@@ -57,7 +58,8 @@ export class MemoryToolHandlers {
             return textResult("Error: provide 'content' or at least one attachment.", true);
         }
         try {
-            const memory = await this.store.save({ content, title, ...(attachments && { attachments }) });
+            const resolved = attachments && await resolveAttachmentInputs(attachments);
+            const memory = await this.store.save({ content, title, ...(resolved && { attachments: resolved }) });
             return textResult(formatMemoryResult('Saved', memory));
         } catch (error: any) {
             return textResult(`Failed to save memory: ${error?.message ?? String(error)}`, true);
@@ -80,7 +82,8 @@ export class MemoryToolHandlers {
         }
         const label = query.trim().length > 0 ? `"${query}"` : 'the supplied media';
         try {
-            const results = await this.store.recall(query, limit, hasAttachments ? attachments : undefined);
+            const resolved = hasAttachments ? await resolveAttachmentInputs(attachments!) : undefined;
+            const results = await this.store.recall(query, limit, resolved);
             if (results.length === 0) {
                 return textResult(`No memories matched ${label}. Nothing stored yet, or no relevant match.`);
             }
@@ -122,8 +125,8 @@ export class MemoryToolHandlers {
         const input: { content?: string; title?: string; attachments?: any[] } = {};
         if (hasContent) input.content = args.content;
         if (title !== undefined) input.title = title;
-        if (attachments !== undefined) input.attachments = attachments;
         try {
+            if (attachments !== undefined) input.attachments = await resolveAttachmentInputs(attachments);
             const memory = await this.store.update(id, input);
             return textResult(formatMemoryResult('Updated', memory));
         } catch (error: any) {
