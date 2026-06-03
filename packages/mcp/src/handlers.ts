@@ -67,13 +67,22 @@ export class MemoryToolHandlers {
     async handleRecall(args: any): Promise<ToolResult> {
         const query = typeof args?.query === 'string' ? args.query : '';
         const limit = typeof args?.limit === 'number' && args.limit > 0 ? Math.min(args.limit, 50) : 10;
-        if (query.trim().length === 0) {
-            return textResult("Error: 'query' is required.", true);
+        let attachments: any[] | undefined;
+        if (args?.attachments !== undefined) {
+            if (!Array.isArray(args.attachments)) {
+                return textResult("Error: 'attachments' must be an array.", true);
+            }
+            attachments = args.attachments;
         }
+        const hasAttachments = (attachments?.length ?? 0) > 0;
+        if (query.trim().length === 0 && !hasAttachments) {
+            return textResult("Error: provide 'query' or at least one attachment.", true);
+        }
+        const label = query.trim().length > 0 ? `"${query}"` : 'the supplied media';
         try {
-            const results = await this.store.recall(query, limit);
+            const results = await this.store.recall(query, limit, hasAttachments ? attachments : undefined);
             if (results.length === 0) {
-                return textResult(`No memories matched "${query}". Nothing stored yet, or no relevant match.`);
+                return textResult(`No memories matched ${label}. Nothing stored yet, or no relevant match.`);
             }
             const blocks = results.map((r, i) => {
                 const scoreLine = formatSubScoresLine(r.score, r.subScores);
@@ -85,7 +94,7 @@ export class MemoryToolHandlers {
                     r.content,
                 ].join('\n');
             });
-            const header = `Recalled ${results.length} ${results.length === 1 ? 'memory' : 'memories'} for "${query}":\n`;
+            const header = `Recalled ${results.length} ${results.length === 1 ? 'memory' : 'memories'} for ${label}:\n`;
             return textResult(header + '\n' + blocks.join('\n\n---\n\n'));
         } catch (error: any) {
             return textResult(`Failed to recall memories: ${error?.message ?? String(error)}`, true);

@@ -156,7 +156,7 @@ snippet into your client's root instructions file (conventionally `AGENTS.md`).
 | Tool | Input | Returns | When the agent calls it |
 |------|-------|---------|-------------------------|
 | `save_memory` | `content` and/or `attachments`, `title` (optional) | new `id` + resolved title | only when told to remember/save |
-| `recall` | `query` (required), `limit` (optional, ~10) | full memories ranked by relevance | only when pointed at memory |
+| `recall` | `query` and/or `attachments` (at least one required), `limit` (optional, ~10) | full memories ranked by relevance | only when pointed at memory |
 | `update_memory` | `id` (required); `content`, `title`, `attachments` (optional — at least one required) | updated `id` + title | to revise a stored memory |
 
 Deletion is intentionally **not** an agent tool — it's a deliberate human action
@@ -173,8 +173,12 @@ Each attachment is embedded as
 its own unit; its `caption` (or the memory title) backs the keyword branch. Raw
 bytes are stored as blobs under `~/.gemdex/blobs` and round-trip through
 export/import. Attachments require the `gemini-embedding-2` model — supplying
-them to a text-only model returns a clear error. `recall` is text-query → media
-result (querying *by* media is not supported yet).
+them to a text-only model returns a clear error.
+
+`recall` works both ways: query by text, by media, or both. Each query
+attachment is embedded into the shared space and runs its own similarity branch,
+fused with the text branch via Reciprocal Rank Fusion — so you can recall a
+memory from a screenshot, an audio clip, or a PDF as easily as from a phrase.
 
 ## How it works
 
@@ -202,11 +206,15 @@ A native, **manage-only** app (built on [zero-native](https://www.npmjs.com/pack
 that opens straight into your memory layer:
 
 - Browse / list all memories (sorted by recency).
-- View, create, edit, and delete memories.
+- View, create, edit, and delete memories — including inline media attachments
+  (drag-and-drop or pick image / audio / video / PDF, caption them, and preview
+  them in place).
+- "Find similar" on any attachment to recall related memories by media.
 - Export all memories to a portable JSONL file; import them back.
 
-There's **no semantic search box** — recall is an agent/MCP capability; the app
-is a fast local manager. On launch the app spawns its own Node sidecar
+There's **no free-text search box** — recall is an agent/MCP capability; the app
+is a fast local manager (the only recall it surfaces is "Find similar", i.e.
+recall-by-example from an existing attachment). On launch the app spawns its own Node sidecar
 (`gemdex serve`) over localhost and opens directly into the manager. **You never
 run a sidecar command.**
 

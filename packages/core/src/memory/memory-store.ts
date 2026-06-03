@@ -32,6 +32,9 @@ import {
 const DEFAULT_COLLECTION = 'memories';
 const DEFAULT_PREVIEW_LENGTH = 200;
 const LIST_FETCH_LIMIT = 100000;
+/** Reciprocal Rank Fusion constant, shared by the hybrid text path and the
+ *  cross-branch fusion used by recall-by-media. */
+const RECALL_RRF_K = 100;
 
 /**
  * Internal mapping between the memory model and the generic hybrid vector
@@ -371,39 +374,119 @@ export class MemoryStore {
     }
 
     /**
-     * Retrieve memories by natural-language query. Hybrid (or dense-only when
-     * HYBRID_MODE=false) search over chunks + attachments, resolved to full
-     * parent memories and deduplicated by parent id. Pure relevance ranking.
+     * Retrieve memories by a natural-language query and/or inline media
+     * (image / audio / video / PDF). Each query signal becomes its own ranked
+     * branch — text takes the hybrid (dense + BM25) path; each query attachment
+     * is embedded with `embedContentBatch` and runs a dense branch in the same
+     * shared space. When more than one branch is present they are fused with
+     * RRF (the same scale-free fusion the hybrid text path uses), then resolved
+     * to full parent memories and deduped by parent id. Pure relevance ranking.
+     *
+     * `query` is optional when at least one query attachment is supplied
+     * (recall-by-media). Supplying attachments to a non-multimodal model throws.
      */
-    async recall(query: string, limit = 10): Promise<MemoryRecallResult[]> {
+    async recall(
+        query?: string,
+        limit = 10,
+        queryAttachments?: MemoryAttachmentInput[],
+    ): Promise<MemoryRecallResult[]> {
         const trimmed = (query ?? '').trim();
-        if (trimmed.length === 0) return [];
+        const attachmentsInput = queryAttachments ?? [];
+        const hasText = trimmed.length > 0;
+        const hasAttachments = attachmentsInput.length > 0;
+        if (!hasText && !hasAttachments) return [];
+
+        // Validate query media + assert multimodal support BEFORE the
+        // collection-existence shortcut, so a misused model fails fast (a clear
+        // programming error) rather than silently returning [] on an empty store.
+        const validatedQuery = hasAttachments
+            ? validateAttachments(attachmentsInput, this.attachmentLimits)
+            : [];
+        if (validatedQuery.length > 0 && !this.embedding.isMultimodal()) {
+            throw new Error(
+                'Recall-by-media requires a multimodal embedding model (e.g. gemini-embedding-2); ' +
+                `the current ${this.embedding.getProvider()} model does not accept inline media.`,
+            );
+        }
 
         const exists = await this.db.hasCollection(this.collectionName);
         if (!exists) return [];
 
-        const queryEmbedding = await this.embedding.embed(trimmed);
         // Over-fetch chunks so that after dedupe-by-parent we still have enough
         // distinct memories to satisfy `limit`.
         const chunkLimit = Math.max(limit * 4, 20);
 
-        let hits: HybridSearchResult[];
+        // Text-only fast path: preserve the exact prior behavior, including the
+        // per-branch subScores that callers surface beneath each hit.
+        if (hasText && !hasAttachments) {
+            const hits = await this.searchText(trimmed, chunkLimit);
+            return this.resolveHitsToParents(hits, limit);
+        }
+
+        // Otherwise build one ranked list per query signal and fuse with RRF.
+        const rankedLists: HybridSearchResult[][] = [];
+        if (hasText) {
+            rankedLists.push(await this.searchText(trimmed, chunkLimit));
+        }
+        if (validatedQuery.length > 0) {
+            const vectors = await this.embedAttachments(validatedQuery);
+            for (const vec of vectors) {
+                const dense = await this.db.search(this.collectionName, vec.vector, { topK: chunkLimit });
+                rankedLists.push(dense.map((r) => ({ document: r.document, score: r.score })));
+            }
+        }
+
+        const fused = MemoryStore.fuseByRrf(rankedLists);
+        return this.resolveHitsToParents(fused, limit);
+    }
+
+    /** One text branch: hybrid (dense + BM25) when enabled, else dense-only. */
+    private async searchText(trimmed: string, chunkLimit: number): Promise<HybridSearchResult[]> {
+        const queryEmbedding = await this.embedding.embed(trimmed);
         if (this.getIsHybrid()) {
             const requests: HybridSearchRequest[] = [
                 { data: queryEmbedding.vector, anns_field: 'vector', param: {}, limit: chunkLimit },
                 { data: trimmed, anns_field: 'sparse_vector', param: {}, limit: chunkLimit },
             ];
-            hits = await this.db.hybridSearch(this.collectionName, requests, {
-                rerank: { strategy: 'rrf', params: { k: 100 } },
+            return this.db.hybridSearch(this.collectionName, requests, {
+                rerank: { strategy: 'rrf', params: { k: RECALL_RRF_K } },
                 limit: chunkLimit,
             });
-        } else {
-            const dense = await this.db.search(this.collectionName, queryEmbedding.vector, { topK: chunkLimit });
-            hits = dense.map((r) => ({ document: r.document, score: r.score }));
         }
+        const dense = await this.db.search(this.collectionName, queryEmbedding.vector, { topK: chunkLimit });
+        return dense.map((r) => ({ document: r.document, score: r.score }));
+    }
 
-        // Resolve chunks to parents and dedupe, keeping the best-scoring chunk
-        // per parent. Results stay ranked by fused relevance.
+    /**
+     * Reciprocal Rank Fusion across branch result lists. Each row's score is
+     * the sum of `1 / (k + rank)` over the lists that surfaced it (1-based
+     * rank), deduped at the row (`document.id`) level. Scale-free, so a dense
+     * media branch and a fused text branch combine without score normalization.
+     */
+    private static fuseByRrf(lists: HybridSearchResult[][], k = RECALL_RRF_K): HybridSearchResult[] {
+        const byRow = new Map<string, HybridSearchResult>();
+        for (const list of lists) {
+            list.forEach((hit, index) => {
+                const rowId = hit.document.id;
+                if (!rowId) return;
+                const contribution = 1 / (k + index + 1);
+                const existing = byRow.get(rowId);
+                if (existing) {
+                    existing.score += contribution;
+                } else {
+                    byRow.set(rowId, { document: hit.document, score: contribution });
+                }
+            });
+        }
+        return Array.from(byRow.values()).sort((a, b) => b.score - a.score);
+    }
+
+    /**
+     * Resolve ranked chunk/attachment rows back to full parent memories,
+     * keeping the best-scoring row per parent so a caller never receives a
+     * fragment. Results stay ranked by fused relevance.
+     */
+    private resolveHitsToParents(hits: HybridSearchResult[], limit: number): MemoryRecallResult[] {
         const byParent = new Map<string, MemoryRecallResult>();
         for (const hit of hits) {
             const parentId = hit.document.relativePath;

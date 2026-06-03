@@ -41,14 +41,17 @@ to embed media alongside the text. Requires the gemini-embedding-2 model. Either
 `;
 
 const RECALL_DESCRIPTION = `
-Retrieve memories from the user's global memory layer by natural-language query.
+Retrieve memories from the user's global memory layer by natural-language query
+and/or inline media (image / audio / video / PDF).
 
 🎯 **When to use**: ONLY when the user points you at memory ("check your memory
-layer", "how do we usually do X", "what were those credentials"). Never recall
-unprompted.
+layer", "how do we usually do X", "what were those credentials", "find the
+memory that matches this screenshot"). Never recall unprompted.
 
-Behavior: hybrid semantic + BM25 search returns the FULL matching memories
-(never fragments), ranked by relevance. Use the returned content directly.
+Behavior: hybrid semantic + BM25 search over text, plus a media-similarity
+branch for each query attachment, fused by relevance. Returns the FULL matching
+memories (never fragments). Either \`query\` or at least one attachment is
+required; recall-by-media requires the gemini-embedding-2 model.
 `;
 
 const UPDATE_MEMORY_DESCRIPTION = `
@@ -137,7 +140,7 @@ class GemdexMemoryServer {
                         properties: {
                             query: {
                                 type: "string",
-                                description: "Natural-language description of what to recall.",
+                                description: "Natural-language description of what to recall. Optional when attachments are provided.",
                             },
                             limit: {
                                 type: "number",
@@ -145,8 +148,9 @@ class GemdexMemoryServer {
                                 default: 10,
                                 maximum: 50,
                             },
+                            attachments: ATTACHMENTS_SCHEMA,
                         },
-                        required: ["query"],
+                        required: [],
                     },
                 },
                 {
