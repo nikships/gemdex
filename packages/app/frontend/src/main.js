@@ -154,8 +154,8 @@ function attachmentUrl(memoryId, attachmentId) {
   return `${apiBase}/memories/${encodeURIComponent(memoryId)}/attachments/${encodeURIComponent(attachmentId)}`;
 }
 
-/** Read a File into base64 (no data: prefix), for create/update payloads. */
-function fileToBase64(file) {
+/** Read a File/Blob into base64 (no data: prefix), for create/update payloads. */
+function fileToBase64(blob) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
@@ -164,7 +164,7 @@ function fileToBase64(file) {
       resolve(comma >= 0 ? result.slice(comma + 1) : result);
     };
     reader.onerror = () => reject(reader.error || new Error("Failed to read file"));
-    reader.readAsDataURL(file);
+    reader.readAsDataURL(blob);
   });
 }
 
@@ -172,10 +172,9 @@ function fileToBase64(file) {
 async function fetchAttachmentBase64(memoryId, attachmentId) {
   const res = await fetch(attachmentUrl(memoryId, attachmentId));
   if (!res.ok) throw new Error(`Could not read attachment ${attachmentId}`);
-  const buf = new Uint8Array(await res.arrayBuffer());
-  let binary = "";
-  for (let i = 0; i < buf.length; i++) binary += String.fromCharCode(buf[i]);
-  return btoa(binary);
+  // FileReader.readAsDataURL is native + async, so multi-MB blobs don't block
+  // the UI thread (a manual String.fromCharCode loop would).
+  return fileToBase64(await res.blob());
 }
 
 /** A stable signature of the editor attachment set, to detect edits. */
