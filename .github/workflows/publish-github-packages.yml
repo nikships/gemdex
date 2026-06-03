@@ -79,7 +79,11 @@ jobs:
           if npm view "@anand-92/gemdex-core@$VERSION" version >/dev/null 2>&1; then
             echo "@anand-92/gemdex-core@$VERSION already on GitHub Packages; skipping."
           else
-            pnpm --filter @anand-92/gemdex-core publish --no-git-checks
+            # --ignore-scripts: the dist was already built (and, for mcp,
+            # import-rewritten) above. The prepublishOnly rebuild would rimraf
+            # dist and recompile with the unscoped `gemdex-core` specifier,
+            # which no longer resolves after the @anand-92 rename — so skip it.
+            pnpm --filter @anand-92/gemdex-core publish --no-git-checks --ignore-scripts
           fi
 
       - name: Publish @anand-92/gemdex-mcp
@@ -91,5 +95,8 @@ jobs:
           if npm view "@anand-92/gemdex-mcp@$VERSION" version >/dev/null 2>&1; then
             echo "@anand-92/gemdex-mcp@$VERSION already on GitHub Packages; skipping."
           else
-            pnpm --filter @anand-92/gemdex-mcp publish --no-git-checks
+            # --ignore-scripts: see the core step. The prepublishOnly rebuild
+            # would overwrite the scope-rewritten dist and fail to resolve the
+            # unscoped gemdex-core import.
+            pnpm --filter @anand-92/gemdex-mcp publish --no-git-checks --ignore-scripts
           fi
