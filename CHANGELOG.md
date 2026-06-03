@@ -9,9 +9,12 @@ All notable changes to this project are documented here. The format follows [Kee
 - On-disk blob storage for attachment bytes under `~/.gemdex/blobs` (a `FileBlobStore`), keeping the LanceDB table lean. Attachments round-trip through `export`/`import`.
 - `gemdex serve` now accepts attachments on create/update and streams raw attachment bytes at `GET /memories/:id/attachments/:attachmentId`.
 - Attachment validation (mimeType allowlist, per-modality count caps — ≤6 images, ≤1 audio, ≤1 video, ≤1 PDF — and a per-attachment byte ceiling) with a clear error when attachments are supplied to a non-multimodal embedding model.
+- **Recall by media.** `recall` now accepts inline media (image/audio/video/PDF) alongside or instead of a text `query`. Each query attachment is embedded into the shared `gemini-embedding-2` space and runs its own similarity branch; text + media branches are fused with Reciprocal Rank Fusion. Exposed through the `recall` MCP tool and a new `POST /recall` route on `gemdex serve`.
+- **Desktop app multimodal UI.** Create/edit memories with drag-and-drop or a file picker; per-attachment caption inputs; inline rendering of images, audio and video players, and native PDF preview; a media badge on list items; and a “Find similar” action on any attachment that runs recall-by-example (no free-text search box — keeping the app manage-only).
 
 ### Changed
 - `content` is now optional for `save_memory`/`update_memory` when at least one attachment is supplied; `update_memory` preserves omitted fields (text, title, attachments) instead of requiring `content`.
+- `recall` (`MemoryStore` + MCP tool) now takes an optional media query; `query` is optional when at least one attachment is provided.
 
 ## [0.3.2] - 2026-06-02
 

@@ -187,6 +187,32 @@ test("get on unknown id returns 404", async () => {
     assert.equal(res.status, 404);
 });
 
+test("POST /recall returns matching memories by text query", async () => {
+    await fetch(`${base}/memories`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: "kafka retry backoff strategy notes", title: "Kafka" }),
+    });
+    const res = await fetch(`${base}/recall`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: "kafka retry backoff", limit: 5 }),
+    });
+    assert.equal(res.status, 200);
+    const { results } = await json(res);
+    assert.ok(Array.isArray(results));
+    assert.ok(results.some((r: any) => r.title === "Kafka"));
+});
+
+test("POST /recall with neither query nor attachments returns 400", async () => {
+    const res = await fetch(`${base}/recall`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+    });
+    assert.equal(res.status, 400);
+});
+
 test("create with neither content nor attachments returns 400", async () => {
     const res = await fetch(`${base}/memories`, {
         method: "POST",
@@ -230,6 +256,17 @@ test("multimodal: create with an attachment, then fetch its raw bytes", async ()
 
         const missing = await fetch(`${mmBase}/memories/${memory.id}/attachments/nope`);
         assert.equal(missing.status, 404);
+
+        // recall-by-media: the same bytes embed to the same vector, so a
+        // media-only /recall finds the memory it was attached to.
+        const recallRes = await fetch(`${mmBase}/recall`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ attachments: [{ mimeType: "image/png", data }] }),
+        });
+        assert.equal(recallRes.status, 200);
+        const { results } = await json(recallRes);
+        assert.ok(results.some((r: any) => r.id === memory.id));
     } finally {
         await new Promise<void>((resolve) => mmServer.close(() => resolve()));
         fs.rmSync(mmDbDir, { recursive: true, force: true });

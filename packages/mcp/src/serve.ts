@@ -218,6 +218,33 @@ export function createServer(ctx: ServeContext): http.Server {
                 return;
             }
 
+            // POST /recall — relevance search by text and/or inline media.
+            // Powers the app's "find similar" (recall-by-example); there is no
+            // free-text search box, so query is usually omitted in favor of an
+            // attachment lifted from an existing memory.
+            if (method === 'POST' && pathname === '/recall') {
+                const body = await readBody(req, ATTACHMENT_BODY_LIMIT);
+                if (body?.attachments !== undefined && !Array.isArray(body.attachments)) {
+                    sendJson(res, 400, { error: "'attachments' must be an array" });
+                    return;
+                }
+                const query = typeof body?.query === 'string' ? body.query : '';
+                const attachments = Array.isArray(body?.attachments) ? body.attachments : undefined;
+                const limit = typeof body?.limit === 'number' && body.limit > 0 ? Math.min(body.limit, 50) : 10;
+                const hasAttachments = (attachments?.length ?? 0) > 0;
+                if (query.trim().length === 0 && !hasAttachments) {
+                    sendJson(res, 400, { error: "'query' or at least one attachment is required" });
+                    return;
+                }
+                try {
+                    const results = await store.recall(query, limit, hasAttachments ? attachments : undefined);
+                    sendJson(res, 200, { results });
+                } catch (error: any) {
+                    sendJson(res, 400, { error: error?.message ?? 'Recall failed' });
+                }
+                return;
+            }
+
             // GET /memories/:id/attachments/:attachmentId — raw attachment bytes.
             // Matched BEFORE the greedy /memories/:id detail route below.
             const attachmentMatch = pathname.match(/^\/memories\/([^/]+)\/attachments\/([^/]+)$/);

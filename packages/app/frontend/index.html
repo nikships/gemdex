@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' http://127.0.0.1:* http://127.0.0.1:5173 ws://127.0.0.1:5173" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http://127.0.0.1:*; media-src 'self' blob: http://127.0.0.1:*; frame-src 'self' blob: http://127.0.0.1:*; object-src 'self' blob: http://127.0.0.1:*; connect-src 'self' http://127.0.0.1:* http://127.0.0.1:5173 ws://127.0.0.1:5173" />
     <title>Gemdex Memory</title>
   </head>
   <body>
@@ -53,6 +53,21 @@
           <form id="editor" class="editor" hidden>
             <input id="title-input" class="title-input" type="text" placeholder="Title (optional — auto-derived if blank)" />
             <textarea id="content-input" class="content-input" placeholder="Memory content. A one-line fact or a 300-line playbook — anything."></textarea>
+
+            <section class="attachments" id="attachments">
+              <div class="attachments-head">
+                <span class="attachments-label">Attachments</span>
+                <button type="button" id="attach-btn" class="ghost">Add files</button>
+                <input id="attach-input" type="file" multiple hidden
+                  accept="image/png,image/jpeg,audio/mpeg,audio/mp3,audio/wav,video/mp4,video/quicktime,application/pdf" />
+              </div>
+              <div id="dropzone" class="dropzone">
+                <ul id="attachment-list" class="attachment-list"></ul>
+                <p class="dropzone-hint" id="dropzone-hint">Drag &amp; drop media here, or “Add files”. Images (≤6), plus one each of audio / video / PDF. 20&nbsp;MB per file.</p>
+              </div>
+              <p id="attach-error" class="attach-error" hidden></p>
+            </section>
+
             <div class="editor-footer">
               <div class="meta" id="meta"></div>
               <div class="editor-actions">
@@ -61,6 +76,15 @@
               </div>
             </div>
           </form>
+
+          <div id="similar-panel" class="similar-panel" hidden>
+            <div class="similar-head">
+              <span id="similar-title">Similar memories</span>
+              <button type="button" id="similar-close" class="ghost">Close</button>
+            </div>
+            <ul id="similar-list" class="similar-list"></ul>
+            <p id="similar-empty" class="similar-empty" hidden>No similar memories found.</p>
+          </div>
         </section>
       </main>
     </div>

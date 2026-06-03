@@ -347,6 +347,38 @@ describe('MemoryStore (attachments)', () => {
         expect(hit!.attachments).toHaveLength(1);
     });
 
+    it('recalls by media alone (query attachment, no text)', async () => {
+        // The fake multimodal embedding seeds its vector on mimeType+base64, so
+        // the same bytes embed to the same vector — a media-only query finds it.
+        const bytes = png('UNIQUE-DIAGRAM-BYTES');
+        const mem = await store.save({ content: 'rollout notes', attachments: [bytes] });
+        const results = await store.recall(undefined, 5, [bytes]);
+        const hit = results.find((r) => r.id === mem.id);
+        expect(hit).toBeDefined();
+        expect(hit!.attachments).toHaveLength(1);
+    });
+
+    it('recalls by text + media, fusing both branches', async () => {
+        const bytes = png('FUSION-IMAGE');
+        const mem = await store.save({
+            content: 'deployment runbook for the gateway service',
+            attachments: [bytes],
+        });
+        const results = await store.recall('deployment runbook', 5, [bytes]);
+        const hit = results.find((r) => r.id === mem.id);
+        expect(hit).toBeDefined();
+        expect(hit!.score).toBeGreaterThan(0);
+    });
+
+    it('rejects recall-by-media on a non-multimodal embedding model', async () => {
+        const textOnly = new MemoryStore({
+            embedding: new FakeEmbedding(),
+            vectorDatabase: new LanceDBVectorDatabase({ uri: dbDir }),
+            blobStore: new FileBlobStore(blobDir),
+        });
+        await expect(textOnly.recall(undefined, 5, [png('X')])).rejects.toThrow(/multimodal/i);
+    });
+
     it('preserves the existing memory when a re-embed fails mid-update', async () => {
         const mem = await store.save({ content: 'original text', attachments: [{ ...png('keepbytes'), caption: 'keep' }] });
 
