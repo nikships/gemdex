@@ -35,9 +35,11 @@ Never capture proactively.
 Behavior: the content is chunked, embedded via Gemini, and stored globally
 (searchable from every repo and session). Returns the new memory id.
 
-Multimodal: optionally pass \`attachments\` (inline base64 image/audio/video/PDF)
-to embed media alongside the text. Requires the gemini-embedding-2 model. Either
-\`content\` or at least one attachment is required.
+Multimodal: optionally pass \`attachments\` (image/audio/video/PDF) to embed
+media alongside the text. Each attachment is either a local file \`path\`
+(preferred — the server reads + encodes the bytes, so you don't emit base64) or
+inline base64 \`data\`. Requires the gemini-embedding-2 model. Either \`content\`
+or at least one attachment is required.
 `;
 
 const RECALL_DESCRIPTION = `
@@ -50,8 +52,10 @@ memory that matches this screenshot"). Never recall unprompted.
 
 Behavior: hybrid semantic + BM25 search over text, plus a media-similarity
 branch for each query attachment, fused by relevance. Returns the FULL matching
-memories (never fragments). Either \`query\` or at least one attachment is
-required; recall-by-media requires the gemini-embedding-2 model.
+memories (never fragments). A query attachment is either a local file \`path\`
+(preferred — the server reads + encodes the bytes) or inline base64 \`data\`.
+Either \`query\` or at least one attachment is required; recall-by-media requires
+the gemini-embedding-2 model.
 `;
 
 const UPDATE_MEMORY_DESCRIPTION = `
@@ -64,33 +68,45 @@ save_memory or recall result.
 Behavior: re-chunks and re-embeds the new content under the same id. Omitted
 fields are preserved — leave out \`content\` to keep the prior text, leave out
 \`attachments\` to keep the prior media (pass \`attachments: []\` to clear it).
-There is no delete via MCP — deletion is a human action in the desktop app.
+Each attachment is either a local file \`path\` (preferred) or inline base64
+\`data\`. There is no delete via MCP — deletion is a human action in the desktop app.
 `;
 
-// JSON-schema fragment for the optional inline-media array shared by
-// save_memory / update_memory.
+// JSON-schema fragment for the optional media array shared by save_memory /
+// recall / update_memory. Each item is EITHER a local file `path` (preferred
+// for agents — the server reads + base64-encodes it, so no megabytes of base64
+// land in tool-call args) OR inline base64 `data`.
 const ATTACHMENTS_SCHEMA = {
     type: "array",
     description:
-        "Optional inline media to embed (base64). Requires the gemini-embedding-2 model. " +
+        "Optional media to embed. Each item is either a local file 'path' (preferred — the " +
+        "server reads the bytes off disk; mimeType is inferred from the extension) or inline " +
+        "base64 'data' with a 'mimeType'. Requires the gemini-embedding-2 model. " +
         "Limits: ≤6 images, ≤1 PDF, ≤1 audio, ≤1 video per memory.",
     items: {
         type: "object",
         properties: {
+            path: {
+                type: "string",
+                description: "Absolute (or ~/cwd-relative) path to a local media file. Preferred over 'data'. Mutually exclusive with 'data'.",
+            },
             mimeType: {
                 type: "string",
-                description: "image/png, image/jpeg, audio/mp3, audio/wav, video/mp4, video/quicktime, or application/pdf.",
+                description: "image/png, image/jpeg, audio/mp3, audio/wav, video/mp4, video/quicktime, or application/pdf. Required with 'data'; optional with 'path' (inferred from the extension).",
             },
             data: {
                 type: "string",
-                description: "Base64-encoded bytes of the attachment.",
+                description: "Base64-encoded bytes of the attachment. Mutually exclusive with 'path'.",
             },
             caption: {
                 type: "string",
                 description: "Optional text describing this attachment; backs the BM25 (keyword) branch for it.",
             },
         },
-        required: ["mimeType", "data"],
+        anyOf: [
+            { required: ["path"] },
+            { required: ["data", "mimeType"] },
+        ],
     },
 } as const;
 

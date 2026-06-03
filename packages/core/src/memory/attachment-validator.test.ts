@@ -2,7 +2,9 @@ import {
     validateAttachments,
     AttachmentValidationError,
     SUPPORTED_MIME_TYPES,
+    SUPPORTED_ATTACHMENT_EXTENSIONS,
     mimeToKind,
+    inferMimeTypeFromPath,
     DEFAULT_ATTACHMENT_LIMITS,
 } from './attachment-validator';
 
@@ -56,5 +58,30 @@ describe('validateAttachments', () => {
         expect(mimeToKind('video/mp4')).toBe('video');
         expect(mimeToKind('text/plain')).toBeUndefined();
         expect(SUPPORTED_MIME_TYPES.length).toBeGreaterThan(0);
+    });
+});
+
+describe('inferMimeTypeFromPath', () => {
+    it('maps each supported extension to a supported mimeType', () => {
+        expect(inferMimeTypeFromPath('/a/b/photo.png')).toBe('image/png');
+        expect(inferMimeTypeFromPath('clip.mp4')).toBe('video/mp4');
+        expect(inferMimeTypeFromPath('rec.mov')).toBe('video/quicktime');
+        expect(inferMimeTypeFromPath('doc.pdf')).toBe('application/pdf');
+        for (const ext of SUPPORTED_ATTACHMENT_EXTENSIONS) {
+            const mime = inferMimeTypeFromPath(`file${ext}`);
+            expect(mime).toBeDefined();
+            expect(SUPPORTED_MIME_TYPES).toContain(mime);
+        }
+    });
+
+    it('is case-insensitive on the extension', () => {
+        expect(inferMimeTypeFromPath('/x/Photo.JPG')).toBe('image/jpeg');
+        expect(inferMimeTypeFromPath('CLIP.MP4')).toBe('video/mp4');
+    });
+
+    it('returns undefined for unknown or missing extensions', () => {
+        expect(inferMimeTypeFromPath('notes.txt')).toBeUndefined();
+        expect(inferMimeTypeFromPath('archive.gif')).toBeUndefined();
+        expect(inferMimeTypeFromPath('README')).toBeUndefined();
     });
 });
