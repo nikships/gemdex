@@ -34,6 +34,12 @@ LanceDB hybrid (dense + BM25) store.
   space; `query` is optional when media is supplied. The desktop app surfaces
   this only as recall-*by-example* ("Find similar" on an attachment) — there is
   still no free-text search box in the app.
+- **Attachments by path or base64.** An attachment (on `save_memory` / `recall`
+  / `update_memory`) is either inline base64 `data` or a local file `path`. Path
+  resolution (read off disk + base64-encode, mimeType inferred from the
+  extension) lives **only in the MCP stdio handlers** (`attachment-path.ts`);
+  the HTTP sidecar and `MemoryStore` never read files by path. Per-attachment
+  ceiling is 20 MB (inline base64 only — no Files API).
 - **No guardrails by design.** Memories may store plaintext secrets; that's the
   user's choice. Don't add redaction/encryption/safety enforcement.
 
@@ -44,7 +50,7 @@ pnpm install
 pnpm build          # tsc build, all packages
 pnpm typecheck
 pnpm lint           # eslint; pnpm lint:fix to autofix
-pnpm -r --if-present test   # 70 tests: 59 core (jest) + 11 mcp serve (node:test)
+pnpm -r --if-present test   # 82 tests: 62 core (jest) + 20 mcp (node:test): serve + attachment-path
 ```
 
 Always run typecheck + lint + tests before committing. The MCP entry point
