@@ -8,13 +8,25 @@ import {
 } from '../vectordb';
 import { envManager } from '../utils/env-manager';
 import { chunkMemory, deriveTitle, ChunkOptions } from './chunker';
+import { BlobStore, FileBlobStore } from './blob-store';
 import {
+    AttachmentLimits,
+    DEFAULT_ATTACHMENT_LIMITS,
+    ValidatedAttachment,
+    mimeToKind,
+    validateAttachments,
+} from './attachment-validator';
+import {
+    AttachmentKind,
     Memory,
+    MemoryAttachment,
+    MemoryAttachmentInput,
     MemorySummary,
     MemoryRecallResult,
     SaveMemoryInput,
     UpdateMemoryInput,
     MemoryExportRecord,
+    MemoryExportAttachment,
 } from './types';
 
 const DEFAULT_COLLECTION = 'memories';
@@ -23,27 +35,49 @@ const LIST_FETCH_LIMIT = 100000;
 
 /**
  * Internal mapping between the memory model and the generic hybrid vector
- * store. Each retrieval chunk is one stored row. The generic store's columns
- * are reused as typed, filterable storage slots:
+ * store. Each retrieval chunk OR attachment is one stored row. The generic
+ * store's columns are reused as typed, filterable storage slots:
  *
- *   id            -> `${parentId}::${chunkIndex}`   (unique per chunk)
- *   vector        -> chunk embedding
- *   content       -> chunk text (the BM25 + dense target)
+ *   id            -> `${parentId}::${chunkIndex}`        (text chunk row)
+ *                 -> `${parentId}::att::${attachIndex}`  (attachment row)
+ *   vector        -> chunk text embedding | attachment media embedding
+ *   content       -> chunk text | attachment caption/title (the BM25 target)
  *   relativePath  -> parentId        (filterable: get / list / delete grouping)
- *   startLine     -> chunkIndex
- *   endLine       -> chunkCount
+ *   startLine     -> chunk/attachment index
+ *   endLine       -> chunk/attachment count
  *   fileExtension -> "" (unused)
- *   metadata.json -> { title, fullContent, createdAt, updatedAt }
+ *   metadata.json -> { title, fullContent, createdAt, updatedAt, attachments }
  *
- * Recall ranks chunks then resolves + dedupes back to whole parent memories,
- * so the caller never receives a fragment (the "parent document retriever"
- * pattern).
+ * Recall ranks chunks/attachments then resolves + dedupes back to whole parent
+ * memories, so the caller never receives a fragment (the "parent document
+ * retriever" pattern). Media is one embedding unit — attachments bypass text
+ * chunking (one row per attachment); only their caption/title feeds BM25.
  */
+interface StoredAttachment {
+    /** Stable within the parent memory (the attachment's index as a string). */
+    id: string;
+    kind: AttachmentKind;
+    mimeType: string;
+    byteLength: number;
+    caption?: string;
+    /** Opaque ref into the BlobStore where the raw bytes live. */
+    blobRef: string;
+}
+
 interface ParentMeta {
     title: string;
     fullContent: string;
     createdAt: number;
     updatedAt: number;
+    attachments: StoredAttachment[];
+}
+
+/** Raw attachment bytes plus their content type, for rendering/streaming. */
+export interface AttachmentBytes {
+    mimeType: string;
+    byteLength: number;
+    caption?: string;
+    data: Buffer;
 }
 
 export interface MemoryStoreConfig {
@@ -53,6 +87,10 @@ export interface MemoryStoreConfig {
     collectionName?: string;
     /** Chunking parameters; sensible defaults applied when omitted. */
     chunkOptions?: ChunkOptions;
+    /** Where attachment bytes are stored. Defaults to `~/.gemdex/blobs`. */
+    blobStore?: BlobStore;
+    /** Per-modality attachment limits. Defaults applied when omitted. */
+    attachmentLimits?: AttachmentLimits;
 }
 
 export class MemoryStore {
@@ -60,13 +98,17 @@ export class MemoryStore {
     private db: VectorDatabase;
     private collectionName: string;
     private chunkOptions: ChunkOptions;
+    private blobStore: BlobStore;
+    private attachmentLimits: AttachmentLimits;
     private collectionReady?: Promise<void>;
 
     constructor(config: MemoryStoreConfig) {
         this.embedding = config.embedding;
         this.db = config.vectorDatabase;
-        this.collectionName = config.collectionName || DEFAULT_COLLECTION;
+        this.collectionName = config.collectionName ?? DEFAULT_COLLECTION;
         this.chunkOptions = config.chunkOptions ?? {};
+        this.blobStore = config.blobStore ?? new FileBlobStore();
+        this.attachmentLimits = config.attachmentLimits ?? DEFAULT_ATTACHMENT_LIMITS;
     }
 
     private getIsHybrid(): boolean {
@@ -94,8 +136,22 @@ export class MemoryStore {
         return `${parentId}::${chunkIndex}`;
     }
 
+    private static attachmentRowId(parentId: string, attachmentIndex: number): string {
+        return `${parentId}::att::${attachmentIndex}`;
+    }
+
     private static escapeLiteral(value: string): string {
         return value.replace(/'/g, "''");
+    }
+
+    private metaToRecord(meta: ParentMeta): Record<string, any> {
+        return {
+            title: meta.title,
+            fullContent: meta.fullContent,
+            createdAt: meta.createdAt,
+            updatedAt: meta.updatedAt,
+            attachments: meta.attachments,
+        };
     }
 
     private buildChunkRows(
@@ -104,6 +160,7 @@ export class MemoryStore {
         vectors: EmbeddingVector[],
         meta: ParentMeta,
     ): VectorDocument[] {
+        const record = this.metaToRecord(meta);
         return chunks.map((chunk, index) => ({
             id: MemoryStore.chunkRowId(parentId, index),
             vector: vectors[index].vector,
@@ -112,57 +169,205 @@ export class MemoryStore {
             startLine: index,
             endLine: chunks.length,
             fileExtension: '',
-            metadata: {
-                title: meta.title,
-                fullContent: meta.fullContent,
-                createdAt: meta.createdAt,
-                updatedAt: meta.updatedAt,
-            },
+            metadata: record,
+        }));
+    }
+
+    private buildAttachmentRows(
+        parentId: string,
+        stored: StoredAttachment[],
+        vectors: EmbeddingVector[],
+        meta: ParentMeta,
+    ): VectorDocument[] {
+        const record = this.metaToRecord(meta);
+        return stored.map((att, index) => ({
+            id: MemoryStore.attachmentRowId(parentId, index),
+            vector: vectors[index].vector,
+            // BM25 text for a media row is its caption, falling back to the title.
+            content: att.caption ?? meta.title,
+            relativePath: parentId,
+            startLine: index,
+            endLine: stored.length,
+            fileExtension: '',
+            metadata: record,
         }));
     }
 
     private async embedChunks(chunks: string[]): Promise<EmbeddingVector[]> {
+        if (chunks.length === 0) return [];
         return this.embedding.embedContentBatch(chunks);
     }
 
+    private async embedAttachments(attachments: ValidatedAttachment[]): Promise<EmbeddingVector[]> {
+        if (attachments.length === 0) return [];
+        return this.embedding.embedContentBatch(
+            attachments.map((att) => ({
+                inlineData: { mimeType: att.mimeType, data: att.bytes.toString('base64') },
+            })),
+        );
+    }
+
     private rowToParentMeta(metadata: Record<string, any>): ParentMeta {
+        const attachments = Array.isArray(metadata.attachments)
+            ? metadata.attachments
+                .map((raw: unknown) => MemoryStore.normalizeStoredAttachment(raw))
+                .filter((a: StoredAttachment | null): a is StoredAttachment => a !== null)
+            : [];
         return {
             title: typeof metadata.title === 'string' ? metadata.title : '',
             fullContent: typeof metadata.fullContent === 'string' ? metadata.fullContent : '',
             createdAt: Number(metadata.createdAt) || 0,
             updatedAt: Number(metadata.updatedAt) || 0,
+            attachments,
         };
     }
 
+    private static normalizeStoredAttachment(raw: unknown): StoredAttachment | null {
+        if (!raw || typeof raw !== 'object') return null;
+        const r = raw as Record<string, any>;
+        if (typeof r.blobRef !== 'string' || typeof r.mimeType !== 'string') return null;
+        const kinds: AttachmentKind[] = ['image', 'audio', 'video', 'pdf'];
+        const kind = kinds.includes(r.kind) ? (r.kind as AttachmentKind) : mimeToKind(r.mimeType);
+        if (!kind) return null;
+        const caption = typeof r.caption === 'string' && r.caption.length > 0 ? r.caption : undefined;
+        return {
+            id: typeof r.id === 'string' ? r.id : '0',
+            kind,
+            mimeType: r.mimeType,
+            byteLength: Number(r.byteLength) || 0,
+            ...(caption && { caption }),
+            blobRef: r.blobRef,
+        };
+    }
+
+    private static toPublicAttachments(stored: StoredAttachment[]): MemoryAttachment[] {
+        return stored.map((a) => ({
+            id: a.id,
+            kind: a.kind,
+            mimeType: a.mimeType,
+            byteLength: a.byteLength,
+            ...(a.caption && { caption: a.caption }),
+        }));
+    }
+
+    private static resolveTitle(
+        explicit: string | undefined,
+        content: string,
+        attachments: { kind: AttachmentKind; caption?: string }[],
+    ): string {
+        const trimmed = explicit?.trim();
+        if (trimmed) return trimmed;
+        if (content.trim().length > 0) return deriveTitle(content);
+        // Media-only memory: derive from the first caption, else a kind summary.
+        const captioned = attachments.find((a) => a.caption && a.caption.trim().length > 0);
+        if (captioned?.caption) return deriveTitle(captioned.caption);
+        if (attachments.length === 1) return `${attachments[0].kind} attachment`;
+        if (attachments.length > 1) return `${attachments.length} attachments`;
+        return deriveTitle(content);
+    }
+
     /**
-     * Persist a new memory: chunk -> embed each chunk -> store under a new
-     * parent id. Returns the created memory (including the resolved title).
+     * The single write path shared by save/update/import. Overwrites any rows +
+     * blobs already under `id`, then persists the supplied text + attachments.
+     * Throws if attachments are supplied to a non-multimodal embedding model, or
+     * if the resulting memory would be completely empty.
+     */
+    private async writeMemory(
+        id: string,
+        content: string,
+        explicitTitle: string | undefined,
+        attachmentsInput: MemoryAttachmentInput[],
+        createdAt: number,
+        updatedAt: number,
+    ): Promise<Memory> {
+        const text = content ?? '';
+        const validated = attachmentsInput.length > 0
+            ? validateAttachments(attachmentsInput, this.attachmentLimits)
+            : [];
+
+        if (validated.length > 0 && !this.embedding.isMultimodal()) {
+            throw new Error(
+                'Attachments require a multimodal embedding model (e.g. gemini-embedding-2); ' +
+                `the current ${this.embedding.getProvider()} model does not accept inline media.`,
+            );
+        }
+
+        await this.ensureCollection();
+        // Clean slate for this id (no-op for a fresh save; clears prior state on
+        // update/import overwrite).
+        await this.deleteChunkRows(id);
+        await this.blobStore.deleteParent(id);
+
+        const title = MemoryStore.resolveTitle(explicitTitle, text, validated);
+
+        try {
+            // Persist blob bytes first so metadata can reference them.
+            const stored: StoredAttachment[] = [];
+            for (let i = 0; i < validated.length; i++) {
+                const att = validated[i];
+                const blobRef = await this.blobStore.put(id, String(i), att.bytes);
+                stored.push({
+                    id: String(i),
+                    kind: att.kind,
+                    mimeType: att.mimeType,
+                    byteLength: att.byteLength,
+                    ...(att.caption && { caption: att.caption }),
+                    blobRef,
+                });
+            }
+
+            const meta: ParentMeta = { title, fullContent: text, createdAt, updatedAt, attachments: stored };
+
+            const chunks = text.trim().length > 0 ? chunkMemory(text, this.chunkOptions) : [];
+            const chunkVectors = await this.embedChunks(chunks);
+            const attachmentVectors = await this.embedAttachments(validated);
+
+            const rows = [
+                ...this.buildChunkRows(id, chunks, chunkVectors, meta),
+                ...this.buildAttachmentRows(id, stored, attachmentVectors, meta),
+            ];
+
+            if (rows.length === 0) {
+                throw new Error('Cannot persist an empty memory (no content and no attachments)');
+            }
+
+            await this.db.insertHybrid(this.collectionName, rows);
+
+            return {
+                id,
+                title,
+                content: text,
+                attachments: MemoryStore.toPublicAttachments(stored),
+                createdAt,
+                updatedAt,
+            };
+        } catch (error) {
+            // Don't leave orphan blobs behind if embedding/insertion failed.
+            await this.blobStore.deleteParent(id).catch(() => undefined);
+            throw error;
+        }
+    }
+
+    /**
+     * Persist a new memory. Text is chunked + embedded; each attachment is one
+     * media embedding stored as its own row with its bytes on disk. Returns the
+     * created memory (including the resolved title + attachment metadata).
      */
     async save(input: SaveMemoryInput): Promise<Memory> {
         const content = input.content ?? '';
-        if (content.trim().length === 0) {
-            throw new Error('Cannot save an empty memory');
+        const attachmentsInput = input.attachments ?? [];
+        if (content.trim().length === 0 && attachmentsInput.length === 0) {
+            throw new Error('Cannot save an empty memory (provide content or at least one attachment)');
         }
-        await this.ensureCollection();
-
         const id = MemoryStore.newId();
         const now = Date.now();
-        const title = input.title?.trim() || deriveTitle(content);
-
-        const chunks = chunkMemory(content, this.chunkOptions);
-        const vectors = await this.embedChunks(chunks);
-        const meta: ParentMeta = { title, fullContent: content, createdAt: now, updatedAt: now };
-        const rows = this.buildChunkRows(id, chunks, vectors, meta);
-
-        await this.db.insertHybrid(this.collectionName, rows);
-
-        return { id, title, content, createdAt: now, updatedAt: now };
+        return this.writeMemory(id, content, input.title, attachmentsInput, now, now);
     }
 
     /**
      * Retrieve memories by natural-language query. Hybrid (or dense-only when
-     * HYBRID_MODE=false) search over chunks, resolved to full parent memories
-     * and deduplicated by parent id. Pure relevance ranking.
+     * HYBRID_MODE=false) search over chunks + attachments, resolved to full
+     * parent memories and deduplicated by parent id. Pure relevance ranking.
      */
     async recall(query: string, limit = 10): Promise<MemoryRecallResult[]> {
         const trimmed = (query ?? '').trim();
@@ -204,6 +409,7 @@ export class MemoryStore {
                     id: parentId,
                     title: meta.title,
                     content: meta.fullContent,
+                    attachments: MemoryStore.toPublicAttachments(meta.attachments),
                     createdAt: meta.createdAt,
                     updatedAt: meta.updatedAt,
                     score: hit.score,
@@ -218,41 +424,66 @@ export class MemoryStore {
     }
 
     /**
-     * Revise an existing memory in place: delete its chunks -> re-chunk ->
-     * re-embed -> re-insert under the same id. Bumps updatedAt, preserves
-     * createdAt. Throws if the id does not exist.
+     * Revise an existing memory in place under the same id. Omitted fields are
+     * preserved: leaving out `content` keeps the prior text, leaving out
+     * `attachments` keeps the prior media. Bumps updatedAt, preserves createdAt.
+     * Throws if the id does not exist.
      */
     async update(id: string, input: UpdateMemoryInput): Promise<Memory> {
-        const content = input.content ?? '';
-        if (content.trim().length === 0) {
-            throw new Error('Cannot update a memory to empty content');
-        }
-        const existing = await this.get(id);
+        const existing = await this.loadParentMeta(id);
         if (!existing) {
             throw new Error(`Memory not found: ${id}`);
         }
-        await this.ensureCollection();
 
-        await this.deleteChunkRows(id);
+        const content = input.content !== undefined ? input.content : existing.fullContent;
+        const attachmentsInput = input.attachments !== undefined
+            ? input.attachments
+            : await this.attachmentsToInput(existing.attachments);
+        const title = input.title !== undefined ? input.title : existing.title;
+
+        if ((content ?? '').trim().length === 0 && attachmentsInput.length === 0) {
+            throw new Error('Cannot update a memory to empty content (provide content or at least one attachment)');
+        }
 
         const now = Date.now();
-        const title = input.title?.trim() || deriveTitle(content);
-        const chunks = chunkMemory(content, this.chunkOptions);
-        const vectors = await this.embedChunks(chunks);
-        const meta: ParentMeta = {
-            title,
-            fullContent: content,
-            createdAt: existing.createdAt,
-            updatedAt: now,
-        };
-        const rows = this.buildChunkRows(id, chunks, vectors, meta);
-        await this.db.insertHybrid(this.collectionName, rows);
-
-        return { id, title, content, createdAt: existing.createdAt, updatedAt: now };
+        return this.writeMemory(id, content, title, attachmentsInput, existing.createdAt, now);
     }
 
     /** Fetch a single full memory by id, or null if absent. */
     async get(id: string): Promise<Memory | null> {
+        const meta = await this.loadParentMeta(id);
+        if (!meta) return null;
+        return {
+            id,
+            title: meta.title,
+            content: meta.fullContent,
+            attachments: MemoryStore.toPublicAttachments(meta.attachments),
+            createdAt: meta.createdAt,
+            updatedAt: meta.updatedAt,
+        };
+    }
+
+    /** Read the raw bytes of one attachment, or null if the memory/blob is gone. */
+    async readAttachment(memoryId: string, attachmentId: string): Promise<AttachmentBytes | null> {
+        const meta = await this.loadParentMeta(memoryId);
+        if (!meta) return null;
+        const att = meta.attachments.find((a) => a.id === attachmentId);
+        if (!att) return null;
+        try {
+            const data = await this.blobStore.get(att.blobRef);
+            return {
+                mimeType: att.mimeType,
+                byteLength: att.byteLength,
+                ...(att.caption && { caption: att.caption }),
+                data,
+            };
+        } catch {
+            return null;
+        }
+    }
+
+    /** Load the shared parent metadata for an id from any one of its rows. */
+    private async loadParentMeta(id: string): Promise<ParentMeta | null> {
         const exists = await this.db.hasCollection(this.collectionName);
         if (!exists) return null;
         const filter = `relativePath == '${MemoryStore.escapeLiteral(id)}'`;
@@ -263,14 +494,7 @@ export class MemoryStore {
             LIST_FETCH_LIMIT,
         );
         if (rows.length === 0) return null;
-        const meta = this.rowToParentMeta(this.parseMetadata(rows[0].metadata));
-        return {
-            id,
-            title: meta.title,
-            content: meta.fullContent,
-            createdAt: meta.createdAt,
-            updatedAt: meta.updatedAt,
-        };
+        return this.rowToParentMeta(this.parseMetadata(rows[0].metadata));
     }
 
     /** List all memories (sorted by updatedAt desc) for browsing. */
@@ -295,16 +519,18 @@ export class MemoryStore {
             .map(([id, meta]) => ({
                 id,
                 title: meta.title,
-                preview: this.makePreview(meta.fullContent),
+                preview: this.previewFor(meta),
+                attachments: MemoryStore.toPublicAttachments(meta.attachments),
                 createdAt: meta.createdAt,
                 updatedAt: meta.updatedAt,
             }))
             .sort((a, b) => b.updatedAt - a.updatedAt);
     }
 
-    /** Delete a memory (all its chunk rows). No-op if absent. */
+    /** Delete a memory (all its chunk + attachment rows and its blobs). No-op if absent. */
     async delete(id: string): Promise<void> {
         await this.deleteChunkRows(id);
+        await this.blobStore.deleteParent(id);
     }
 
     /** Export all memories as portable records (sorted by updatedAt desc). */
@@ -312,16 +538,17 @@ export class MemoryStore {
         const summaries = await this.list();
         const records: MemoryExportRecord[] = [];
         for (const summary of summaries) {
-            const memory = await this.get(summary.id);
-            if (memory) {
-                records.push({
-                    id: memory.id,
-                    title: memory.title,
-                    content: memory.content,
-                    createdAt: memory.createdAt,
-                    updatedAt: memory.updatedAt,
-                });
-            }
+            const meta = await this.loadParentMeta(summary.id);
+            if (!meta) continue;
+            const attachments = await this.exportAttachments(meta.attachments);
+            records.push({
+                id: summary.id,
+                title: meta.title,
+                content: meta.fullContent,
+                createdAt: meta.createdAt,
+                updatedAt: meta.updatedAt,
+                ...(attachments.length > 0 && { attachments }),
+            });
         }
         return records;
     }
@@ -329,33 +556,66 @@ export class MemoryStore {
     /**
      * Import memories from portable records. Upsert by id (default merge
      * policy, §7.5): an existing id is replaced; a new id is inserted.
-     * Re-embeds content via the configured embedding provider.
+     * Re-embeds content + attachments via the configured embedding provider.
      */
     async importRecords(records: MemoryExportRecord[]): Promise<{ imported: number }> {
         await this.ensureCollection();
         let imported = 0;
         for (const record of records) {
             const content = record.content ?? '';
-            if (content.trim().length === 0) continue;
+            const attachmentsInput: MemoryAttachmentInput[] = Array.isArray(record.attachments)
+                ? record.attachments.map((a) => ({
+                    mimeType: a.mimeType,
+                    data: a.data,
+                    ...(a.caption && { caption: a.caption }),
+                }))
+                : [];
+            if (content.trim().length === 0 && attachmentsInput.length === 0) continue;
 
             const id = record.id || MemoryStore.newId();
-            await this.deleteChunkRows(id);
-
-            const now = Date.now();
-            const title = record.title?.trim() || deriveTitle(content);
-            const chunks = chunkMemory(content, this.chunkOptions);
-            const vectors = await this.embedChunks(chunks);
-            const meta: ParentMeta = {
-                title,
-                fullContent: content,
-                createdAt: Number(record.createdAt) || now,
-                updatedAt: Number(record.updatedAt) || now,
-            };
-            const rows = this.buildChunkRows(id, chunks, vectors, meta);
-            await this.db.insertHybrid(this.collectionName, rows);
+            const createdAt = Number(record.createdAt) || Date.now();
+            const updatedAt = Number(record.updatedAt) || createdAt;
+            await this.writeMemory(id, content, record.title, attachmentsInput, createdAt, updatedAt);
             imported += 1;
         }
         return { imported };
+    }
+
+    /** Read stored attachments back into base64 inputs (for update preserve / re-embed). */
+    private async attachmentsToInput(stored: StoredAttachment[]): Promise<MemoryAttachmentInput[]> {
+        const out: MemoryAttachmentInput[] = [];
+        for (const att of stored) {
+            try {
+                const bytes = await this.blobStore.get(att.blobRef);
+                out.push({
+                    mimeType: att.mimeType,
+                    data: bytes.toString('base64'),
+                    ...(att.caption && { caption: att.caption }),
+                });
+            } catch {
+                // Blob missing on disk — drop it rather than fail the whole update.
+            }
+        }
+        return out;
+    }
+
+    /** Read stored attachments back into portable export records (base64). */
+    private async exportAttachments(stored: StoredAttachment[]): Promise<MemoryExportAttachment[]> {
+        const out: MemoryExportAttachment[] = [];
+        for (const att of stored) {
+            try {
+                const bytes = await this.blobStore.get(att.blobRef);
+                out.push({
+                    id: att.id,
+                    mimeType: att.mimeType,
+                    data: bytes.toString('base64'),
+                    ...(att.caption && { caption: att.caption }),
+                });
+            } catch {
+                // Skip an attachment whose blob is missing.
+            }
+        }
+        return out;
     }
 
     private async deleteChunkRows(parentId: string): Promise<void> {
@@ -379,6 +639,23 @@ export class MemoryStore {
             }
         }
         return {};
+    }
+
+    /** List preview: text excerpt, or an attachment badge for media-only memories. */
+    private previewFor(meta: ParentMeta): string {
+        const text = this.makePreview(meta.fullContent);
+        if (text.length > 0) return text;
+        if (meta.attachments.length > 0) return MemoryStore.attachmentBadge(meta.attachments);
+        return text;
+    }
+
+    private static attachmentBadge(attachments: StoredAttachment[]): string {
+        const counts = new Map<AttachmentKind, number>();
+        for (const att of attachments) {
+            counts.set(att.kind, (counts.get(att.kind) ?? 0) + 1);
+        }
+        const parts = Array.from(counts.entries()).map(([kind, n]) => `${n} ${kind}${n > 1 ? 's' : ''}`);
+        return `📎 ${parts.join(', ')}`;
     }
 
     private makePreview(content: string, length = DEFAULT_PREVIEW_LENGTH): string {

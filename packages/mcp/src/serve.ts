@@ -62,17 +62,31 @@ function parseArgs(args: string[]): ServeOptions {
     return { port };
 }
 
+const CORS_HEADERS = {
+    // Single-user local app; allow the WebView origin to call us.
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+};
+
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
     const payload = JSON.stringify(body);
     res.writeHead(status, {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(payload),
-        // Single-user local app; allow the WebView origin to call us.
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type',
+        ...CORS_HEADERS,
     });
     res.end(payload);
+}
+
+/** Stream raw attachment bytes back to the WebView with their real content type. */
+function sendBytes(res: http.ServerResponse, status: number, buf: Buffer, contentType: string): void {
+    res.writeHead(status, {
+        'Content-Type': contentType,
+        'Content-Length': buf.length,
+        ...CORS_HEADERS,
+    });
+    res.end(buf);
 }
 
 function readBody(req: http.IncomingMessage): Promise<any> {
@@ -161,15 +175,26 @@ export function createServer(ctx: ServeContext): http.Server {
                 return;
             }
 
-            // POST /memories — create
+            // POST /memories — create (text and/or inline media attachments)
             if (method === 'POST' && pathname === '/memories') {
                 const body = await readBody(req);
-                if (typeof body?.content !== 'string' || body.content.trim().length === 0) {
-                    sendJson(res, 400, { error: "'content' is required" });
+                if (body?.attachments !== undefined && !Array.isArray(body.attachments)) {
+                    sendJson(res, 400, { error: "'attachments' must be an array" });
                     return;
                 }
-                const memory = await store.save({ content: body.content, title: body.title });
-                sendJson(res, 201, { memory });
+                const content = typeof body?.content === 'string' ? body.content : '';
+                const attachments = Array.isArray(body?.attachments) ? body.attachments : undefined;
+                const hasAttachments = (attachments?.length ?? 0) > 0;
+                if (content.trim().length === 0 && !hasAttachments) {
+                    sendJson(res, 400, { error: "'content' or at least one attachment is required" });
+                    return;
+                }
+                try {
+                    const memory = await store.save({ content, title: body.title, ...(attachments && { attachments }) });
+                    sendJson(res, 201, { memory });
+                } catch (error: any) {
+                    sendJson(res, 400, { error: error?.message ?? 'Failed to save memory' });
+                }
                 return;
             }
 
@@ -186,6 +211,25 @@ export function createServer(ctx: ServeContext): http.Server {
                 const records = Array.isArray(body?.records) ? body.records : [];
                 const result = await store.importRecords(records);
                 sendJson(res, 200, result);
+                return;
+            }
+
+            // GET /memories/:id/attachments/:attachmentId — raw attachment bytes.
+            // Matched BEFORE the greedy /memories/:id detail route below.
+            const attachmentMatch = pathname.match(/^\/memories\/([^/]+)\/attachments\/([^/]+)$/);
+            if (attachmentMatch) {
+                if (method !== 'GET') {
+                    sendJson(res, 405, { error: `Method ${method} not allowed on attachment` });
+                    return;
+                }
+                const memoryId = decodeURIComponent(attachmentMatch[1]);
+                const attachmentId = decodeURIComponent(attachmentMatch[2]);
+                const blob = await store.readAttachment(memoryId, attachmentId);
+                if (!blob) {
+                    sendJson(res, 404, { error: 'Attachment not found' });
+                    return;
+                }
+                sendBytes(res, 200, blob.data, blob.mimeType);
                 return;
             }
 
@@ -206,15 +250,27 @@ export function createServer(ctx: ServeContext): http.Server {
 
                 if (method === 'PUT') {
                     const body = await readBody(req);
-                    if (typeof body?.content !== 'string' || body.content.trim().length === 0) {
-                        sendJson(res, 400, { error: "'content' is required" });
+                    if (body?.attachments !== undefined && !Array.isArray(body.attachments)) {
+                        sendJson(res, 400, { error: "'attachments' must be an array" });
                         return;
                     }
+                    const hasContent = typeof body?.content === 'string';
+                    const hasTitle = typeof body?.title === 'string';
+                    const hasAttachments = body?.attachments !== undefined;
+                    if (!hasContent && !hasTitle && !hasAttachments) {
+                        sendJson(res, 400, { error: "provide at least one of 'content', 'title', or 'attachments'" });
+                        return;
+                    }
+                    const input: { content?: string; title?: string; attachments?: any[] } = {};
+                    if (hasContent) input.content = body.content;
+                    if (hasTitle) input.title = body.title;
+                    if (hasAttachments) input.attachments = body.attachments;
                     try {
-                        const memory = await store.update(id, { content: body.content, title: body.title });
+                        const memory = await store.update(id, input);
                         sendJson(res, 200, { memory });
                     } catch (error: any) {
-                        sendJson(res, 404, { error: error?.message ?? 'Update failed' });
+                        const msg = error?.message ?? 'Update failed';
+                        sendJson(res, /not found/i.test(msg) ? 404 : 400, { error: msg });
                     }
                     return;
                 }

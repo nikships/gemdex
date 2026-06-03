@@ -155,13 +155,25 @@ snippet into your client's root instructions file (conventionally `AGENTS.md`).
 
 | Tool | Input | Returns | When the agent calls it |
 |------|-------|---------|-------------------------|
-| `save_memory` | `content` (required), `title` (optional) | new `id` + resolved title | only when told to remember/save |
+| `save_memory` | `content` and/or `attachments`, `title` (optional) | new `id` + resolved title | only when told to remember/save |
 | `recall` | `query` (required), `limit` (optional, ~10) | full memories ranked by relevance | only when pointed at memory |
-| `update_memory` | `id` (required), `content` (required), `title` (optional) | updated `id` + title | to revise a stored memory |
+| `update_memory` | `id` (required); `content`, `title`, `attachments` (all optional) | updated `id` + title | to revise a stored memory |
 
 Deletion is intentionally **not** an agent tool — it's a deliberate human action
 in the desktop app. All three tools embed via Gemini and require
 `GEMINI_API_KEY`.
+
+### Multimodal attachments
+
+`save_memory` and `update_memory` accept an optional `attachments` array of
+inline media — `{ mimeType, data (base64), caption? }` — embedded into the same
+space as text by `gemini-embedding-2`. Supported types: PNG/JPEG images (≤ 6),
+MP3/WAV audio, MP4/MOV video, and PDF (1 file). Each attachment is embedded as
+its own unit; its `caption` (or the memory title) backs the keyword branch. Raw
+bytes are stored as blobs under `~/.gemdex/blobs` and round-trip through
+export/import. Attachments require the `gemini-embedding-2` model — supplying
+them to a text-only model returns a clear error. `recall` is text-query → media
+result (querying *by* media is not supported yet).
 
 ## How it works
 

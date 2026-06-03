@@ -27,6 +27,14 @@ function formatSubScoresLine(fusedScore: number, subScores?: {
     return `Scores: ${fused} · ${dense} · ${bm25}`;
 }
 
+/** Render the confirmation block returned to the agent after a save/update. */
+function formatMemoryResult(verb: string, memory: { id: string; title: string; attachments?: { id: string }[] }): string {
+    const lines = [`${verb} memory.`, `id: ${memory.id}`, `title: ${memory.title}`];
+    const count = memory.attachments?.length ?? 0;
+    if (count > 0) lines.push(`attachments: ${count}`);
+    return lines.join('\n');
+}
+
 export class MemoryToolHandlers {
     private store: MemoryStore;
 
@@ -37,14 +45,20 @@ export class MemoryToolHandlers {
     async handleSaveMemory(args: any): Promise<ToolResult> {
         const content = typeof args?.content === 'string' ? args.content : '';
         const title = typeof args?.title === 'string' ? args.title : undefined;
-        if (content.trim().length === 0) {
-            return textResult("Error: 'content' is required and cannot be empty.", true);
+        let attachments: any[] | undefined;
+        if (args?.attachments !== undefined) {
+            if (!Array.isArray(args.attachments)) {
+                return textResult("Error: 'attachments' must be an array.", true);
+            }
+            attachments = args.attachments;
+        }
+        const hasAttachments = (attachments?.length ?? 0) > 0;
+        if (content.trim().length === 0 && !hasAttachments) {
+            return textResult("Error: provide 'content' or at least one attachment.", true);
         }
         try {
-            const memory = await this.store.save({ content, title });
-            return textResult(
-                `Saved memory.\nid: ${memory.id}\ntitle: ${memory.title}`,
-            );
+            const memory = await this.store.save({ content, title, ...(attachments && { attachments }) });
+            return textResult(formatMemoryResult('Saved', memory));
         } catch (error: any) {
             return textResult(`Failed to save memory: ${error?.message ?? String(error)}`, true);
         }
@@ -80,19 +94,29 @@ export class MemoryToolHandlers {
 
     async handleUpdateMemory(args: any): Promise<ToolResult> {
         const id = typeof args?.id === 'string' ? args.id : '';
-        const content = typeof args?.content === 'string' ? args.content : '';
-        const title = typeof args?.title === 'string' ? args.title : undefined;
         if (id.trim().length === 0) {
             return textResult("Error: 'id' is required.", true);
         }
-        if (content.trim().length === 0) {
-            return textResult("Error: 'content' is required and cannot be empty.", true);
+        const hasContent = typeof args?.content === 'string';
+        const title = typeof args?.title === 'string' ? args.title : undefined;
+        let attachments: any[] | undefined;
+        if (args?.attachments !== undefined) {
+            if (!Array.isArray(args.attachments)) {
+                return textResult("Error: 'attachments' must be an array.", true);
+            }
+            attachments = args.attachments;
         }
+        if (!hasContent && title === undefined && attachments === undefined) {
+            return textResult("Error: provide at least one of 'content', 'title', or 'attachments' to update.", true);
+        }
+        // Only include provided fields so the store preserves the rest in place.
+        const input: { content?: string; title?: string; attachments?: any[] } = {};
+        if (hasContent) input.content = args.content;
+        if (title !== undefined) input.title = title;
+        if (attachments !== undefined) input.attachments = attachments;
         try {
-            const memory = await this.store.update(id, { content, title });
-            return textResult(
-                `Updated memory.\nid: ${memory.id}\ntitle: ${memory.title}`,
-            );
+            const memory = await this.store.update(id, input);
+            return textResult(formatMemoryResult('Updated', memory));
         } catch (error: any) {
             return textResult(`Failed to update memory: ${error?.message ?? String(error)}`, true);
         }

@@ -1,14 +1,48 @@
 import { HybridSubScores } from '../vectordb';
 
 /**
+ * The media modalities `gemini-embedding-2` accepts as inline content. Each
+ * supported mimeType maps to exactly one of these (see attachment-validator).
+ */
+export type AttachmentKind = 'image' | 'audio' | 'video' | 'pdf';
+
+/**
+ * Inline media supplied by a caller when saving/updating a memory. `data` is
+ * base64-encoded bytes; `caption` (optional) is the text that backs the BM25
+ * branch for this attachment (falls back to the memory title when omitted).
+ */
+export interface MemoryAttachmentInput {
+    mimeType: string;
+    /** base64-encoded bytes. */
+    data: string;
+    caption?: string;
+}
+
+/**
+ * Stored-attachment metadata as seen by callers. The raw bytes live on disk as
+ * a blob (see BlobStore); fetch them via `MemoryStore.readAttachment` /
+ * the sidecar's blob route. `id` is stable within its parent memory.
+ */
+export interface MemoryAttachment {
+    id: string;
+    kind: AttachmentKind;
+    mimeType: string;
+    /** Size of the decoded bytes on disk. */
+    byteLength: number;
+    caption?: string;
+}
+
+/**
  * A stored memory as seen by callers (MCP tools, the desktop sidecar).
- * Only `content` and `title` are user-facing; the rest is system metadata
- * that is never used for ranking.
+ * Only `content`, `title`, and `attachments` are user-facing; the rest is
+ * system metadata that is never used for ranking.
  */
 export interface Memory {
     id: string;
     title: string;
     content: string;
+    /** Inline media attached to this memory (empty when text-only). */
+    attachments: MemoryAttachment[];
     /** Epoch milliseconds. */
     createdAt: number;
     /** Epoch milliseconds. */
@@ -20,6 +54,8 @@ export interface MemorySummary {
     id: string;
     title: string;
     preview: string;
+    /** Attachment metadata so list views can badge/thumbnail media memories. */
+    attachments: MemoryAttachment[];
     createdAt: number;
     updatedAt: number;
 }
@@ -32,13 +68,31 @@ export interface MemoryRecallResult extends Memory {
 }
 
 export interface SaveMemoryInput {
-    content: string;
+    /** Overall caption / BM25 text. Optional when at least one attachment is supplied. */
+    content?: string;
     title?: string;
+    /** Optional inline media to embed. Requires a multimodal embedding model. */
+    attachments?: MemoryAttachmentInput[];
 }
 
 export interface UpdateMemoryInput {
-    content: string;
+    /** Replacement content. Optional when at least one attachment is supplied. */
+    content?: string;
     title?: string;
+    /** Replacement attachments. When provided, fully replaces prior attachments. */
+    attachments?: MemoryAttachmentInput[];
+}
+
+/**
+ * Portable attachment shape for export/import. Carries the bytes inline as
+ * base64 so a dump round-trips without the on-disk blob directory.
+ */
+export interface MemoryExportAttachment {
+    id?: string;
+    mimeType: string;
+    /** base64-encoded bytes. */
+    data: string;
+    caption?: string;
 }
 
 /** Record shape used for export/import (§7.5). */
@@ -48,4 +102,6 @@ export interface MemoryExportRecord {
     content: string;
     createdAt: number;
     updatedAt: number;
+    /** Inline media, base64-encoded, for portable round-trips. */
+    attachments?: MemoryExportAttachment[];
 }

@@ -34,6 +34,10 @@ Never capture proactively.
 
 Behavior: the content is chunked, embedded via Gemini, and stored globally
 (searchable from every repo and session). Returns the new memory id.
+
+Multimodal: optionally pass \`attachments\` (inline base64 image/audio/video/PDF)
+to embed media alongside the text. Requires the gemini-embedding-2 model. Either
+\`content\` or at least one attachment is required.
 `;
 
 const RECALL_DESCRIPTION = `
@@ -54,9 +58,38 @@ Revise an existing memory in place, identified by its id.
 ("the notarization step changed — update that memory"). Get the id from a prior
 save_memory or recall result.
 
-Behavior: re-chunks and re-embeds the new content under the same id.
+Behavior: re-chunks and re-embeds the new content under the same id. Omitted
+fields are preserved — leave out \`content\` to keep the prior text, leave out
+\`attachments\` to keep the prior media (pass \`attachments: []\` to clear it).
 There is no delete via MCP — deletion is a human action in the desktop app.
 `;
+
+// JSON-schema fragment for the optional inline-media array shared by
+// save_memory / update_memory.
+const ATTACHMENTS_SCHEMA = {
+    type: "array",
+    description:
+        "Optional inline media to embed (base64). Requires the gemini-embedding-2 model. " +
+        "Limits: ≤6 images, ≤1 PDF, ≤1 audio, ≤1 video per memory.",
+    items: {
+        type: "object",
+        properties: {
+            mimeType: {
+                type: "string",
+                description: "image/png, image/jpeg, audio/mp3, audio/wav, video/mp4, video/quicktime, or application/pdf.",
+            },
+            data: {
+                type: "string",
+                description: "Base64-encoded bytes of the attachment.",
+            },
+            caption: {
+                type: "string",
+                description: "Optional text describing this attachment; backs the BM25 (keyword) branch for it.",
+            },
+        },
+        required: ["mimeType", "data"],
+    },
+} as const;
 
 class GemdexMemoryServer {
     private server: Server;
@@ -85,14 +118,15 @@ class GemdexMemoryServer {
                         properties: {
                             content: {
                                 type: "string",
-                                description: "The memory content. A one-line fact or a long playbook — anything.",
+                                description: "The memory content. A one-line fact or a long playbook — anything. Recommended; optional only when attachments are provided.",
                             },
                             title: {
                                 type: "string",
                                 description: "Optional human-readable name. Auto-derived from content if omitted.",
                             },
+                            attachments: ATTACHMENTS_SCHEMA,
                         },
-                        required: ["content"],
+                        required: [],
                     },
                 },
                 {
@@ -127,14 +161,15 @@ class GemdexMemoryServer {
                             },
                             content: {
                                 type: "string",
-                                description: "The full replacement content for the memory.",
+                                description: "Replacement content. Omit to keep the existing text.",
                             },
                             title: {
                                 type: "string",
-                                description: "Optional new title. Auto-derived from content if omitted.",
+                                description: "Optional new title. Omit to keep the existing title.",
                             },
+                            attachments: ATTACHMENTS_SCHEMA,
                         },
-                        required: ["id", "content"],
+                        required: ["id"],
                     },
                 },
             ],
