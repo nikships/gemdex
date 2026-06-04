@@ -213,6 +213,24 @@ class FakeMultimodalEmbedding extends Embedding {
     }
 }
 
+/** Like FakeMultimodalEmbedding, but counts every embedding call so a test can
+ *  prove the caption-only path performs NO embedding. */
+class CountingMultimodalEmbedding extends FakeMultimodalEmbedding {
+    embedCalls = 0;
+    async embed(text: string): Promise<EmbeddingVector> {
+        this.embedCalls += 1;
+        return super.embed(text);
+    }
+    async embedBatch(texts: string[]): Promise<EmbeddingVector[]> {
+        this.embedCalls += 1;
+        return super.embedBatch(texts);
+    }
+    async embedContentBatch(contents: EmbeddingContent[]): Promise<EmbeddingVector[]> {
+        this.embedCalls += 1;
+        return super.embedContentBatch(contents);
+    }
+}
+
 /** A multimodal embedding whose calls always fail — used to simulate a network error mid-write. */
 class ThrowingEmbedding extends Embedding {
     protected maxTokens = 8192;
@@ -398,5 +416,78 @@ describe('MemoryStore (attachments)', () => {
         expect(after!.attachments).toHaveLength(1);
         const blob = await store.readAttachment(mem.id, after!.attachments[0].id);
         expect(blob!.data.toString()).toBe('keepbytes');
+    });
+
+    it('updateAttachmentCaptions changes a caption without re-embedding the media', async () => {
+        const counting = new CountingMultimodalEmbedding();
+        const captionStore = new MemoryStore({
+            embedding: counting,
+            vectorDatabase: new LanceDBVectorDatabase({ uri: dbDir }),
+            blobStore: new FileBlobStore(blobDir),
+        });
+        const mem = await captionStore.save({
+            content: 'design mock',
+            attachments: [{ ...png('PNGDATA'), caption: 'old caption' }],
+        });
+        const attId = mem.attachments[0].id;
+
+        // Capture the stored attachment vector before the caption edit.
+        const before = await captionStore.recall(undefined, 1, [png('PNGDATA')]);
+        const callsAfterSave = counting.embedCalls;
+        expect(callsAfterSave).toBeGreaterThan(0);
+
+        await new Promise((r) => setTimeout(r, 5));
+        const updated = await captionStore.updateAttachmentCaptions(mem.id, [
+            { id: attId, caption: 'new caption' },
+        ]);
+
+        // The caption path must not invoke the embedding model at all.
+        expect(counting.embedCalls).toBe(callsAfterSave);
+        expect(updated.attachments[0].caption).toBe('new caption');
+        expect(updated.updatedAt).toBeGreaterThan(mem.updatedAt);
+        expect(updated.createdAt).toBe(mem.createdAt);
+
+        const fetched = await captionStore.get(mem.id);
+        expect(fetched!.attachments[0].caption).toBe('new caption');
+        expect(fetched!.updatedAt).toBe(updated.updatedAt);
+
+        // The media vector is reused unchanged: recall-by-media still resolves
+        // to the same memory with the same bytes.
+        const after = await captionStore.recall(undefined, 1, [png('PNGDATA')]);
+        expect(after[0].id).toBe(mem.id);
+        expect(before[0].id).toBe(mem.id);
+    });
+
+    it('updateAttachmentCaptions clearing a caption falls back to the title for BM25', async () => {
+        const mem = await store.save({
+            content: '',
+            title: 'Architecture diagram',
+            attachments: [{ ...png('DIAGRAM'), caption: 'old' }],
+        });
+        const attId = mem.attachments[0].id;
+
+        const cleared = await store.updateAttachmentCaptions(mem.id, [{ id: attId, caption: '   ' }]);
+        expect(cleared.attachments[0].caption).toBeUndefined();
+
+        const fetched = await store.get(mem.id);
+        expect(fetched!.attachments[0].caption).toBeUndefined();
+
+        // BM25 text for the attachment row falls back to the title, so a text
+        // recall on the title still finds the memory.
+        const results = await store.recall('Architecture diagram', 5);
+        expect(results.some((r) => r.id === mem.id)).toBe(true);
+    });
+
+    it('updateAttachmentCaptions throws for an unknown attachment id', async () => {
+        const mem = await store.save({ content: 'x', attachments: [png('Z')] });
+        await expect(
+            store.updateAttachmentCaptions(mem.id, [{ id: 'no-such-att', caption: 'nope' }]),
+        ).rejects.toThrow(/not found/i);
+    });
+
+    it('updateAttachmentCaptions throws for an unknown memory id', async () => {
+        await expect(
+            store.updateAttachmentCaptions('does-not-exist', [{ id: '0', caption: 'x' }]),
+        ).rejects.toThrow(/not found/i);
     });
 });

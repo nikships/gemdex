@@ -18,6 +18,7 @@ import {
 } from './attachment-validator';
 import {
     AttachmentKind,
+    AttachmentCaptionUpdate,
     Memory,
     MemoryAttachment,
     MemoryAttachmentInput,
@@ -536,6 +537,104 @@ export class MemoryStore {
 
         const now = Date.now();
         return this.writeMemory(id, content, title, attachmentsInput, existing.createdAt, now);
+    }
+
+    /**
+     * Update only attachment captions, reusing the EXISTING media vectors —
+     * the no-re-embed caption path. Editing a caption is pure metadata: the
+     * bytes are unchanged, so re-embedding each attachment (a network round-trip
+     * to the embedding model, per attachment) would be wasted work. Instead this
+     * reads every stored row for the memory back WITH its `vector` column,
+     * rewrites only the caption-derived fields (the BM25 `content` of attachment
+     * rows + the shared `attachments`/`updatedAt` metadata), and re-inserts the
+     * rows with their original vectors intact. Blobs are never touched.
+     *
+     * Captions are matched by attachment id; an empty/whitespace caption clears
+     * it (its BM25 text falls back to the title). Throws if the memory does not
+     * exist, or if a supplied caption id matches no attachment.
+     */
+    async updateAttachmentCaptions(id: string, captions: AttachmentCaptionUpdate[]): Promise<Memory> {
+        const exists = await this.db.hasCollection(this.collectionName);
+        const filter = `relativePath == '${MemoryStore.escapeLiteral(id)}'`;
+        const rows = exists
+            ? await this.db.query(
+                this.collectionName,
+                filter,
+                ['id', 'vector', 'content', 'relativePath', 'startLine', 'endLine', 'fileExtension', 'metadata'],
+                LIST_FETCH_LIMIT,
+            )
+            : [];
+        if (rows.length === 0) {
+            throw new Error(`Memory not found: ${id}`);
+        }
+
+        const meta = this.rowToParentMeta(this.parseMetadata(rows[0].metadata));
+
+        // Map attachment id -> trimmed new caption (empty string => clear).
+        const updates = new Map<string, string | undefined>();
+        const knownIds = new Set(meta.attachments.map((a) => a.id));
+        for (const update of captions) {
+            if (!knownIds.has(update.id)) {
+                throw new Error(`Attachment not found on memory ${id}: ${update.id}`);
+            }
+            const trimmed = update.caption?.trim();
+            updates.set(update.id, trimmed ? trimmed : undefined);
+        }
+
+        const attachments: StoredAttachment[] = meta.attachments.map((att) => {
+            if (!updates.has(att.id)) return att;
+            const caption = updates.get(att.id);
+            // Rebuild without spreading `att` so an undefined caption clears it.
+            return {
+                id: att.id,
+                kind: att.kind,
+                mimeType: att.mimeType,
+                byteLength: att.byteLength,
+                ...(caption && { caption }),
+                blobRef: att.blobRef,
+            };
+        });
+
+        const newMeta: ParentMeta = { ...meta, attachments, updatedAt: Date.now() };
+        const record = this.metaToRecord(newMeta);
+
+        // Rebuild every row reusing its existing vector — NO embedding call.
+        const rebuilt: VectorDocument[] = rows.map((row) => {
+            const rowId = row.id as string;
+            const vector = Array.isArray(row.vector)
+                ? (row.vector as number[])
+                : Array.from(row.vector as Iterable<number>);
+            const isAttachmentRow = rowId.includes('::att::');
+            // Attachment rows: BM25 text = new caption (resolved by the row's
+            // attachment index, which buildAttachmentRows stores in startLine)
+            // or the title. Chunk rows: preserve the stored chunk text verbatim.
+            const content = isAttachmentRow
+                ? attachments[Number(row.startLine)]?.caption ?? newMeta.title
+                : (row.content as string);
+            return {
+                id: rowId,
+                vector,
+                content,
+                relativePath: row.relativePath as string,
+                startLine: Number(row.startLine) || 0,
+                endLine: Number(row.endLine) || 0,
+                fileExtension: typeof row.fileExtension === 'string' ? row.fileExtension : '',
+                metadata: record,
+            };
+        });
+
+        const oldIds = rows.map((r) => r.id as string).filter(Boolean);
+        await this.db.delete(this.collectionName, oldIds);
+        await this.db.insertHybrid(this.collectionName, rebuilt);
+
+        return {
+            id,
+            title: newMeta.title,
+            content: newMeta.fullContent,
+            attachments: MemoryStore.toPublicAttachments(attachments),
+            createdAt: newMeta.createdAt,
+            updatedAt: newMeta.updatedAt,
+        };
     }
 
     /** Fetch a single full memory by id, or null if absent. */
