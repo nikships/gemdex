@@ -84,6 +84,17 @@ export interface UpdateMemoryInput {
 }
 
 /**
+ * A caption-only edit for one existing attachment, keyed by its stable
+ * per-parent `id`. An empty/whitespace `caption` clears it (the attachment's
+ * BM25 text falls back to the memory title). Used by the no-re-embed caption
+ * update path — see `MemoryStore.updateAttachmentCaptions`.
+ */
+export interface AttachmentCaptionUpdate {
+    id: string;
+    caption?: string;
+}
+
+/**
  * Portable attachment shape for export/import. Carries the bytes inline as
  * base64 so a dump round-trips without the on-disk blob directory.
  */

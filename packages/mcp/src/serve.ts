@@ -65,7 +65,7 @@ function parseArgs(args: string[]): ServeOptions {
 const CORS_HEADERS = {
     // Single-user local app; allow the WebView origin to call us.
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
 };
 
@@ -261,6 +261,42 @@ export function createServer(ctx: ServeContext): http.Server {
                     return;
                 }
                 sendBytes(res, 200, blob.data, blob.mimeType);
+                return;
+            }
+
+            // PATCH /memories/:id/attachments — caption-only edit (no re-embed).
+            // Matched BEFORE the greedy /memories/:id detail route below.
+            const captionsMatch = pathname.match(/^\/memories\/([^/]+)\/attachments$/);
+            if (captionsMatch) {
+                if (method !== 'PATCH') {
+                    sendJson(res, 405, { error: `Method ${method} not allowed on attachments` });
+                    return;
+                }
+                const id = decodeURIComponent(captionsMatch[1]);
+                const body = await readBody(req);
+                if (!Array.isArray(body?.captions)) {
+                    sendJson(res, 400, { error: "'captions' must be an array" });
+                    return;
+                }
+                const captions: { id: string; caption?: string }[] = [];
+                for (const item of body.captions) {
+                    if (!item || typeof item !== 'object' || typeof item.id !== 'string') {
+                        sendJson(res, 400, { error: "each caption requires a string 'id'" });
+                        return;
+                    }
+                    if (item.caption !== undefined && typeof item.caption !== 'string') {
+                        sendJson(res, 400, { error: "'caption' must be a string when provided" });
+                        return;
+                    }
+                    captions.push({ id: item.id, ...(item.caption !== undefined && { caption: item.caption }) });
+                }
+                try {
+                    const memory = await store.updateAttachmentCaptions(id, captions);
+                    sendJson(res, 200, { memory });
+                } catch (error: any) {
+                    const msg = error?.message ?? 'Caption update failed';
+                    sendJson(res, /not found/i.test(msg) ? 404 : 400, { error: msg });
+                }
                 return;
             }
 

@@ -273,3 +273,63 @@ test("multimodal: create with an attachment, then fetch its raw bytes", async ()
         fs.rmSync(mmBlobDir, { recursive: true, force: true });
     }
 });
+
+test("PATCH /memories/:id/attachments updates a caption, 404 missing, 400 bad body", async () => {
+    const mmDbDir = fs.mkdtempSync(path.join(os.tmpdir(), "gemdex-serve-cap-db-"));
+    const mmBlobDir = fs.mkdtempSync(path.join(os.tmpdir(), "gemdex-serve-cap-blob-"));
+    const db = new LanceDBVectorDatabase({ uri: mmDbDir });
+    const mmStore = new MemoryStore({
+        embedding: new FakeMultimodalEmbedding(),
+        vectorDatabase: db,
+        blobStore: new FileBlobStore(mmBlobDir),
+    });
+    const mmServer = createServer({ config: {} as any, store: mmStore });
+    await new Promise<void>((resolve) => mmServer.listen(0, "127.0.0.1", resolve));
+    const addr = mmServer.address() as AddressInfo;
+    const mmBase = `http://127.0.0.1:${addr.port}`;
+    try {
+        const data = Buffer.from("CAPBYTES").toString("base64");
+        const createRes = await fetch(`${mmBase}/memories`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ content: "ui mock", attachments: [{ mimeType: "image/png", data, caption: "old" }] }),
+        });
+        assert.equal(createRes.status, 201);
+        const { memory } = await json(createRes);
+        const attId = memory.attachments[0].id;
+
+        // happy path: 200 with the updated caption
+        const okRes = await fetch(`${mmBase}/memories/${memory.id}/attachments`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ captions: [{ id: attId, caption: "new caption" }] }),
+        });
+        assert.equal(okRes.status, 200);
+        const updated = (await json(okRes)).memory;
+        assert.equal(updated.attachments[0].caption, "new caption");
+
+        // 404 for an unknown memory id
+        const missingRes = await fetch(`${mmBase}/memories/does-not-exist/attachments`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ captions: [{ id: "0", caption: "x" }] }),
+        });
+        assert.equal(missingRes.status, 404);
+
+        // 400 for a malformed body (captions not an array)
+        const badRes = await fetch(`${mmBase}/memories/${memory.id}/attachments`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ captions: "nope" }),
+        });
+        assert.equal(badRes.status, 400);
+
+        // 405 for a non-PATCH method on the attachments collection path
+        const wrongMethod = await fetch(`${mmBase}/memories/${memory.id}/attachments`, { method: "POST" });
+        assert.equal(wrongMethod.status, 405);
+    } finally {
+        await new Promise<void>((resolve) => mmServer.close(() => resolve()));
+        fs.rmSync(mmDbDir, { recursive: true, force: true });
+        fs.rmSync(mmBlobDir, { recursive: true, force: true });
+    }
+});
