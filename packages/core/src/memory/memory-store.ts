@@ -578,21 +578,21 @@ export class MemoryStore {
                 throw new Error(`Attachment not found on memory ${id}: ${update.id}`);
             }
             const trimmed = update.caption?.trim();
-            updates.set(update.id, trimmed && trimmed.length > 0 ? trimmed : undefined);
+            updates.set(update.id, trimmed ? trimmed : undefined);
         }
 
         const attachments: StoredAttachment[] = meta.attachments.map((att) => {
             if (!updates.has(att.id)) return att;
             const caption = updates.get(att.id);
-            const next: StoredAttachment = {
+            // Rebuild without spreading `att` so an undefined caption clears it.
+            return {
                 id: att.id,
                 kind: att.kind,
                 mimeType: att.mimeType,
                 byteLength: att.byteLength,
-                blobRef: att.blobRef,
                 ...(caption && { caption }),
+                blobRef: att.blobRef,
             };
-            return next;
         });
 
         const newMeta: ParentMeta = { ...meta, attachments, updatedAt: Date.now() };
