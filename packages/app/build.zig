@@ -252,7 +252,10 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
                 app_mod.addObjectFile(b.path(b.fmt("{s}/libcef_dll_wrapper/libcef_dll_wrapper.a", .{cef_dir})));
                 app_mod.addFrameworkPath(b.path(b.fmt("{s}/Release", .{cef_dir})));
                 app_mod.linkFramework("Chromium Embedded Framework", .{});
-                app_mod.addRPath(.{ .cwd_relative = "@executable_path/Frameworks" });
+                // addRPathSpecial passes the bytes verbatim. addRPath(.cwd_relative)
+                // would run this through pathResolve and collapse "@executable_path/.."
+                // into a bare relative path the hardened runtime rejects at load.
+                app_mod.addRPathSpecial("@executable_path/Frameworks");
             },
         }
         // Sparkle auto-updates (both web engines). The vendored framework lives
@@ -267,7 +270,15 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
         app_mod.addCSourceFile(.{ .file = b.path("src/sparkle_host.m"), .flags = sparkle_flags });
         app_mod.addFrameworkPath(b.path(sparkle_dir));
         app_mod.linkFramework("Sparkle", .{});
-        app_mod.addRPath(.{ .cwd_relative = "@executable_path/../Frameworks" });
+        // Packaged builds load Sparkle from Contents/Frameworks via this rpath.
+        // Use addRPathSpecial so the loader gets "@executable_path/../Frameworks"
+        // verbatim; addRPath(.cwd_relative) would pathResolve it down to a bare
+        // "Frameworks", which the hardened runtime refuses ("relative path not
+        // allowed in hardened program") and dyld aborts the app at launch.
+        app_mod.addRPathSpecial("@executable_path/../Frameworks");
+        // Second rpath: the source tree, so `zig build run` (unpackaged, no
+        // hardened runtime) finds Sparkle. Absolute build-machine path — harmless
+        // in dev, ignored in the packaged/signed app since the rpath above wins.
         app_mod.addRPath(b.path(sparkle_dir));
         if (b.sysroot) |sysroot| {
             app_mod.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }) });
