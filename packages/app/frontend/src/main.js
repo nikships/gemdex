@@ -54,6 +54,9 @@ const els = {
 };
 
 let apiBase = "";
+// Per-launch auth token received from the Zig shell via the getApiBase bridge.
+// Empty string when running without the desktop shell (dev / standalone).
+let apiToken = "";
 let memories = [];
 let selectedId = null; // null while editing/creating a brand-new memory
 
@@ -73,6 +76,10 @@ async function resolveApiBase() {
     try {
       const res = await window.zero.invoke("gemdex.getApiBase", {});
       if (res && typeof res.base === "string" && res.base.length > 0) {
+        // Also capture the per-launch auth token if the shell provided one.
+        if (typeof res.token === "string" && res.token.length > 0) {
+          apiToken = res.token;
+        }
         return res.base;
       }
     } catch (err) {
@@ -85,8 +92,12 @@ async function resolveApiBase() {
 }
 
 async function api(path, options = {}) {
+  // Include the per-launch auth token on every request when we have one.
+  // The sidecar requires it on all data routes to prevent any other page
+  // the user visits from making cross-origin requests to the memory store.
+  const authHeader = apiToken ? { "X-Gemdex-Token": apiToken } : {};
   const res = await fetch(`${apiBase}${path}`, {
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+    headers: { "Content-Type": "application/json", ...authHeader, ...(options.headers || {}) },
     ...options,
   });
   if (!res.ok) {
@@ -146,17 +157,36 @@ function fileToBase64(blob) {
 
 /** Fetch an existing attachment's bytes and base64-encode them. */
 async function fetchAttachmentBase64(memoryId, attachmentId) {
-  const res = await fetch(attachmentUrl(memoryId, attachmentId));
+  const headers = apiToken ? { "X-Gemdex-Token": apiToken } : {};
+  const res = await fetch(attachmentUrl(memoryId, attachmentId), { headers });
   if (!res.ok) throw new Error(`Could not read attachment ${attachmentId}`);
   // FileReader.readAsDataURL is native + async, so multi-MB blobs don't block
   // the UI thread (a manual String.fromCharCode loop would).
   return fileToBase64(await res.blob());
 }
 
+/**
+ * Fetch an existing attachment's bytes via an authenticated request and return
+ * a blob: object URL. This is used instead of the raw sidecar URL when a token
+ * is configured, because the browser cannot add custom headers to media src=
+ * attributes; a cross-origin request without the token would be rejected.
+ * The caller is responsible for revoking the returned URL when done.
+ */
+async function fetchAttachmentObjectUrl(memoryId, attachmentId) {
+  const headers = apiToken ? { "X-Gemdex-Token": apiToken } : {};
+  const res = await fetch(attachmentUrl(memoryId, attachmentId), { headers });
+  if (!res.ok) throw new Error(`Could not read attachment ${attachmentId}`);
+  return URL.createObjectURL(await res.blob());
+}
+
+
 /** Revoke object URLs for freshly-added files so the WebView doesn't leak. */
 function releaseNewObjectUrls() {
   for (const a of editorAttachments) {
     if (a.source === "new" && a.url) URL.revokeObjectURL(a.url);
+    // Also release pre-fetched blob URLs created for existing attachments when
+    // a token is active (see fetchAttachmentObjectUrl).
+    if (a._blobUrl) URL.revokeObjectURL(a._blobUrl);
   }
 }
 
@@ -243,15 +273,28 @@ async function openMemory(id) {
     els.content.value = m.content || "";
     els.meta.textContent = `Created ${fmtDate(m.createdAt)} · Updated ${fmtDate(m.updatedAt)}`;
     els.deleteBtn.hidden = false;
-    const existing = (m.attachments || []).map((a) => ({
-      source: "existing",
-      id: a.id,
-      kind: a.kind || kindFromMime(a.mimeType),
-      mimeType: a.mimeType,
-      byteLength: a.byteLength,
-      caption: a.caption || "",
-      url: attachmentUrl(m.id, a.id),
-    }));
+    // When a token is configured the browser cannot add custom headers to media
+    // src= attributes, so we pre-fetch each attachment via an authenticated
+    // request and create a blob: object URL for rendering. Without a token we
+    // use the sidecar URL directly (dev / standalone mode).
+    const existing = await Promise.all(
+      (m.attachments || []).map(async (a) => {
+        const mediaUrl = apiToken
+          ? await fetchAttachmentObjectUrl(m.id, a.id)
+          : attachmentUrl(m.id, a.id);
+        return {
+          source: "existing",
+          id: a.id,
+          kind: a.kind || kindFromMime(a.mimeType),
+          mimeType: a.mimeType,
+          byteLength: a.byteLength,
+          caption: a.caption || "",
+          url: mediaUrl,
+          // Track whether this is a blob URL we own so we revoke it correctly.
+          _blobUrl: apiToken ? mediaUrl : null,
+        };
+      }),
+    );
     setEditorAttachments(existing);
     loadedAttachmentSig = attachmentSignature(existing);
     hideSimilar();
@@ -317,7 +360,13 @@ function addFiles(fileList) {
 
 function removeAttachment(index) {
   const item = editorAttachments[index];
-  if (item && item.source === "new" && item.url) URL.revokeObjectURL(item.url);
+  // Revoke both new-file object URLs and pre-fetched blob URLs for existing
+  // attachments (the latter are created by fetchAttachmentObjectUrl when a
+  // token is active).
+  if (item) {
+    if (item.source === "new" && item.url) URL.revokeObjectURL(item.url);
+    if (item._blobUrl) URL.revokeObjectURL(item._blobUrl);
+  }
   editorAttachments.splice(index, 1);
   clearAttachError();
   renderAttachments();

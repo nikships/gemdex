@@ -69,6 +69,7 @@ before(async () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gemdex-serve-test-"));
     const db = new LanceDBVectorDatabase({ uri: tmpDir });
     const store = new MemoryStore({ embedding: new FakeEmbedding(), vectorDatabase: db });
+    // No token/allowedOrigin — backward-compat mode (existing tests unchanged).
     server = createServer({ config: {} as any, store });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const addr = server.address() as AddressInfo;
@@ -331,5 +332,130 @@ test("PATCH /memories/:id/attachments updates a caption, 404 missing, 400 bad bo
         await new Promise<void>((resolve) => mmServer.close(() => resolve()));
         fs.rmSync(mmDbDir, { recursive: true, force: true });
         fs.rmSync(mmBlobDir, { recursive: true, force: true });
+    }
+});
+
+// ---------------------------------------------------------------------------
+// Token enforcement tests
+// ---------------------------------------------------------------------------
+
+/** Spin up an isolated server with a specific token (and no allowedOrigin check
+ *  so these tests work from any origin — Node fetch has no Origin header). */
+async function withTokenServer(
+    token: string,
+    fn: (base: string) => Promise<void>,
+): Promise<void> {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gemdex-serve-auth-"));
+    const db = new LanceDBVectorDatabase({ uri: dir });
+    const store = new MemoryStore({ embedding: new FakeEmbedding(), vectorDatabase: db });
+    const srv = createServer({ config: {} as any, store, token });
+    await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
+    const addr = srv.address() as AddressInfo;
+    const srvBase = `http://127.0.0.1:${addr.port}`;
+    try {
+        await fn(srvBase);
+    } finally {
+        await new Promise<void>((resolve) => srv.close(() => resolve()));
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+}
+
+const TOKEN_CHAR = "a"; const TEST_TOKEN = TOKEN_CHAR.repeat(64); // 64-char hex-like test token
+
+test("token: GET /health is accessible without a token", async () => {
+    await withTokenServer(TEST_TOKEN, async (b) => {
+        const res = await fetch(`${b}/health`);
+        assert.equal(res.status, 200);
+    });
+});
+
+test("token: GET /config is accessible without a token", async () => {
+    await withTokenServer(TEST_TOKEN, async (b) => {
+        const res = await fetch(`${b}/config`);
+        assert.equal(res.status, 200);
+    });
+});
+
+test("token: POST /config is accessible without a token", async () => {
+    await withTokenServer(TEST_TOKEN, async (b) => {
+        // Posting a bogus key is fine; we only care about the auth gate here.
+        const res = await fetch(`${b}/config`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ apiKey: "not-a-real-key" }),
+        });
+        // 200 or 500 — either way the request was not blocked by the token gate.
+        assert.ok(res.status !== 401, `expected non-401, got ${res.status}`);
+    });
+});
+
+test("token: data route without token returns 401", async () => {
+    await withTokenServer(TEST_TOKEN, async (b) => {
+        const res = await fetch(`${b}/memories`);
+        assert.equal(res.status, 401);
+    });
+});
+
+test("token: data route with wrong token returns 401", async () => {
+    await withTokenServer(TEST_TOKEN, async (b) => {
+        const res = await fetch(`${b}/memories`, {
+            headers: { "X-Gemdex-Token": "b".repeat(64) },
+        });
+        assert.equal(res.status, 401);
+    });
+});
+
+test("token: data route with correct token succeeds", async () => {
+    await withTokenServer(TEST_TOKEN, async (b) => {
+        const res = await fetch(`${b}/memories`, {
+            headers: { "X-Gemdex-Token": TEST_TOKEN },
+        });
+        assert.equal(res.status, 200);
+        const { memories: list } = await res.json() as any;
+        assert.ok(Array.isArray(list));
+    });
+});
+
+test("token: OPTIONS preflight is allowed without a token", async () => {
+    await withTokenServer(TEST_TOKEN, async (b) => {
+        const res = await fetch(`${b}/memories`, { method: "OPTIONS" });
+        assert.equal(res.status, 204);
+    });
+});
+
+test("token: CORS headers include X-Gemdex-Token in Allow-Headers", async () => {
+    await withTokenServer(TEST_TOKEN, async (b) => {
+        const res = await fetch(`${b}/memories`, { method: "OPTIONS" });
+        const allow = res.headers.get("access-control-allow-headers") ?? "";
+        assert.ok(allow.toLowerCase().includes("x-gemdex-token"), `allow-headers: ${allow}`);
+    });
+});
+
+test("origin: request with mismatched Origin header returns 403", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gemdex-serve-origin-"));
+    const db = new LanceDBVectorDatabase({ uri: dir });
+    const store = new MemoryStore({ embedding: new FakeEmbedding(), vectorDatabase: db });
+    const srv = createServer({
+        config: {} as any,
+        store,
+        token: TEST_TOKEN,
+        allowedOrigin: "zero://app",
+    });
+    await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
+    const addr = srv.address() as AddressInfo;
+    const srvBase = `http://127.0.0.1:${addr.port}`;
+    try {
+        // A request with a foreign Origin header must be rejected.
+        const res = await fetch(`${srvBase}/health`, {
+            headers: { "Origin": "https://evil.example.com" },
+        });
+        assert.equal(res.status, 403);
+
+        // A request with no Origin header (same-origin / CLI) must pass.
+        const healthRes = await fetch(`${srvBase}/health`);
+        assert.equal(healthRes.status, 200);
+    } finally {
+        await new Promise<void>((resolve) => srv.close(() => resolve()));
+        fs.rmSync(dir, { recursive: true, force: true });
     }
 });
