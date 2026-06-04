@@ -597,7 +597,6 @@ export class MemoryStore {
 
         const newMeta: ParentMeta = { ...meta, attachments, updatedAt: Date.now() };
         const record = this.metaToRecord(newMeta);
-        const captionById = new Map(attachments.map((a) => [a.id, a.caption] as const));
 
         // Rebuild every row reusing its existing vector — NO embedding call.
         const rebuilt: VectorDocument[] = rows.map((row) => {
@@ -606,10 +605,11 @@ export class MemoryStore {
                 ? (row.vector as number[])
                 : Array.from(row.vector as Iterable<number>);
             const isAttachmentRow = rowId.includes('::att::');
-            // Attachment rows: BM25 text = new caption (by attachment id) or title.
-            // Chunk rows: preserve the stored chunk text verbatim.
+            // Attachment rows: BM25 text = new caption (resolved by the row's
+            // attachment index, which buildAttachmentRows stores in startLine)
+            // or the title. Chunk rows: preserve the stored chunk text verbatim.
             const content = isAttachmentRow
-                ? captionById.get(String(row.startLine)) ?? newMeta.title
+                ? attachments[Number(row.startLine)]?.caption ?? newMeta.title
                 : (row.content as string);
             return {
                 id: rowId,
