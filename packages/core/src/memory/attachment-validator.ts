@@ -1,3 +1,5 @@
+import { parseBuffer } from 'music-metadata';
+import { PDFDocument } from 'pdf-lib';
 import { AttachmentKind, MemoryAttachmentInput } from './types';
 
 /**
@@ -5,11 +7,14 @@ import { AttachmentKind, MemoryAttachmentInput } from './types';
  *
  * `gemini-embedding-2` accepts text, image, audio, video, and PDF mapped into
  * one space, with documented per-request caps (image ≤ 6, PDF 1 file/≤ 6 pages,
- * audio ≤ 180 s, video ≤ 120 s). We enforce what is cheaply detectable here —
- * the mimeType allowlist, per-modality counts, and a byte ceiling. Precise
- * audio/video duration and PDF page-count enforcement need media parsing and
- * are deferred (see issue #10 follow-ups); the conservative count caps below
- * keep a single request well within the shared 8,192-token budget meanwhile.
+ * audio ≤ 180 s, video ≤ 120 s). We enforce the mimeType allowlist, per-modality
+ * counts, and a byte ceiling cheaply (before decoding), then probe the decoded
+ * bytes to enforce the precise media limits: PDF page count (≤ 6) via `pdf-lib`
+ * and audio/video duration (≤ 180 s / ≤ 120 s) via `music-metadata`. Duration is
+ * only enforced when it is actually detectable from the container — some streams
+ * carry no usable duration, and we tolerate those rather than reject on a metric
+ * we cannot read. The video frame budget (Gemini samples ~1 fps, ≤ 32 frames) is
+ * not enforced separately: it is already bounded by the ≤ 120 s duration cap.
  */
 
 const MIME_TO_KIND: Record<string, AttachmentKind> = {
@@ -68,6 +73,12 @@ export interface AttachmentLimits {
     maxPdf: number;
     /** Per-attachment decoded-byte ceiling. */
     maxBytesPerAttachment: number;
+    /** Max audio duration in seconds (enforced only when detectable). */
+    maxAudioSeconds: number;
+    /** Max video duration in seconds (enforced only when detectable). */
+    maxVideoSeconds: number;
+    /** Max PDF page count. */
+    maxPdfPages: number;
 }
 
 export const DEFAULT_ATTACHMENT_LIMITS: AttachmentLimits = {
@@ -76,6 +87,9 @@ export const DEFAULT_ATTACHMENT_LIMITS: AttachmentLimits = {
     maxVideo: 1,
     maxPdf: 1,
     maxBytesPerAttachment: 20 * 1024 * 1024,
+    maxAudioSeconds: 180,
+    maxVideoSeconds: 120,
+    maxPdfPages: 6,
 };
 
 /** A decoded, validated attachment ready to embed + persist. */
@@ -110,14 +124,67 @@ function decodeBase64(data: string): Buffer {
 }
 
 /**
- * Validate + decode an attachments array. Throws AttachmentValidationError on
- * the first problem (unsupported type, empty/oversized bytes, count over cap).
- * Returns the decoded attachments in input order.
+ * Enforce the PDF page-count cap on decoded bytes. A file that pdf-lib cannot
+ * parse is rejected as malformed (matching the surrounding "caller-correctable"
+ * error style) rather than thrown opaquely.
  */
-export function validateAttachments(
+async function enforcePdfPageLimit(bytes: Buffer, index: number, maxPages: number): Promise<void> {
+    let pageCount: number;
+    try {
+        const doc = await PDFDocument.load(bytes, { updateMetadata: false });
+        pageCount = doc.getPageCount();
+    } catch {
+        throw new AttachmentValidationError(
+            `Attachment #${index + 1} (application/pdf) could not be parsed as a valid PDF.`,
+        );
+    }
+    if (pageCount > maxPages) {
+        throw new AttachmentValidationError(
+            `Attachment #${index + 1} (application/pdf) has ${pageCount} pages, over the ${maxPages}-page limit.`,
+        );
+    }
+}
+
+/**
+ * Enforce an audio/video duration cap on decoded bytes. Duration is read from
+ * the container via music-metadata; we only enforce when it is detectable —
+ * some containers carry no usable duration, and an unreadable/corrupt stream is
+ * tolerated here (the byte ceiling already bounds it) rather than rejected on a
+ * metric we cannot determine.
+ */
+async function enforceDurationLimit(
+    bytes: Buffer,
+    mimeType: string,
+    index: number,
+    label: string,
+    maxSeconds: number,
+): Promise<void> {
+    let duration: number | undefined;
+    try {
+        const meta = await parseBuffer(bytes, { mimeType });
+        duration = meta.format.duration;
+    } catch {
+        // Unparseable/duration-unknown container: tolerate, do not reject.
+        return;
+    }
+    if (typeof duration === 'number' && duration > maxSeconds) {
+        throw new AttachmentValidationError(
+            `Attachment #${index + 1} (${mimeType}) is ${Math.round(duration)}s long, over the ${label} ` +
+            `${maxSeconds}s limit.`,
+        );
+    }
+}
+
+/**
+ * Validate + decode an attachments array. Throws AttachmentValidationError on
+ * the first problem (unsupported type, empty/oversized bytes, count over cap,
+ * PDF over the page limit, or audio/video over the duration limit). Returns the
+ * decoded attachments in input order.
+ */
+export async function validateAttachments(
     attachments: MemoryAttachmentInput[],
     limits: AttachmentLimits = DEFAULT_ATTACHMENT_LIMITS,
-): ValidatedAttachment[] {
+): Promise<ValidatedAttachment[]> {
     const result: ValidatedAttachment[] = [];
     const counts: Record<AttachmentKind, number> = { image: 0, audio: 0, video: 0, pdf: 0 };
     const capFor: Record<AttachmentKind, number> = {
@@ -131,7 +198,8 @@ export function validateAttachments(
     // BEFORE allocating the decoded Buffer so a huge input can't OOM the process.
     const maxBase64Len = Math.ceil(limits.maxBytesPerAttachment * 1.37) + 256;
 
-    attachments.forEach((att, i) => {
+    for (let i = 0; i < attachments.length; i++) {
+        const att = attachments[i];
         if (!att || typeof att.mimeType !== 'string' || typeof att.data !== 'string') {
             throw new AttachmentValidationError(
                 `Attachment #${i + 1} must be an object with a string 'mimeType' and base64 'data'.`,
@@ -172,6 +240,17 @@ export function validateAttachments(
             );
         }
 
+        // Probe the decoded bytes for the precise media limits only AFTER the
+        // cheap count/byte checks have passed, so the expensive parse never runs
+        // on an over-cap or oversized payload.
+        if (kind === 'pdf') {
+            await enforcePdfPageLimit(bytes, i, limits.maxPdfPages);
+        } else if (kind === 'audio') {
+            await enforceDurationLimit(bytes, att.mimeType, i, 'audio', limits.maxAudioSeconds);
+        } else if (kind === 'video') {
+            await enforceDurationLimit(bytes, att.mimeType, i, 'video', limits.maxVideoSeconds);
+        }
+
         const caption = typeof att.caption === 'string' ? att.caption.trim() : '';
         result.push({
             kind,
@@ -180,7 +259,7 @@ export function validateAttachments(
             byteLength: bytes.length,
             ...(caption.length > 0 && { caption }),
         });
-    });
+    }
 
     return result;
 }
