@@ -136,6 +136,26 @@ jobs:
             --timestamp \
             "$APP"
 
+          echo "==> Verifying dynamic-link layout (guards against dyld 'Library missing' at launch)"
+          # spctl/notarization confirm the signature is valid but NOT that dyld
+          # can resolve the app's frameworks. A hardened binary aborts at launch
+          # if any LC_RPATH is a bare relative path (e.g. "Frameworks" instead of
+          # "@executable_path/../Frameworks"). Catch that here instead of shipping
+          # a DMG that crashes on every user's Mac.
+          EXE="$APP/Contents/MacOS/gemdex-memory"
+          BAD_RPATHS=$(otool -l "$EXE" \
+            | awk '/LC_RPATH/{f=1;next} f&&/path /{print $2;f=0}' \
+            | grep -vE '^(/|@)' || true)
+          if [ -n "$BAD_RPATHS" ]; then
+            echo "::error::Bare relative LC_RPATH entries (hardened runtime rejects these at launch):"
+            echo "$BAD_RPATHS"
+            exit 1
+          fi
+          # Sparkle is loaded via @rpath; confirm it is actually embedded.
+          test -f "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle" \
+            || { echo "::error::Sparkle.framework missing from app bundle"; exit 1; }
+          echo "    rpaths OK; Sparkle embedded."
+
           echo "==> Notarizing app"
           ditto -c -k --keepParent "$APP" /tmp/gemdex-app.zip
           xcrun notarytool submit /tmp/gemdex-app.zip \
