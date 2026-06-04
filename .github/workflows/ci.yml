@@ -91,6 +91,10 @@ jobs:
         working-directory: packages/app/frontend
         run: npm install && npm run build
 
+      - name: Frontend tests
+        working-directory: packages/app/frontend
+        run: npm run test
+
       - name: Zig unit tests
         working-directory: packages/app
         run: zig build test -Dplatform=null "-Dzero-native-path=${{ steps.zn.outputs.path }}"

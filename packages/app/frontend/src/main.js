@@ -1,4 +1,13 @@
 import "./styles.css";
+import {
+  KIND_CAPS,
+  MAX_BYTES_PER_ATTACHMENT,
+  attachmentSignature,
+  captionPatchFromAttachments,
+  classifyAttachmentChange,
+  humanSize,
+  kindFromMime,
+} from "./attachments.js";
 
 /**
  * Gemdex Memory — management UI.
@@ -43,23 +52,6 @@ const els = {
   similarEmpty: document.querySelector("#similar-empty"),
   similarClose: document.querySelector("#similar-close"),
 };
-
-// Mirror of packages/core/src/memory/attachment-validator.ts so the UI gives
-// instant feedback; the sidecar remains the source of truth on save.
-const MIME_TO_KIND = {
-  "image/png": "image",
-  "image/jpeg": "image",
-  "audio/mp3": "audio",
-  "audio/mpeg": "audio",
-  "audio/wav": "audio",
-  "audio/x-wav": "audio",
-  "audio/wave": "audio",
-  "video/mp4": "video",
-  "video/quicktime": "video",
-  "application/pdf": "pdf",
-};
-const KIND_CAPS = { image: 6, audio: 1, video: 1, pdf: 1 };
-const MAX_BYTES_PER_ATTACHMENT = 20 * 1024 * 1024;
 
 let apiBase = "";
 let memories = [];
@@ -133,22 +125,6 @@ function fmtDate(ms) {
   }
 }
 
-function kindFromMime(mimeType) {
-  return MIME_TO_KIND[(mimeType || "").toLowerCase()];
-}
-
-function humanSize(bytes) {
-  if (!bytes || bytes < 0) return "";
-  const units = ["B", "KB", "MB", "GB"];
-  let value = bytes;
-  let i = 0;
-  while (value >= 1024 && i < units.length - 1) {
-    value /= 1024;
-    i += 1;
-  }
-  return `${value < 10 && i > 0 ? value.toFixed(1) : Math.round(value)} ${units[i]}`;
-}
-
 /** Absolute URL the WebView can use to fetch one attachment's raw bytes. */
 function attachmentUrl(memoryId, attachmentId) {
   return `${apiBase}/memories/${encodeURIComponent(memoryId)}/attachments/${encodeURIComponent(attachmentId)}`;
@@ -177,13 +153,6 @@ async function fetchAttachmentBase64(memoryId, attachmentId) {
   return fileToBase64(await res.blob());
 }
 
-/** A stable signature of the editor attachment set, to detect edits. */
-function attachmentSignature(items) {
-  return items
-    .map((a) => `${a.source}:${a.source === "existing" ? a.id : a.file.name}:${a.caption || ""}`)
-    .join("|");
-}
-
 /** Revoke object URLs for freshly-added files so the WebView doesn't leak. */
 function releaseNewObjectUrls() {
   for (const a of editorAttachments) {
@@ -204,9 +173,11 @@ function renderList() {
     li.className = "memory-item" + (m.id === selectedId ? " active" : "");
     li.dataset.id = m.id;
     li.innerHTML = `
-      <div class="item-title"></div>
-      <div class="item-preview"></div>
-      <div class="item-date"></div>
+      <div class="item-body">
+        <div class="item-title"></div>
+        <div class="item-preview"></div>
+        <div class="item-date"></div>
+      </div>
     `;
     li.querySelector(".item-title").textContent = m.title || "Untitled memory";
     li.querySelector(".item-preview").textContent = m.preview || "";
@@ -218,6 +189,21 @@ function renderList() {
       chip.className = "item-chip";
       chip.textContent = `📎 ${attachments.length}`;
       dateEl.appendChild(chip);
+    }
+    // Show a real thumbnail when the memory has at least one image attachment.
+    const image = attachments.find((a) => (a.kind ?? kindFromMime(a.mimeType)) === "image");
+    if (image) {
+      const thumb = document.createElement("img");
+      thumb.className = "item-thumb";
+      thumb.loading = "lazy";
+      thumb.src = attachmentUrl(m.id, image.id);
+      thumb.alt = image.caption || "image attachment";
+      thumb.onerror = () => {
+        thumb.remove();
+        li.classList.remove("has-thumb");
+      };
+      li.classList.add("has-thumb");
+      li.insertBefore(thumb, li.firstChild);
     }
     li.addEventListener("click", () => openMemory(m.id));
     els.list.appendChild(li);
@@ -360,12 +346,41 @@ function renderMediaPreview(item) {
     video.src = item.url;
     return video;
   }
-  // pdf — WKWebView renders PDF natively in an iframe (no extra dependency).
+  // pdf — WKWebView renders PDF natively in an iframe, but some WebKitGTK
+  // builds ship without a PDF viewer and render a blank frame. iframe.onload
+  // doesn't reliably fire for that case, so we always pair the inline preview
+  // with an explicit "open / download" affordance that works regardless of
+  // native PDF support.
+  const wrap = document.createElement("div");
+  wrap.className = "att-pdf-wrap";
+
   const frame = document.createElement("iframe");
   frame.className = "att-media att-pdf";
   frame.src = item.url;
   frame.title = item.caption || "PDF attachment";
-  return frame;
+  wrap.appendChild(frame);
+
+  const fallback = document.createElement("div");
+  fallback.className = "att-pdf-fallback";
+
+  const label = document.createElement("span");
+  label.className = "att-pdf-label";
+  label.textContent = "PDF preview not supported here?";
+  fallback.appendChild(label);
+
+  const link = document.createElement("a");
+  link.className = "att-pdf-open";
+  link.href = item.url;
+  link.target = "_blank";
+  link.rel = "noopener";
+  link.textContent = "Open / download PDF";
+  // Freshly-added files are object URLs, but existing attachments resolve to a
+  // stable blob route we can offer as a download.
+  if (item.source === "existing") link.download = "";
+  fallback.appendChild(link);
+
+  wrap.appendChild(fallback);
+  return wrap;
 }
 
 function renderAttachments() {
@@ -428,9 +443,13 @@ function renderAttachments() {
  * unchanged on an update (the backend then preserves the existing media);
  * otherwise returns the full desired set as inline base64 — re-fetching kept
  * bytes, since PUT replaces all attachments.
+ *
+ * The caption-only fast path (PATCH /memories/:id/attachments) is handled by
+ * `saveCurrent` before this runs; here we only see "none" (→ undefined) and
+ * structural changes (→ full re-embed).
  */
 async function buildAttachmentsPayload(isUpdate) {
-  if (isUpdate && attachmentSignature(editorAttachments) === loadedAttachmentSig) {
+  if (isUpdate && classifyAttachmentChange(editorAttachments, loadedAttachmentSig) === "none") {
     return undefined;
   }
   if (editorAttachments.length === 0) {
@@ -464,13 +483,27 @@ async function saveCurrent(event) {
   els.saveBtn.disabled = true;
   try {
     const isUpdate = Boolean(selectedId);
-    const attachments = await buildAttachmentsPayload(isUpdate);
-    if (isUpdate) {
+    if (isUpdate && classifyAttachmentChange(editorAttachments, loadedAttachmentSig) === "caption-only") {
+      // Only captions on existing attachments changed: update content/title via
+      // PUT *without* attachments (so the media isn't re-fetched and re-embedded)
+      // and patch the captions in place. openMemory() below refreshes
+      // loadedAttachmentSig from the reloaded memory.
+      await api(`/memories/${encodeURIComponent(selectedId)}`, {
+        method: "PUT",
+        body: JSON.stringify({ content, title: title || undefined }),
+      });
+      await api(`/memories/${encodeURIComponent(selectedId)}/attachments`, {
+        method: "PATCH",
+        body: JSON.stringify({ captions: captionPatchFromAttachments(editorAttachments) }),
+      });
+    } else if (isUpdate) {
+      const attachments = await buildAttachmentsPayload(true);
       await api(`/memories/${encodeURIComponent(selectedId)}`, {
         method: "PUT",
         body: JSON.stringify({ content, title: title || undefined, ...(attachments !== undefined && { attachments }) }),
       });
     } else {
+      const attachments = await buildAttachmentsPayload(false);
       const body = await api("/memories", {
         method: "POST",
         body: JSON.stringify({ content, title: title || undefined, ...(attachments !== undefined && { attachments }) }),
