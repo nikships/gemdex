@@ -280,6 +280,28 @@ button:disabled {
   border-color: var(--gold);
 }
 
+/* Rows with an image thumbnail lay the thumb beside the text block. */
+.memory-item.has-thumb {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.item-thumb {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  object-fit: cover;
+  border: 1px solid var(--border);
+  background: var(--paper-2);
+}
+
+.item-body {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
 .item-title {
   font-weight: 700;
   white-space: nowrap;
@@ -530,10 +552,48 @@ button.ghost.danger-text {
   background: #000;
 }
 
+.att-pdf-wrap {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
 .att-pdf {
   width: 100%;
-  height: 220px;
+  /* Leave room for the fallback bar within .att-preview's 220px ceiling. */
+  height: 180px;
   border: 0;
+}
+
+.att-pdf-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--panel-soft);
+  border-top: 1px solid var(--border);
+}
+
+.att-pdf-label {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.att-pdf-open {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--rust);
+  text-decoration: none;
+  padding: 4px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.att-pdf-open:hover {
+  background: var(--paper-2);
 }
 
 .att-body {
