@@ -17,6 +17,8 @@
         "@google/genai": "^1.9.0",
         "@lancedb/lancedb": "^0.21.0",
         "apache-arrow": "^17.0.0",
+        "music-metadata": "^7.14.0",
+        "pdf-lib": "^1.17.1",
         "typescript": "^5.0.0"
     },
     "devDependencies": {

@@ -286,7 +286,7 @@ export class MemoryStore {
     ): Promise<Memory> {
         const text = content ?? '';
         const validated = attachmentsInput.length > 0
-            ? validateAttachments(attachmentsInput, this.attachmentLimits)
+            ? await validateAttachments(attachmentsInput, this.attachmentLimits)
             : [];
 
         if (validated.length > 0 && !this.embedding.isMultimodal()) {
@@ -401,7 +401,7 @@ export class MemoryStore {
         // collection-existence shortcut, so a misused model fails fast (a clear
         // programming error) rather than silently returning [] on an empty store.
         const validatedQuery = hasAttachments
-            ? validateAttachments(attachmentsInput, this.attachmentLimits)
+            ? await validateAttachments(attachmentsInput, this.attachmentLimits)
             : [];
         if (validatedQuery.length > 0 && !this.embedding.isMultimodal()) {
             throw new Error(
