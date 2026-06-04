@@ -167,7 +167,7 @@ async function enforceDurationLimit(
         // Unparseable/duration-unknown container: tolerate, do not reject.
         return;
     }
-    if (typeof duration === 'number' && duration > maxSeconds) {
+    if (typeof duration === 'number' && Number.isFinite(duration) && duration > maxSeconds) {
         throw new AttachmentValidationError(
             `Attachment #${index + 1} (${mimeType}) is ${Math.round(duration)}s long, over the ${label} ` +
             `${maxSeconds}s limit.`,
