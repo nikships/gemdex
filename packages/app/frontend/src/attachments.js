@@ -39,11 +39,20 @@ export function humanSize(bytes) {
   return `${value < 10 && i > 0 ? value.toFixed(1) : Math.round(value)} ${units[i]}`;
 }
 
-/** A stable signature of the editor attachment set, to detect edits. */
+/**
+ * A stable signature of the editor attachment set, to detect edits. JSON
+ * serialization (rather than delimiter joining) so captions or filenames
+ * containing ":" or "|" can't collide and silently defeat the caption-only
+ * fast path.
+ */
 export function attachmentSignature(items) {
-  return items
-    .map((a) => `${a.source}:${a.source === "existing" ? a.id : a.file.name}:${a.caption || ""}`)
-    .join("|");
+  return JSON.stringify(
+    items.map((a) => ({
+      source: a.source,
+      id: a.source === "existing" ? a.id : a.file.name,
+      caption: a.caption || "",
+    })),
+  );
 }
 
 /**
@@ -52,26 +61,28 @@ export function attachmentSignature(items) {
  * structure signature differ at most in captions.
  */
 export function attachmentStructureSignature(items) {
-  return items
-    .map((a) => `${a.source}:${a.source === "existing" ? a.id : a.file.name}`)
-    .join("|");
+  return JSON.stringify(
+    items.map((a) => ({
+      source: a.source,
+      id: a.source === "existing" ? a.id : a.file.name,
+    })),
+  );
 }
 
 /**
  * Recover the structure signature from a full (caption-bearing) signature by
- * dropping each segment's caption (everything after the second ":"). Mirrors
- * how attachmentSignature builds its segments.
+ * dropping each entry's caption. Mirrors how attachmentSignature builds its
+ * entries.
  */
 function structureFromSignature(sig) {
-  if (!sig) return "";
-  return sig
-    .split("|")
-    .map((seg) => {
-      const first = seg.indexOf(":");
-      const second = seg.indexOf(":", first + 1);
-      return second >= 0 ? seg.slice(0, second) : seg;
-    })
-    .join("|");
+  if (!sig) return "[]";
+  try {
+    return JSON.stringify(
+      JSON.parse(sig).map((entry) => ({ source: entry.source, id: entry.id })),
+    );
+  } catch (_) {
+    return "[]";
+  }
 }
 
 /**
@@ -85,13 +96,16 @@ function structureFromSignature(sig) {
  *                    full PUT that replaces (and re-embeds) all media.
  */
 export function classifyAttachmentChange(editorAttachments, loadedAttachmentSig) {
+  // A new memory / never-loaded set is "" here; normalize to the empty-set
+  // JSON signature so the comparisons below stay format-consistent.
+  const loadedSig = loadedAttachmentSig ? loadedAttachmentSig : "[]";
   const currentSig = attachmentSignature(editorAttachments);
-  if (currentSig === (loadedAttachmentSig ?? "")) return "none";
+  if (currentSig === loadedSig) return "none";
   // Any freshly-added file means the media set itself changed.
   if (editorAttachments.some((a) => a.source !== "existing")) return "structural";
   // All existing: caption-only iff the structure is unchanged.
   const sameStructure =
-    attachmentStructureSignature(editorAttachments) === structureFromSignature(loadedAttachmentSig ?? "");
+    attachmentStructureSignature(editorAttachments) === structureFromSignature(loadedSig);
   return sameStructure ? "caption-only" : "structural";
 }
 

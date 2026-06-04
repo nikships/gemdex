@@ -71,7 +71,9 @@ describe("attachmentSignature", () => {
   it("is stable for the same set", () => {
     const set = [existing("a1", "front"), fresh("photo.png", "back")];
     expect(attachmentSignature(set)).toBe(attachmentSignature(set));
-    expect(attachmentSignature([existing("a1", "front")])).toBe("existing:a1:front");
+    expect(JSON.parse(attachmentSignature([existing("a1", "front")]))).toEqual([
+      { source: "existing", id: "a1", caption: "front" },
+    ]);
   });
 
   it("changes when a caption changes", () => {
@@ -87,7 +89,17 @@ describe("attachmentSignature", () => {
   });
 
   it("keys new files by filename and existing by id", () => {
-    expect(attachmentSignature([fresh("photo.png", "cap")])).toBe("new:photo.png:cap");
+    expect(JSON.parse(attachmentSignature([fresh("photo.png", "cap")]))).toEqual([
+      { source: "new", id: "photo.png", caption: "cap" },
+    ]);
+  });
+
+  it("does not collide when a caption contains the legacy ':' / '|' delimiters", () => {
+    // A caption-only edit whose caption contains the old delimiters must NOT
+    // read as a different structure (which would force a full re-embed PUT).
+    const loaded = attachmentSignature([existing("a1", "plain")]);
+    const edited = [existing("a1", "Sunset | Vacation: day 1")];
+    expect(classifyAttachmentChange(edited, loaded)).toBe("caption-only");
   });
 });
 

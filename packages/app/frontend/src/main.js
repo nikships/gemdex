@@ -198,7 +198,10 @@ function renderList() {
       thumb.loading = "lazy";
       thumb.src = attachmentUrl(m.id, image.id);
       thumb.alt = image.caption || "image attachment";
-      thumb.onerror = () => thumb.remove();
+      thumb.onerror = () => {
+        thumb.remove();
+        li.classList.remove("has-thumb");
+      };
       li.classList.add("has-thumb");
       li.insertBefore(thumb, li.firstChild);
     }
