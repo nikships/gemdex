@@ -39,6 +39,12 @@ export function humanSize(bytes) {
   return `${value < 10 && i > 0 ? value.toFixed(1) : Math.round(value)} ${units[i]}`;
 }
 
+// Existing attachments are keyed by their server id; freshly-added files have
+// no id yet, so they key by filename. Shared by both signature builders.
+function entryId(a) {
+  return a.source === "existing" ? a.id : a.file.name;
+}
+
 /**
  * A stable signature of the editor attachment set, to detect edits. JSON
  * serialization (rather than delimiter joining) so captions or filenames
@@ -49,7 +55,7 @@ export function attachmentSignature(items) {
   return JSON.stringify(
     items.map((a) => ({
       source: a.source,
-      id: a.source === "existing" ? a.id : a.file.name,
+      id: entryId(a),
       caption: a.caption || "",
     })),
   );
@@ -64,7 +70,7 @@ export function attachmentStructureSignature(items) {
   return JSON.stringify(
     items.map((a) => ({
       source: a.source,
-      id: a.source === "existing" ? a.id : a.file.name,
+      id: entryId(a),
     })),
   );
 }
@@ -98,7 +104,7 @@ function structureFromSignature(sig) {
 export function classifyAttachmentChange(editorAttachments, loadedAttachmentSig) {
   // A new memory / never-loaded set is "" here; normalize to the empty-set
   // JSON signature so the comparisons below stay format-consistent.
-  const loadedSig = loadedAttachmentSig ? loadedAttachmentSig : "[]";
+  const loadedSig = loadedAttachmentSig || "[]";
   const currentSig = attachmentSignature(editorAttachments);
   if (currentSig === loadedSig) return "none";
   // Any freshly-added file means the media set itself changed.
