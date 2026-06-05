@@ -264,6 +264,25 @@ test('BLOB_STORE=s3 requires a bucket', () => {
     );
 });
 
+test('empty S3 credential env vars fall back to AWS_* equivalents', () => {
+    const cfg = loadServerConfig({
+        env: {
+            BLOB_STORE: 's3',
+            S3_BUCKET: 'gemdex-blobs',
+            S3_ACCESS_KEY_ID: '',
+            S3_SECRET_ACCESS_KEY: '',
+            AWS_ACCESS_KEY_ID: 'aws-key',
+            AWS_SECRET_ACCESS_KEY: 'aws-secret',
+        },
+        argv: [],
+    });
+    assert.equal(cfg.blobStore.kind, 's3');
+    if (cfg.blobStore.kind === 's3') {
+        assert.equal(cfg.blobStore.accessKeyId, 'aws-key');
+        assert.equal(cfg.blobStore.secretAccessKey, 'aws-secret');
+    }
+});
+
 test('config file can provide blobStore settings', () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gemdex-server-config-test-'));
     const configPath = path.join(tmpDir, 'config.json');

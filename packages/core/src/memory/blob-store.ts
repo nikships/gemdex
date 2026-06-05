@@ -2,7 +2,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import {
-    DeleteObjectCommand,
+    DeleteObjectsCommand,
     GetObjectCommand,
     HeadObjectCommand,
     ListObjectsV2Command,
@@ -219,10 +219,19 @@ export class S3BlobStore implements BlobStore {
                 ContinuationToken: continuationToken,
             }));
             const objects = listed.Contents ?? [];
-            await Promise.all(objects
+            const keys = objects
                 .map((object) => object.Key)
-                .filter((key): key is string => typeof key === 'string' && key.length > 0)
-                .map((key) => this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }))));
+                .filter((key): key is string => typeof key === 'string' && key.length > 0);
+            // Bulk-delete each page in a single request (S3 DeleteObjects
+            // accepts up to 1000 keys, and ListObjectsV2 returns at most 1000
+            // per page) rather than firing one DeleteObject per key, which
+            // risks rate-limiting and socket exhaustion on large parents.
+            if (keys.length > 0) {
+                await this.client.send(new DeleteObjectsCommand({
+                    Bucket: this.bucket,
+                    Delete: { Objects: keys.map((key) => ({ Key: key })) },
+                }));
+            }
             continuationToken = listed.IsTruncated ? listed.NextContinuationToken : undefined;
         } while (continuationToken);
     }

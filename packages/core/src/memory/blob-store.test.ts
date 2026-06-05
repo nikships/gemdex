@@ -79,8 +79,11 @@ describe('S3BlobStore', () => {
                 const keys = Array.from(this.objects.keys()).filter((candidate) => candidate.startsWith(prefix));
                 return { Contents: keys.map((candidate) => ({ Key: candidate })), IsTruncated: false };
             }
-            if (command.constructor.name === 'DeleteObjectCommand') {
-                this.objects.delete(key!);
+            if (command.constructor.name === 'DeleteObjectsCommand') {
+                const objectsToDelete = (input.Delete?.Objects ?? []) as Array<{ Key?: string }>;
+                for (const obj of objectsToDelete) {
+                    if (obj.Key) this.objects.delete(obj.Key);
+                }
                 return {};
             }
             throw new Error(`Unhandled command ${command.constructor.name}`);
