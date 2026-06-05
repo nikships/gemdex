@@ -138,16 +138,21 @@ Canonical memory response shape:
   "attachments": [
     {
       "id": "att_...",
+      "kind": "image",
       "mimeType": "image/png",
       "caption": "Optional caption",
-      "sizeBytes": 12345,
-      "createdAt": "2026-06-05T00:00:00.000Z"
+      "byteLength": 12345
     }
   ],
-  "createdAt": "2026-06-05T00:00:00.000Z",
-  "updatedAt": "2026-06-05T00:00:00.000Z"
+  "createdAt": 1812144000000,
+  "updatedAt": 1812144000000
 }
 ```
+
+`createdAt` and `updatedAt` are epoch milliseconds, matching the local
+`Memory` and `MemorySummary` types. Attachment metadata uses `byteLength` for
+decoded bytes and `kind` for the media category (`image`, `audio`, `video`, or
+`pdf`).
 
 Attachment input uses inline base64 only:
 
@@ -201,7 +206,44 @@ Either `content` or at least one attachment is required.
 ```
 
 The `memory` value is the canonical memory record. `GET`, `PUT`, and `PATCH`
-return the same wrapper. `DELETE` returns `{ "ok": true }`.
+return the same wrapper.
+
+`GET /v1/memories` response:
+
+```json
+{
+  "memories": [
+    {
+      "id": "mem_...",
+      "title": "Deployment playbook",
+      "preview": "Truncated text suitable for browse views",
+      "attachments": [
+        {
+          "id": "att_...",
+          "kind": "image",
+          "mimeType": "image/png",
+          "caption": "Optional caption",
+          "byteLength": 12345
+        }
+      ],
+      "createdAt": 1812144000000,
+      "updatedAt": 1812144000000
+    }
+  ]
+}
+```
+
+The list response is wrapped in an object and uses `MemorySummary`-compatible
+items: full content is replaced by `preview`, while attachment metadata and
+timestamps remain available for browse views.
+
+`DELETE /v1/memories/:id` response:
+
+```json
+{
+  "ok": true
+}
+```
 
 ### Recall
 
@@ -252,6 +294,27 @@ values as stable across server versions or backends.
 | `GET` | `/v1/memories/:id/attachments/:attachmentId` | Stream raw attachment bytes. |
 | `PATCH` | `/v1/memories/:id/attachments` | Update attachment captions without replacing bytes. |
 
+`PATCH /v1/memories/:id/attachments` request:
+
+```json
+{
+  "captions": [
+    {
+      "id": "att_...",
+      "caption": "Updated caption"
+    },
+    {
+      "id": "att_without_caption"
+    }
+  ]
+}
+```
+
+Each item maps to `AttachmentCaptionUpdate`: `id` is required and `caption` is
+optional. Omitting `caption`, or sending an empty/whitespace caption, clears the
+attachment caption so keyword fallback can use the memory title. The response is
+`{ "memory": {} }` with the canonical memory record.
+
 Caption-only edits are metadata updates. They may affect keyword recall text,
 but they do not replace the raw blob.
 
@@ -261,6 +324,68 @@ but they do not replace the raw blob.
 |---|---|---|
 | `GET` | `/v1/export` | Export all memories as portable records. |
 | `POST` | `/v1/import` | Import portable records, upserting by id. |
+
+The HTTP API exchanges JSON objects, not JSONL streams.
+
+`GET /v1/export` response:
+
+```json
+{
+  "records": [
+    {
+      "id": "mem_...",
+      "title": "Deployment playbook",
+      "content": "Full parent memory content",
+      "createdAt": 1812144000000,
+      "updatedAt": 1812144000000,
+      "attachments": [
+        {
+          "id": "att_...",
+          "mimeType": "image/png",
+          "data": "base64-encoded-bytes",
+          "caption": "Optional caption"
+        }
+      ]
+    }
+  ]
+}
+```
+
+`POST /v1/import` request:
+
+```json
+{
+  "records": [
+    {
+      "id": "mem_...",
+      "title": "Deployment playbook",
+      "content": "Full parent memory content",
+      "createdAt": 1812144000000,
+      "updatedAt": 1812144000000,
+      "attachments": [
+        {
+          "id": "att_...",
+          "mimeType": "image/png",
+          "data": "base64-encoded-bytes",
+          "caption": "Optional caption"
+        }
+      ]
+    }
+  ]
+}
+```
+
+`POST /v1/import` response:
+
+```json
+{
+  "imported": 1
+}
+```
+
+Each `records` item maps to `MemoryExportRecord`; attachment bytes are inline
+base64 so the export is portable without direct access to the server's blob
+store.
 
 Export/import must preserve parent memories and attachments. Imported records
 are reindexed as needed by the destination server, but recall ranking remains
