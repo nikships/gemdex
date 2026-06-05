@@ -13,9 +13,8 @@ import type {
     AttachmentCaptionUpdate,
 } from 'gemdex-core';
 import { SUPPORTED_API_VERSION, SUPPORTED_PROTOCOL_VERSION } from 'gemdex-core';
+import type { ServerVersionInfo } from 'gemdex-core';
 import { createServer } from './server.js';
-
-const FAKE_CONFIG = { host: '127.0.0.1', port: 0 };
 
 /**
  * Minimal in-memory MemoryBackend stub for testing the shared handler
@@ -107,7 +106,7 @@ async function withServer(
     store: MemoryBackend | null,
     fn: (base: string) => Promise<void>,
 ): Promise<void> {
-    const server = createServer({ config: FAKE_CONFIG, store });
+    const server = createServer({ store });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const addr = server.address() as AddressInfo;
     const base = `http://127.0.0.1:${addr.port}`;
@@ -130,7 +129,7 @@ test('GET /v1/version returns correct shape', async () => {
     await withServer(null, async (base) => {
         const res = await fetch(`${base}/v1/version`);
         assert.equal(res.status, 200);
-        const body = await res.json() as any;
+        const body = await res.json() as ServerVersionInfo;
         assert.equal(body.name, 'gemdex-server');
         assert.equal(body.apiVersion, SUPPORTED_API_VERSION);
         assert.equal(body.protocolVersion, SUPPORTED_PROTOCOL_VERSION);
@@ -148,7 +147,7 @@ test('GET /v1/memories with no store returns 503', async () => {
     await withServer(null, async (base) => {
         const res = await fetch(`${base}/v1/memories`);
         assert.equal(res.status, 503);
-        const body = await res.json() as any;
+        const body = await res.json() as { error: string };
         assert.equal(typeof body.error, 'string');
         assert.ok(body.error.length > 0, 'error message should be non-empty');
     });
@@ -159,7 +158,7 @@ test('GET /v1/memories with a fake store returns 200 { memories: [] }', async ()
     await withServer(store, async (base) => {
         const res = await fetch(`${base}/v1/memories`);
         assert.equal(res.status, 200);
-        const body = await res.json() as any;
+        const body = await res.json() as { memories: unknown[] };
         assert.deepEqual(body, { memories: [] });
     });
 });
@@ -173,13 +172,13 @@ test('POST /v1/memories with fake store creates a memory and lists it', async ()
             body: JSON.stringify({ content: 'test memory content', title: 'Test' }),
         });
         assert.equal(createRes.status, 201);
-        const { memory } = await createRes.json() as any;
+        const { memory } = await createRes.json() as { memory: { id: string; title: string } };
         assert.ok(memory.id);
         assert.equal(memory.title, 'Test');
 
         const listRes = await fetch(`${base}/v1/memories`);
         assert.equal(listRes.status, 200);
-        const { memories } = await listRes.json() as any;
+        const { memories } = await listRes.json() as { memories: Array<{ id: string }> };
         assert.equal(memories.length, 1);
         assert.equal(memories[0].id, memory.id);
     });

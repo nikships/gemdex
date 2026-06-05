@@ -38,7 +38,7 @@ test('CLI args --host and --port are parsed', () => {
 test('invalid port 0 throws a clear error', () => {
     assert.throws(
         () => loadServerConfig({ env: { GEMDEX_SERVER_PORT: '0' }, argv: [] }),
-        (err: any) => {
+        (err: unknown) => {
             assert.ok(err instanceof Error);
             assert.ok(err.message.includes('0'), `message should mention the bad value: ${err.message}`);
             assert.ok(err.message.includes('1') && err.message.includes('65535'), `message should mention valid range: ${err.message}`);
@@ -50,7 +50,7 @@ test('invalid port 0 throws a clear error', () => {
 test('invalid port 70000 throws a clear error', () => {
     assert.throws(
         () => loadServerConfig({ env: { GEMDEX_SERVER_PORT: '70000' }, argv: [] }),
-        (err: any) => {
+        (err: unknown) => {
             assert.ok(err instanceof Error);
             assert.ok(err.message.includes('70000'), `message should mention the bad value: ${err.message}`);
             return true;
@@ -61,7 +61,7 @@ test('invalid port 70000 throws a clear error', () => {
 test('invalid port "abc" throws a clear error', () => {
     assert.throws(
         () => loadServerConfig({ env: { GEMDEX_SERVER_PORT: 'abc' }, argv: [] }),
-        (err: any) => {
+        (err: unknown) => {
             assert.ok(err instanceof Error);
             assert.ok(err.message.toLowerCase().includes('port'), `message should mention port: ${err.message}`);
             return true;
@@ -73,7 +73,7 @@ test('missing config file throws a clear error naming the path', () => {
     const missingPath = '/tmp/gemdex-server-does-not-exist-12345.json';
     assert.throws(
         () => loadServerConfig({ env: { GEMDEX_SERVER_CONFIG: missingPath }, argv: [] }),
-        (err: any) => {
+        (err: unknown) => {
             assert.ok(err instanceof Error);
             assert.ok(err.message.includes(missingPath), `message should name the path: ${err.message}`);
             return true;
@@ -88,7 +88,7 @@ test('invalid JSON config file throws a clear error naming the path', () => {
         fs.writeFileSync(configPath, '{ not valid json }', 'utf-8');
         assert.throws(
             () => loadServerConfig({ env: { GEMDEX_SERVER_CONFIG: configPath }, argv: [] }),
-            (err: any) => {
+            (err: unknown) => {
                 assert.ok(err instanceof Error);
                 assert.ok(err.message.includes(configPath), `message should name the path: ${err.message}`);
                 assert.ok(err.message.toLowerCase().includes('json'), `message should mention JSON: ${err.message}`);

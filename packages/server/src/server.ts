@@ -1,4 +1,5 @@
 import * as http from 'http';
+import { createRequire } from 'node:module';
 import {
     buildCorsHeaders,
     handleMemoryApiRequest,
@@ -10,8 +11,11 @@ import {
 import type { MemoryBackend } from 'gemdex-core';
 import type { ServerConfig } from './config.js';
 
-// Tracks package.json version. Update on every package release.
-const SERVER_VERSION = '0.1.0';
+// Read the version from package.json so it never drifts from the published
+// version. createRequire works in ESM and resolves relative to this module
+// (dist/server.js → ../package.json, and src/server.ts under tsx).
+const require = createRequire(import.meta.url);
+const { version: SERVER_VERSION } = require('../package.json') as { version: string };
 
 const VERSION_INFO: ServerVersionInfo = {
     name: 'gemdex-server',
@@ -28,7 +32,6 @@ const VERSION_INFO: ServerVersionInfo = {
 };
 
 export interface CreateServerOptions {
-    config: ServerConfig;
     store?: MemoryBackend | null;
 }
 
@@ -111,7 +114,7 @@ export function createServer({ store = null }: CreateServerOptions): http.Server
  */
 export function startServer(config: ServerConfig, store?: MemoryBackend | null): Promise<http.Server> {
     return new Promise((resolve) => {
-        const server = createServer({ config, store: store ?? null });
+        const server = createServer({ store: store ?? null });
         server.listen(config.port, config.host, () => {
             const address = server.address();
             const boundPort = typeof address === 'object' && address ? address.port : config.port;

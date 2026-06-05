@@ -43,10 +43,10 @@ reachable on your network, set `GEMDEX_SERVER_HOST=0.0.0.0` or pass
 ```
 gemdex-server [options]
 
-  --host <host>     Bind address (default: 127.0.0.1).
-  --port <port>     Listening port (default: 8765).
-  --config <path>   Path to a JSON config file.
-  -h, --help        Show help message.
+  -H, --host <host>     Bind address (default: 127.0.0.1).
+  -p, --port <port>     Listening port (default: 8765).
+  -c, --config <path>   Path to a JSON config file.
+  -h, --help            Show help message.
 ```
 
 ## Config File

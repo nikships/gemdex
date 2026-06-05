@@ -10,10 +10,10 @@ Usage:
   gemdex-server [options]
 
 Options:
-  --host <host>       Bind address (default: 127.0.0.1). Use 0.0.0.0 for
+  -H, --host <host>   Bind address (default: 127.0.0.1). Use 0.0.0.0 for
                       container or network-wide exposure.
-  --port <port>       Listening port (default: 8765).
-  --config <path>     Path to a JSON config file. Env vars override file values.
+  -p, --port <port>   Listening port (default: 8765).
+  -c, --config <path> Path to a JSON config file. Env vars override file values.
   -h, --help          Show this help message.
 
 Environment variables:

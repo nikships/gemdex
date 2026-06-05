@@ -55,17 +55,19 @@ export function loadServerConfig(options: LoadServerConfigOptions = {}): ServerC
         let raw: string;
         try {
             raw = fs.readFileSync(configPath, 'utf-8');
-        } catch (err: any) {
+        } catch (err) {
+            const detail = err instanceof Error ? err.message : 'file not found';
             throw new Error(
-                `Cannot read config file '${configPath}': ${err?.message ?? 'file not found'}. ` +
+                `Cannot read config file '${configPath}': ${detail}. ` +
                 'Check that the path is correct and the file is readable.',
             );
         }
         try {
             fileConfig = JSON.parse(raw) as Record<string, unknown>;
-        } catch {
+        } catch (err) {
+            const detail = err instanceof Error ? err.message : String(err);
             throw new Error(
-                `Config file '${configPath}' contains invalid JSON. ` +
+                `Config file '${configPath}' contains invalid JSON: ${detail}. ` +
                 'Ensure the file is well-formed JSON.',
             );
         }
