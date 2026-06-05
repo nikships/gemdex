@@ -44,6 +44,15 @@ GEMDEX_SERVER_TOKEN=change-me-to-a-long-random-secret \
 | `GEMDEX_SERVER_ALLOWED_ORIGINS` | (none) | Comma-separated browser origins allowed by CORS. No wildcard default. |
 | `GEMDEX_SERVER_UNSAFE_DEV_NO_AUTH` | `false` | Set `true` only for unsafe local development without auth. |
 | `GEMDEX_SERVER_DATABASE_URL` / `DATABASE_URL` | (none) | Postgres connection string. When set, startup applies migrations and serves durable memory routes. |
+| `BLOB_STORE`           | `file`      | Attachment blob store driver: `file` or `s3`.                  |
+| `BLOB_DIR`             | `~/.gemdex/blobs` | Directory for `BLOB_STORE=file`.                         |
+| `S3_BUCKET`            | (none)      | Bucket for `BLOB_STORE=s3`. Required for S3 mode.              |
+| `S3_ENDPOINT`          | (none)      | S3-compatible endpoint for R2, MinIO, etc. Omit for AWS S3.    |
+| `S3_REGION`            | `auto`      | Region for `BLOB_STORE=s3`.                                    |
+| `S3_PREFIX`            | (none)      | Optional key prefix for Gemdex blobs.                          |
+| `S3_ACCESS_KEY_ID`     | (AWS env)   | S3 access key; falls back to `AWS_ACCESS_KEY_ID`.              |
+| `S3_SECRET_ACCESS_KEY` | (AWS env)   | S3 secret key; falls back to `AWS_SECRET_ACCESS_KEY`.          |
+| `S3_FORCE_PATH_STYLE`  | (none)      | Set `true` for path-style S3 services such as many MinIO setups. |
 
 ### Host / Port Defaults
 
@@ -77,7 +86,11 @@ You can pass a JSON config file via `--config <path>` or `GEMDEX_SERVER_CONFIG`:
   "port": 8765,
   "token": "your-bearer-token",
   "allowedOrigins": ["https://app.example.com"],
-  "databaseUrl": "postgres://user:pass@localhost:5432/gemdex"
+  "databaseUrl": "postgres://user:pass@localhost:5432/gemdex",
+  "blobStore": {
+    "kind": "file",
+    "directory": "/var/lib/gemdex/blobs"
+  }
 }
 ```
 
@@ -110,6 +123,24 @@ GEMDEX_SERVER_ALLOWED_ORIGINS=https://desktop.example.com,http://localhost:5173
 Reverse proxies may add TLS and additional authentication before forwarding to
 Gemdex. Future OIDC or identity-aware proxy deployments can be layered at the
 proxy/client boundary without changing the v1 MCP tool surface.
+
+## Blob Storage
+
+Blob storage can also be configured in the file:
+
+```json
+{
+  "blobStore": {
+    "kind": "s3",
+    "bucket": "gemdex-blobs",
+    "endpoint": "https://example.r2.cloudflarestorage.com",
+    "region": "auto",
+    "prefix": "production/blobs"
+  }
+}
+```
+
+Use `BLOB_STORE=file` with `BLOB_DIR=/path/to/blobs` for local single-node deployments. Use `BLOB_STORE=s3` with `S3_BUCKET` plus endpoint/credential variables for AWS S3, Cloudflare R2, MinIO, or other S3-compatible stores. Attachment size validation remains the same as inline base64 uploads: each attachment is capped at 20 MiB before bytes are written to any blob driver.
 
 ## Endpoints
 
@@ -184,10 +215,10 @@ The initial migration creates:
   full parent memory rather than exposing fragments.
 - `gemdex_memory_attachments` — stable per-memory attachment metadata (`id`,
   modality, MIME type, byte length, optional caption, and blob reference).
-- `gemdex_attachment_blobs` — blob-reference records. The v1 implementation uses
-  `storage_provider = 'postgres'` and stores bytes in `data` so export/import and
-  attachment reads survive process restarts; future deployments can point these
-  references at external blob storage without changing attachment metadata.
+- `gemdex_attachment_blobs` — blob-reference records. With `BLOB_STORE=file` or
+  `BLOB_STORE=s3`, bytes live in the configured blob driver and Postgres stores
+  the provider, opaque key, checksum, and byte length. The backend still reads
+  legacy inline `data` rows for compatibility.
 
 ### Running Migrations
 

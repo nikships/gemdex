@@ -3,6 +3,7 @@ import { Pool, PoolConfig, QueryResult, QueryResultRow } from 'pg';
 import {
     AttachmentBytes,
     AttachmentCaptionUpdate,
+    BlobStore,
     chunkMemory,
     DEFAULT_ATTACHMENT_LIMITS,
     deriveTitle,
@@ -34,6 +35,8 @@ export interface DatabaseClient extends Queryable {
 
 export interface PostgresMemoryBackendOptions {
     pool: DatabasePool;
+    blobStore?: BlobStore;
+    blobStorageProvider?: string;
 }
 
 interface DocumentRow extends QueryResultRow {
@@ -53,6 +56,7 @@ interface AttachmentRow extends QueryResultRow {
 }
 
 interface AttachmentExportRow extends AttachmentRow {
+    storage_key: string;
     data: Buffer | Uint8Array | string | null;
 }
 
@@ -198,9 +202,13 @@ function resolveTitle(explicit: string | undefined, content: string, attachments
 
 export class PostgresMemoryBackend implements MemoryBackend {
     private pool: DatabasePool;
+    private blobStore?: BlobStore;
+    private blobStorageProvider: string;
 
     constructor(options: PostgresMemoryBackendOptions) {
         this.pool = options.pool;
+        this.blobStore = options.blobStore;
+        this.blobStorageProvider = options.blobStorageProvider ?? 'external';
     }
 
     async close(): Promise<void> {
@@ -319,6 +327,7 @@ export class PostgresMemoryBackend implements MemoryBackend {
                 await client.query(`DELETE FROM gemdex_attachment_blobs WHERE id IN (${inPlaceholders(blobIds.length)})`, blobIds);
             }
             await client.query('COMMIT');
+            await this.blobStore?.deleteParent(id);
         } catch (error) {
             await client.query('ROLLBACK').catch(() => undefined);
             throw error;
@@ -372,7 +381,7 @@ export class PostgresMemoryBackend implements MemoryBackend {
 
     async readAttachment(memoryId: string, attachmentId: string): Promise<AttachmentBytes | null> {
         const result = await this.pool.query<AttachmentExportRow>(
-            `SELECT a.mime_type, a.byte_length, a.caption, b.data
+            `SELECT a.mime_type, a.byte_length, a.caption, b.storage_key, b.data
              FROM gemdex_memory_attachments a
              JOIN gemdex_attachment_blobs b ON b.id = a.blob_ref_id
              WHERE a.memory_id = $1 AND a.id = $2`,
@@ -384,7 +393,7 @@ export class PostgresMemoryBackend implements MemoryBackend {
             mimeType: row.mime_type,
             byteLength: Number(row.byte_length),
             ...(row.caption ? { caption: row.caption } : {}),
-            data: bytesFromDatabase(row.data),
+            data: await this.readBlob(row),
         };
     }
 
@@ -414,6 +423,17 @@ export class PostgresMemoryBackend implements MemoryBackend {
         const title = resolveTitle(explicitTitle, text, prepared);
         const chunks = text.trim().length > 0 ? chunkMemory(text) : [];
         const client = await this.pool.connect();
+        const externalRefs = new Map<string, string>();
+
+        if (this.blobStore) {
+            await this.blobStore.deleteParent(id);
+            for (const attachment of prepared) {
+                externalRefs.set(
+                    attachment.id,
+                    await this.blobStore.put(id, attachment.id, attachment.data),
+                );
+            }
+        }
 
         try {
             await client.query('BEGIN');
@@ -443,12 +463,20 @@ export class PostgresMemoryBackend implements MemoryBackend {
 
             for (const attachment of prepared) {
                 const blobId = randomUUID();
-                const storageKey = `${id}/${attachment.id}`;
+                const storageKey = externalRefs.get(attachment.id) ?? `${id}/${attachment.id}`;
                 const hash = createHash('sha256').update(attachment.data).digest('hex');
                 await client.query(
-                    `INSERT INTO gemdex_attachment_blobs (id, storage_key, sha256, byte_length, data)
-                     VALUES ($1, $2, $3, $4, $5)`,
-                    [blobId, storageKey, hash, attachment.byteLength, attachment.data],
+                    `INSERT INTO gemdex_attachment_blobs
+                        (id, storage_provider, storage_key, sha256, byte_length, data)
+                     VALUES ($1, $2, $3, $4, $5, $6)`,
+                    [
+                        blobId,
+                        this.blobStore ? this.blobStorageProvider : 'postgres',
+                        storageKey,
+                        hash,
+                        attachment.byteLength,
+                        this.blobStore ? null : attachment.data,
+                    ],
                 );
                 await client.query(
                     `INSERT INTO gemdex_memory_attachments
@@ -563,28 +591,28 @@ export class PostgresMemoryBackend implements MemoryBackend {
         const rows = await this.exportAttachmentRows(id);
         if (rows.length === 0) return {};
         return {
-            attachments: rows.map((row) => ({
+            attachments: await Promise.all(rows.map(async (row) => ({
                 id: row.id,
                 mimeType: row.mime_type,
-                data: bytesFromDatabase(row.data).toString('base64'),
+                data: (await this.readBlob(row)).toString('base64'),
                 ...(row.caption ? { caption: row.caption } : {}),
-            })),
+            }))),
         };
     }
 
     private async exportAttachmentsAsInputs(id: string): Promise<StoredAttachmentInput[]> {
         const rows = await this.exportAttachmentRows(id);
-        return rows.map((row) => ({
+        return Promise.all(rows.map(async (row) => ({
             id: row.id,
             mimeType: row.mime_type,
-            data: bytesFromDatabase(row.data).toString('base64'),
+            data: (await this.readBlob(row)).toString('base64'),
             ...(row.caption ? { caption: row.caption } : {}),
-        }));
+        })));
     }
 
     private async exportAttachmentRows(id: string): Promise<AttachmentExportRow[]> {
         const result = await this.pool.query<AttachmentExportRow>(
-            `SELECT a.id, a.kind, a.mime_type, a.byte_length, a.caption, b.data
+            `SELECT a.id, a.kind, a.mime_type, a.byte_length, a.caption, b.storage_key, b.data
              FROM gemdex_memory_attachments a
              JOIN gemdex_attachment_blobs b ON b.id = a.blob_ref_id
              WHERE a.memory_id = $1
@@ -592,5 +620,13 @@ export class PostgresMemoryBackend implements MemoryBackend {
             [id],
         );
         return result.rows;
+    }
+
+    private async readBlob(row: AttachmentExportRow): Promise<Buffer> {
+        if (row.data !== null) return bytesFromDatabase(row.data);
+        if (!this.blobStore) {
+            throw new Error(`Attachment blob ${row.storage_key} is external but no blob store is configured`);
+        }
+        return this.blobStore.get(row.storage_key);
     }
 }

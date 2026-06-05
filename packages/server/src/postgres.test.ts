@@ -1,6 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { newDb } from 'pg-mem';
+import { FileBlobStore } from 'gemdex-core';
 import { migrateDatabase, PostgresMemoryBackend, type DatabasePool } from './postgres.js';
 
 function createPool(): DatabasePool {
@@ -149,4 +153,44 @@ test('list and recall batch-load attachments and group them by their own memory'
         assert.equal(recalledById.get(b.id)?.attachments.length, 0);
         assert.equal(recalledById.get(c.id)?.attachments.length, 2);
     });
+});
+
+test('external blob store backs save, read, export, import, and delete', async () => {
+    const pool = createPool();
+    const blobDir = await fs.mkdtemp(path.join(os.tmpdir(), 'gemdex-postgres-blobs-'));
+    const blobStore = new FileBlobStore(blobDir);
+    await migrateDatabase(pool);
+    const backend = new PostgresMemoryBackend({
+        pool,
+        blobStore,
+        blobStorageProvider: 'file',
+    });
+
+    try {
+        const bytes = Buffer.from('external attachment bytes');
+        const memory = await backend.save({
+            content: 'external blob memory',
+            attachments: [{ mimeType: 'image/png', data: bytes.toString('base64') }],
+        });
+
+        const blobRow = await pool.query<{ storage_provider: string; storage_key: string; data: Buffer | null }>(
+            'SELECT storage_provider, storage_key, data FROM gemdex_attachment_blobs',
+        );
+        assert.equal(blobRow.rows[0].storage_provider, 'file');
+        assert.equal(blobRow.rows[0].data, null);
+        assert.equal(await blobStore.has(blobRow.rows[0].storage_key), true);
+        assert.equal((await backend.readAttachment(memory.id, '0'))?.data.toString(), bytes.toString());
+
+        const exported = await backend.exportAll();
+        assert.equal(exported[0].attachments?.[0].data, bytes.toString('base64'));
+
+        await backend.delete(memory.id);
+        assert.equal(await blobStore.has(blobRow.rows[0].storage_key), false);
+
+        assert.deepEqual(await backend.importRecords(exported), { imported: 1 });
+        assert.equal((await backend.readAttachment(memory.id, '0'))?.data.toString(), bytes.toString());
+    } finally {
+        await backend.close();
+        await fs.rm(blobDir, { recursive: true, force: true });
+    }
 });
