@@ -329,7 +329,41 @@ body {
 
 .actions {
   display: flex;
+  align-items: center;
   gap: 8px;
+}
+
+.backend-badge {
+  max-width: 220px;
+  overflow: hidden;
+  padding: 6px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--paper-2);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backend-badge.local {
+  border-color: rgba(138, 154, 123, 0.55);
+  background: rgba(138, 154, 123, 0.14);
+  color: var(--sage-deep);
+}
+
+.backend-badge.remote {
+  border-color: rgba(192, 101, 58, 0.45);
+  background: rgba(226, 168, 60, 0.18);
+  color: var(--rust);
+}
+
+.backend-badge.warning {
+  border-color: rgba(181, 70, 47, 0.45);
+  background: #f6e6e0;
+  color: var(--danger);
 }
 
 button {

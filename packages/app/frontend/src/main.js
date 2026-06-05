@@ -32,6 +32,7 @@ const els = {
   setupSettingsBtn: document.querySelector("#setup-settings-btn"),
   setupError: document.querySelector("#setup-error"),
   status: document.querySelector("#status"),
+  backendBadge: document.querySelector("#backend-badge"),
   list: document.querySelector("#memory-list"),
   empty: document.querySelector("#empty"),
   filter: document.querySelector("#filter"),
@@ -784,6 +785,7 @@ function setStatus(text, isError = false) {
 
 function updateConfigState(config) {
   configState = config ?? null;
+  renderBackendBadge();
   return configState;
 }
 
@@ -803,6 +805,31 @@ function activeBackend() {
 
 function activeRemoteName() {
   return activeBackend()?.activeRemote?.name ?? "";
+}
+
+function renderBackendBadge() {
+  const backend = activeBackend();
+  if (!backend) {
+    els.backendBadge.textContent = "Backend: loading…";
+    els.backendBadge.title = "Loading active backend";
+    els.backendBadge.classList.remove("local", "remote", "warning");
+    return;
+  }
+  els.backendBadge.classList.toggle("local", backend.mode === "local");
+  els.backendBadge.classList.toggle("remote", backend.mode === "remote");
+  els.backendBadge.classList.toggle("warning", !backend.configured);
+  if (backend.mode === "remote") {
+    const remoteName = activeRemoteName() || "remote";
+    els.backendBadge.textContent = `Remote: ${remoteName}`;
+    els.backendBadge.title = backend.activeRemote?.url
+      ? `Active remote backend: ${remoteName} (${backend.activeRemote.url})`
+      : `Active remote backend: ${remoteName}`;
+    return;
+  }
+  els.backendBadge.textContent = backend.needsKey ? "Local: needs API key" : "Local backend";
+  els.backendBadge.title = backend.needsKey
+    ? "Local backend selected; API key required"
+    : "Active local backend on this Mac";
 }
 
 function selectedRemoteName() {
@@ -889,6 +916,7 @@ async function applyMode(mode, name) {
       method: "POST",
       body: JSON.stringify({ mode, ...(name && { name }) }),
     });
+    await refreshConfigState();
     renderSettings();
     if (!(await syncConfigGate())) setStatus("API key required");
   } catch (err) {
@@ -984,6 +1012,7 @@ async function removeSelectedRemote() {
     settingsState = await api(`/settings/remotes/${encodeURIComponent(name)}`, {
       method: "DELETE",
     });
+    await refreshConfigState();
     renderSettings();
     await syncConfigGate();
   } catch (err) {
@@ -1097,6 +1126,7 @@ async function loadMemories() {
 async function init() {
   wireEvents();
   els.setupForm.addEventListener("submit", submitApiKey);
+  renderBackendBadge();
   apiBase = await resolveApiBase();
   setStatus("waiting for memory store…");
   const healthy = await waitForHealth();
