@@ -1,16 +1,16 @@
 # BYOI Remote Mode Architecture and API Contract
 
-Status: design contract for GEM-5
+Status: implemented v1 contract
 
-Gemdex is local-first today: the MCP server and desktop sidecar use Gemini
+Gemdex is local-first: the MCP server and desktop sidecar can use Gemini
 embeddings and an embedded LanceDB store on the user's machine. BYOI remote mode
 adds a user-owned Gemdex Server so multiple clients can connect to one durable
-memory backend without giving every client machine a Gemini API key.
+memory backend without giving every client machine a Gemini API key. For
+deployment and operations, see [`BYOI_OPERATIONS.md`](BYOI_OPERATIONS.md).
 
-This document defines the intended remote architecture and v1 HTTP API before
-implementation. It preserves the existing memory model: one global memory pool,
-explicit save/recall/update, parent-document chunking, and relevance-only
-ranking.
+This document defines the implemented remote architecture and v1 HTTP API. It
+preserves the existing memory model: one global memory pool, explicit
+save/recall/update, parent-document chunking, and relevance-only ranking.
 
 ## Goals
 
