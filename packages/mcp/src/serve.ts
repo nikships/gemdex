@@ -1,8 +1,8 @@
 import * as http from "http";
 import * as crypto from "crypto";
-import { MemoryStore, envManager } from "gemdex-core";
+import { MemoryBackend, envManager } from "gemdex-core";
 import { createConfig, GemdexConfig } from "./config.js";
-import { createMemoryStore } from "./memory.js";
+import { createMemoryBackend } from "./memory.js";
 
 /**
  * Mutable server context. The sidecar boots even when no GEMINI_API_KEY is
@@ -12,7 +12,7 @@ import { createMemoryStore } from "./memory.js";
  */
 interface ServeContext {
     config: GemdexConfig;
-    store: MemoryStore | null;
+    store: MemoryBackend | null;
     /**
      * When set, the server enforces two security controls:
      *  1. `Origin` header on every non-OPTIONS request must match this value
@@ -31,9 +31,9 @@ interface ServeContext {
     token?: string;
 }
 
-function buildStore(config: GemdexConfig): MemoryStore | null {
+function buildStore(config: GemdexConfig): MemoryBackend | null {
     if (!config.geminiApiKey) return null;
-    return createMemoryStore(config);
+    return createMemoryBackend(config);
 }
 
 /** Persist the key to ~/.gemdex/.env, expose it to this process, and (re)build the store. */
@@ -46,7 +46,7 @@ function configureApiKey(ctx: ServeContext, apiKey: string): void {
 
 /**
  * `gemdex serve` — the localhost HTTP/JSON sidecar that backs the desktop
- * manager app. It wraps the same gemdex-core MemoryStore + LanceDB store the
+ * manager app. It wraps the same gemdex-core MemoryBackend + LanceDB store the
  * MCP server uses, binds 127.0.0.1 only, and exposes the management surface
  * (no semantic search — that is MCP-only).
  *

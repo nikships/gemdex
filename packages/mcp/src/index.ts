@@ -18,10 +18,10 @@ import {
     ListToolsRequestSchema,
     CallToolRequestSchema
 } from "@modelcontextprotocol/sdk/types.js";
-import { MemoryStore } from "gemdex-core";
+import { MemoryBackend } from "gemdex-core";
 
 import { createConfig, logConfigurationSummary, showHelpMessage, GemdexConfig } from "./config.js";
-import { createMemoryStore } from "./memory.js";
+import { createMemoryBackend } from "./memory.js";
 import { MemoryToolHandlers } from "./handlers.js";
 import { runServe } from "./serve.js";
 
@@ -120,7 +120,7 @@ class GemdexMemoryServer {
             { capabilities: { tools: {} } },
         );
 
-        const store: MemoryStore = createMemoryStore(config);
+        const store: MemoryBackend = createMemoryBackend(config);
         this.handlers = new MemoryToolHandlers(store);
 
         this.setupTools();

@@ -1,14 +1,14 @@
-import { LanceDBVectorDatabase, MemoryStore } from "gemdex-core";
+import { LanceDBVectorDatabase, LocalMemoryBackend, MemoryBackend } from "gemdex-core";
 import { GemdexConfig } from "./config.js";
 import { createEmbeddingInstance, logEmbeddingProviderInfo } from "./embedding.js";
 
 /**
- * Build a MemoryStore backed by the shared embedded LanceDB store
+ * Build a MemoryBackend backed by the shared embedded LanceDB store
  * (~/.gemdex/lance by default). Both the MCP server and the `gemdex serve`
  * sidecar use this so a memory saved by the agent shows up in the app and
  * vice-versa.
  */
-export function createMemoryStore(config: GemdexConfig): MemoryStore {
+export function createMemoryBackend(config: GemdexConfig): MemoryBackend {
     const embedding = createEmbeddingInstance(config);
     logEmbeddingProviderInfo(config, embedding);
 
@@ -16,5 +16,5 @@ export function createMemoryStore(config: GemdexConfig): MemoryStore {
         ...(config.lancedbPath && { uri: config.lancedbPath }),
     });
 
-    return new MemoryStore({ embedding, vectorDatabase });
+    return new LocalMemoryBackend({ embedding, vectorDatabase });
 }

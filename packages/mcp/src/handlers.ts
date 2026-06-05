@@ -1,4 +1,4 @@
-import { MemoryStore } from "gemdex-core";
+import { MemoryBackend } from "gemdex-core";
 import { resolveAttachmentInputs } from "./attachment-path.js";
 
 type ToolResult = { content: Array<{ type: "text"; text: string }>; isError?: boolean };
@@ -37,9 +37,9 @@ function formatMemoryResult(verb: string, memory: { id: string; title: string; a
 }
 
 export class MemoryToolHandlers {
-    private store: MemoryStore;
+    private store: MemoryBackend;
 
-    constructor(store: MemoryStore) {
+    constructor(store: MemoryBackend) {
         this.store = store;
     }
 

@@ -106,6 +106,14 @@ export interface MemoryExportAttachment {
     caption?: string;
 }
 
+/** Raw attachment bytes plus their content type, for rendering/streaming. */
+export interface AttachmentBytes {
+    mimeType: string;
+    byteLength: number;
+    caption?: string;
+    data: Buffer;
+}
+
 /** Record shape used for export/import (§7.5). */
 export interface MemoryExportRecord {
     id: string;

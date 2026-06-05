@@ -28,7 +28,9 @@ import {
     UpdateMemoryInput,
     MemoryExportRecord,
     MemoryExportAttachment,
+    AttachmentBytes,
 } from './types';
+export type { AttachmentBytes } from './types';
 
 const DEFAULT_COLLECTION = 'memories';
 const DEFAULT_PREVIEW_LENGTH = 200;
@@ -74,14 +76,6 @@ interface ParentMeta {
     createdAt: number;
     updatedAt: number;
     attachments: StoredAttachment[];
-}
-
-/** Raw attachment bytes plus their content type, for rendering/streaming. */
-export interface AttachmentBytes {
-    mimeType: string;
-    byteLength: number;
-    caption?: string;
-    data: Buffer;
 }
 
 export interface MemoryStoreConfig {
