@@ -1,0 +1,151 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import * as fs from 'node:fs/promises';
+import * as http from 'node:http';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import type { AddressInfo } from 'node:net';
+import type { Memory } from 'gemdex-core';
+import { createConfig } from './config.js';
+import { MemoryToolHandlers } from './handlers.js';
+import { createMemoryBackend } from './memory.js';
+import { MCP_TOOL_NAMES } from './tool-names.js';
+
+interface RecordedRequest {
+    method: string;
+    path: string;
+    body: any;
+    authorization?: string;
+}
+
+async function readJson(req: http.IncomingMessage): Promise<any> {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+}
+
+async function startFakeRemote(): Promise<{
+    url: string;
+    requests: RecordedRequest[];
+    close: () => Promise<void>;
+}> {
+    const requests: RecordedRequest[] = [];
+    let memory: Memory | null = null;
+    const server = http.createServer(async (req, res) => {
+        const body = ['POST', 'PUT', 'PATCH'].includes(req.method ?? '')
+            ? await readJson(req)
+            : {};
+        requests.push({
+            method: req.method ?? 'GET',
+            path: req.url ?? '/',
+            body,
+            authorization: req.headers.authorization,
+        });
+        if (req.headers.authorization !== 'Bearer remote-token') {
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Unauthorized' }));
+            return;
+        }
+        if (req.method === 'POST' && req.url === '/v1/memories') {
+            memory = {
+                id: 'remote-1',
+                title: body.title ?? 'Remote memory',
+                content: body.content ?? '',
+                attachments: (body.attachments ?? []).map((attachment: any, index: number) => ({
+                    id: String(index),
+                    kind: 'image',
+                    mimeType: attachment.mimeType,
+                    byteLength: Buffer.from(attachment.data, 'base64').length,
+                    caption: attachment.caption,
+                })),
+                createdAt: 1,
+                updatedAt: 1,
+            };
+            res.writeHead(201, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ memory }));
+            return;
+        }
+        if (req.method === 'POST' && req.url === '/v1/recall') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ results: memory ? [{ ...memory, score: 1 }] : [] }));
+            return;
+        }
+        if (req.method === 'PUT' && req.url === '/v1/memories/remote-1' && memory) {
+            memory = {
+                ...memory,
+                ...(body.content !== undefined && { content: body.content }),
+                ...(body.title !== undefined && { title: body.title }),
+                updatedAt: 2,
+            };
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ memory }));
+            return;
+        }
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Not found' }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address() as AddressInfo;
+    return {
+        url: `http://127.0.0.1:${address.port}`,
+        requests,
+        close: async () => {
+            server.closeAllConnections();
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+        },
+    };
+}
+
+test('MCP public tool surface remains exactly save_memory, recall, update_memory', () => {
+    assert.deepEqual([...MCP_TOOL_NAMES], ['save_memory', 'recall', 'update_memory']);
+});
+
+test('remote-mode MCP handlers save, media-recall, and update through HTTP', async () => {
+    const remote = await startFakeRemote();
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'gemdex-mcp-remote-'));
+    const imagePath = path.join(tmpDir, 'example.png');
+    const imageBytes = Buffer.from('path attachment bytes');
+    await fs.writeFile(imagePath, imageBytes);
+    const config = createConfig((name) => ({
+        GEMDEX_MODE: 'remote',
+        GEMDEX_REMOTE_URL: remote.url,
+        GEMDEX_REMOTE_TOKEN: 'remote-token',
+    })[name]);
+    const handlers = new MemoryToolHandlers(createMemoryBackend(config));
+
+    try {
+        const saved = await handlers.handleSaveMemory({
+            content: 'full remote parent',
+            attachments: [{ path: imagePath, caption: 'path input' }],
+        });
+        assert.equal(saved.isError, undefined);
+        assert.match(saved.content[0].text, /id: remote-1/);
+        assert.equal(remote.requests[0].authorization, 'Bearer remote-token');
+        assert.equal(remote.requests[0].body.attachments[0].path, undefined);
+        assert.equal(
+            Buffer.from(remote.requests[0].body.attachments[0].data, 'base64').toString(),
+            imageBytes.toString(),
+        );
+
+        const recalled = await handlers.handleRecall({
+            attachments: [{ path: imagePath }],
+        });
+        assert.equal(recalled.isError, undefined);
+        assert.match(recalled.content[0].text, /full remote parent/);
+        assert.equal(remote.requests[1].body.query, '');
+        assert.equal(remote.requests[1].body.attachments.length, 1);
+
+        const updated = await handlers.handleUpdateMemory({
+            id: 'remote-1',
+            content: 'updated remote parent',
+            attachments: [{ path: imagePath }],
+        });
+        assert.equal(updated.isError, undefined);
+        assert.match(updated.content[0].text, /Updated memory/);
+        assert.equal(remote.requests[2].body.content, 'updated remote parent');
+        assert.equal(remote.requests[2].body.attachments[0].path, undefined);
+    } finally {
+        await remote.close();
+        await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+});

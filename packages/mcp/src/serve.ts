@@ -33,7 +33,7 @@ interface ServeContext {
 }
 
 function buildStore(config: GemdexConfig): MemoryBackend | null {
-    if (!config.geminiApiKey) return null;
+    if (config.mode === 'local' && !config.geminiApiKey) return null;
     return createMemoryBackend(config);
 }
 
