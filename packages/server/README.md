@@ -190,7 +190,7 @@ the durable Postgres backend.
 | `POST`   | `/v1/memories`                         | Create a memory               |
 | `GET`    | `/v1/memories`                         | List memory summaries         |
 | `GET`    | `/v1/memories/:id`                     | Get one memory                |
-| `PUT`    | `/v1/memories/:id`                     | Update a memory               |
+| `PUT` / `PATCH` | `/v1/memories/:id`              | Update a memory               |
 | `DELETE` | `/v1/memories/:id`                     | Delete a memory               |
 | `POST`   | `/v1/recall`                           | Recall by text or media       |
 | `GET`    | `/v1/memories/:id/attachments/:attId`  | Fetch raw attachment bytes    |

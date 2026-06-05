@@ -4,6 +4,8 @@ import type { AddressInfo } from 'node:net';
 import type { MemoryBackend } from 'gemdex-core';
 import type {
     Memory,
+    MemoryAttachment,
+    MemoryAttachmentInput,
     MemorySummary,
     MemoryRecallResult,
     MemoryExportRecord,
@@ -12,7 +14,13 @@ import type {
     UpdateMemoryInput,
     AttachmentCaptionUpdate,
 } from 'gemdex-core';
-import { SUPPORTED_API_VERSION, SUPPORTED_PROTOCOL_VERSION } from 'gemdex-core';
+import {
+    DEFAULT_ATTACHMENT_LIMITS,
+    SUPPORTED_API_VERSION,
+    SUPPORTED_PROTOCOL_VERSION,
+    mimeToKind,
+    validateAttachments,
+} from 'gemdex-core';
 import type { ServerVersionInfo } from 'gemdex-core';
 import { createServer } from './server.js';
 
@@ -22,16 +30,19 @@ import { createServer } from './server.js';
  */
 class FakeMemoryBackend implements MemoryBackend {
     private memories: Map<string, Memory> = new Map();
+    private attachmentBytes: Map<string, Buffer> = new Map();
     private counter = 0;
+    lastRecall: { query?: string; limit?: number; attachments?: MemoryAttachmentInput[] } | null = null;
 
     async save(input: SaveMemoryInput): Promise<Memory> {
         const id = `mem_${++this.counter}`;
         const now = Date.now();
+        const attachments = await this.prepareAttachments(id, input.attachments);
         const memory: Memory = {
             id,
             title: input.title ?? '',
             content: input.content ?? '',
-            attachments: [],
+            attachments,
             createdAt: now,
             updatedAt: now,
         };
@@ -39,7 +50,13 @@ class FakeMemoryBackend implements MemoryBackend {
         return memory;
     }
 
-    async recall(_query?: string, limit?: number): Promise<MemoryRecallResult[]> {
+    async recall(
+        query?: string,
+        limit?: number,
+        queryAttachments?: MemoryAttachmentInput[],
+    ): Promise<MemoryRecallResult[]> {
+        if (queryAttachments) await validateAttachments(queryAttachments);
+        this.lastRecall = { query, limit, attachments: queryAttachments };
         const items = [...this.memories.values()].slice(0, limit ?? 10);
         return items.map((m) => ({ ...m, score: 1.0 }));
     }
@@ -47,10 +64,14 @@ class FakeMemoryBackend implements MemoryBackend {
     async update(id: string, input: UpdateMemoryInput): Promise<Memory> {
         const existing = this.memories.get(id);
         if (!existing) throw new Error(`Memory ${id} not found`);
+        const attachments = input.attachments === undefined
+            ? existing.attachments
+            : await this.prepareAttachments(id, input.attachments);
         const updated: Memory = {
             ...existing,
             ...(input.content !== undefined && { content: input.content }),
             ...(input.title !== undefined && { title: input.title }),
+            attachments,
             updatedAt: Date.now(),
         };
         this.memories.set(id, updated);
@@ -80,6 +101,9 @@ class FakeMemoryBackend implements MemoryBackend {
 
     async delete(id: string): Promise<void> {
         this.memories.delete(id);
+        for (const key of this.attachmentBytes.keys()) {
+            if (key.startsWith(`${id}:`)) this.attachmentBytes.delete(key);
+        }
     }
 
     async exportAll(): Promise<MemoryExportRecord[]> {
@@ -94,11 +118,50 @@ class FakeMemoryBackend implements MemoryBackend {
     }
 
     async importRecords(records: MemoryExportRecord[]): Promise<{ imported: number }> {
+        for (const record of records) {
+            const attachments = await this.prepareAttachments(record.id, record.attachments);
+            this.memories.set(record.id, {
+                id: record.id,
+                title: record.title,
+                content: record.content,
+                attachments,
+                createdAt: record.createdAt,
+                updatedAt: record.updatedAt,
+            });
+        }
         return { imported: records.length };
     }
 
-    async readAttachment(_memoryId: string, _attachmentId: string): Promise<AttachmentBytes | null> {
-        return null;
+    async readAttachment(memoryId: string, attachmentId: string): Promise<AttachmentBytes | null> {
+        const memory = this.memories.get(memoryId);
+        const attachment = memory?.attachments.find((item) => item.id === attachmentId);
+        const data = this.attachmentBytes.get(`${memoryId}:${attachmentId}`);
+        if (!attachment || !data) return null;
+        return {
+            mimeType: attachment.mimeType,
+            byteLength: data.length,
+            caption: attachment.caption,
+            data,
+        };
+    }
+
+    private async prepareAttachments(
+        memoryId: string,
+        attachments: MemoryAttachmentInput[] | undefined,
+    ): Promise<MemoryAttachment[]> {
+        if (!attachments) return [];
+        const validated = await validateAttachments(attachments);
+        return validated.map((attachment, index) => {
+            const id = String(index);
+            this.attachmentBytes.set(`${memoryId}:${id}`, attachment.bytes);
+            return {
+                id,
+                kind: mimeToKind(attachment.mimeType)!,
+                mimeType: attachment.mimeType,
+                byteLength: attachment.byteLength,
+                ...(attachment.caption && { caption: attachment.caption }),
+            };
+        });
     }
 }
 
@@ -182,6 +245,137 @@ test('POST /v1/memories with fake store creates a memory and lists it', async ()
         const { memories } = await listRes.json() as { memories: Array<{ id: string }> };
         assert.equal(memories.length, 1);
         assert.equal(memories[0].id, memory.id);
+    });
+});
+
+test('v1 memory API covers create/get/patch/put/recall/export/delete/import', async () => {
+    const store = new FakeMemoryBackend();
+    const auth = { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' };
+    const imageData = Buffer.from('valid image-like bytes').toString('base64');
+    await withServer(store, async (base) => {
+        const createdResponse = await fetch(`${base}/v1/memories`, {
+            method: 'POST',
+            headers: auth,
+            body: JSON.stringify({
+                title: 'Remote memory',
+                content: 'full parent content',
+                attachments: [{ mimeType: 'image/png', data: imageData, caption: 'diagram' }],
+            }),
+        });
+        assert.equal(createdResponse.status, 201);
+        const created = (await createdResponse.json() as { memory: Memory }).memory;
+        assert.equal(created.attachments.length, 1);
+
+        const getResponse = await fetch(`${base}/v1/memories/${created.id}`, { headers: auth });
+        assert.equal(getResponse.status, 200);
+        assert.equal((await getResponse.json() as { memory: Memory }).memory.content, 'full parent content');
+
+        const attachmentResponse = await fetch(
+            `${base}/v1/memories/${created.id}/attachments/0`,
+            { headers: auth },
+        );
+        assert.equal(attachmentResponse.status, 200);
+        assert.equal(Buffer.from(await attachmentResponse.arrayBuffer()).toString(), 'valid image-like bytes');
+
+        const patchResponse = await fetch(`${base}/v1/memories/${created.id}`, {
+            method: 'PATCH',
+            headers: auth,
+            body: JSON.stringify({ title: 'Patched title' }),
+        });
+        assert.equal(patchResponse.status, 200);
+        assert.equal((await patchResponse.json() as { memory: Memory }).memory.title, 'Patched title');
+
+        const putResponse = await fetch(`${base}/v1/memories/${created.id}`, {
+            method: 'PUT',
+            headers: auth,
+            body: JSON.stringify({ content: 'updated full parent content' }),
+        });
+        assert.equal(putResponse.status, 200);
+
+        const recallResponse = await fetch(`${base}/v1/recall`, {
+            method: 'POST',
+            headers: auth,
+            body: JSON.stringify({
+                query: 'updated',
+                limit: 5,
+                attachments: [{ mimeType: 'image/png', data: imageData }],
+            }),
+        });
+        assert.equal(recallResponse.status, 200);
+        const recalled = (await recallResponse.json() as { results: MemoryRecallResult[] }).results;
+        assert.equal(recalled[0].content, 'updated full parent content');
+        assert.equal(store.lastRecall?.limit, 5);
+        assert.equal(store.lastRecall?.attachments?.length, 1);
+
+        const exportResponse = await fetch(`${base}/v1/export`, { headers: auth });
+        assert.equal(exportResponse.status, 200);
+        const records = (await exportResponse.json() as { records: MemoryExportRecord[] }).records;
+        assert.equal(records.length, 1);
+
+        const deleteResponse = await fetch(`${base}/v1/memories/${created.id}`, {
+            method: 'DELETE',
+            headers: auth,
+        });
+        assert.equal(deleteResponse.status, 200);
+        assert.equal((await fetch(`${base}/v1/memories/${created.id}`, { headers: auth })).status, 404);
+        assert.equal((await fetch(`${base}/v1/memories/${created.id}`, {
+            method: 'DELETE',
+            headers: auth,
+        })).status, 404);
+
+        const importResponse = await fetch(`${base}/v1/import`, {
+            method: 'POST',
+            headers: auth,
+            body: JSON.stringify({ records }),
+        });
+        assert.equal(importResponse.status, 200);
+        assert.deepEqual(await importResponse.json(), { imported: 1 });
+        assert.equal((await fetch(`${base}/v1/memories/${created.id}`, { headers: auth })).status, 200);
+    });
+});
+
+test('v1 memory API rejects invalid request fields with actionable 400 responses', async () => {
+    const store = new FakeMemoryBackend();
+    const headers = { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' };
+    const cases = [
+        { path: '/v1/memories', method: 'POST', body: [] },
+        { path: '/v1/memories', method: 'POST', body: { content: 42 } },
+        { path: '/v1/memories', method: 'POST', body: { attachments: {} } },
+        { path: '/v1/recall', method: 'POST', body: {} },
+        { path: '/v1/recall', method: 'POST', body: { query: 42 } },
+        { path: '/v1/recall', method: 'POST', body: { query: 'x', limit: 51 } },
+        { path: '/v1/memories/missing', method: 'PATCH', body: {} },
+        { path: '/v1/memories/missing', method: 'PATCH', body: { title: 42 } },
+        { path: '/v1/import', method: 'POST', body: { records: [{}] } },
+    ];
+
+    await withServer(store, async (base) => {
+        for (const item of cases) {
+            const response = await fetch(`${base}${item.path}`, {
+                method: item.method,
+                headers,
+                body: JSON.stringify(item.body),
+            });
+            assert.equal(response.status, 400, `${item.method} ${item.path}`);
+            const result = await response.json() as { error: string };
+            assert.ok(result.error.length > 0);
+        }
+    });
+});
+
+test('v1 memory API enforces the 20 MiB decoded attachment limit', async () => {
+    const store = new FakeMemoryBackend();
+    const oversizedBase64 = 'A'.repeat(Math.ceil(DEFAULT_ATTACHMENT_LIMITS.maxBytesPerAttachment * 1.37) + 257);
+    await withServer(store, async (base) => {
+        const response = await fetch(`${base}/v1/memories`, {
+            method: 'POST',
+            headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                attachments: [{ mimeType: 'image/png', data: oversizedBase64 }],
+            }),
+        });
+        assert.equal(response.status, 400);
+        assert.match((await response.json() as { error: string }).error, /per-attachment limit/);
     });
 });
 
