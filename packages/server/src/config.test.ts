@@ -214,3 +214,83 @@ test('database URL resolves from env, CLI, and config file with env precedence',
         fs.rmSync(tmpDir, { recursive: true, force: true });
     }
 });
+
+test('blob store defaults to file with optional BLOB_DIR', () => {
+    const cfg = loadServerConfig({
+        env: {
+            GEMDEX_SERVER_UNSAFE_DEV_NO_AUTH: 'true',
+            BLOB_STORE: 'file',
+            BLOB_DIR: '/var/lib/gemdex/blobs',
+        },
+        argv: [],
+    });
+    assert.deepEqual(cfg.blobStore, { kind: 'file', directory: '/var/lib/gemdex/blobs' });
+});
+
+test('BLOB_STORE=s3 resolves S3-compatible env vars', () => {
+    const cfg = loadServerConfig({
+        env: {
+            GEMDEX_SERVER_UNSAFE_DEV_NO_AUTH: 'true',
+            BLOB_STORE: 's3',
+            S3_BUCKET: 'gemdex-blobs',
+            S3_ENDPOINT: 'https://example.r2.cloudflarestorage.com',
+            S3_REGION: 'auto',
+            S3_PREFIX: 'tenant-a/blobs',
+            S3_ACCESS_KEY_ID: 'key',
+            S3_SECRET_ACCESS_KEY: 'secret',
+            S3_FORCE_PATH_STYLE: 'true',
+        },
+        argv: [],
+    });
+    assert.deepEqual(cfg.blobStore, {
+        kind: 's3',
+        bucket: 'gemdex-blobs',
+        endpoint: 'https://example.r2.cloudflarestorage.com',
+        region: 'auto',
+        prefix: 'tenant-a/blobs',
+        accessKeyId: 'key',
+        secretAccessKey: 'secret',
+        forcePathStyle: true,
+    });
+});
+
+test('BLOB_STORE=s3 requires a bucket', () => {
+    assert.throws(
+        () => loadServerConfig({
+            env: { GEMDEX_SERVER_UNSAFE_DEV_NO_AUTH: 'true', BLOB_STORE: 's3' },
+            argv: [],
+        }),
+        /S3_BUCKET/,
+    );
+});
+
+test('config file can provide blobStore settings', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gemdex-server-config-test-'));
+    const configPath = path.join(tmpDir, 'config.json');
+    try {
+        fs.writeFileSync(configPath, JSON.stringify({
+            blobStore: {
+                kind: 's3',
+                bucket: 'from-file',
+                endpoint: 'http://localhost:9000',
+                forcePathStyle: true,
+            },
+        }), 'utf-8');
+        const cfg = loadServerConfig({
+            env: {
+                GEMDEX_SERVER_CONFIG: configPath,
+                GEMDEX_SERVER_UNSAFE_DEV_NO_AUTH: 'true',
+            },
+            argv: [],
+        });
+        assert.deepEqual(cfg.blobStore, {
+            kind: 's3',
+            bucket: 'from-file',
+            endpoint: 'http://localhost:9000',
+            region: 'auto',
+            forcePathStyle: true,
+        });
+    } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+});

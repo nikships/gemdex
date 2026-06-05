@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createBlobStore } from './blob-store.js';
 import { loadServerConfig, type ServerConfig } from './config.js';
 import { createPostgresPool, migrateDatabase } from './postgres.js';
 import { startServer } from './server.js';
@@ -35,6 +36,14 @@ Environment variables:
   GEMDEX_SERVER_DATABASE_URL / DATABASE_URL
                         Postgres connection string. Startup runs migrations
                         before serving and exits on migration failure.
+  BLOB_STORE            Attachment store: file or s3 (default: file).
+  BLOB_DIR              Directory for BLOB_STORE=file.
+  S3_BUCKET             Bucket for BLOB_STORE=s3.
+  S3_ENDPOINT           S3-compatible endpoint (R2, MinIO, etc.).
+  S3_REGION             S3 region (default: auto for S3-compatible stores).
+  S3_ACCESS_KEY_ID      Access key (falls back to AWS_ACCESS_KEY_ID).
+  S3_SECRET_ACCESS_KEY  Secret key (falls back to AWS_SECRET_ACCESS_KEY).
+  S3_FORCE_PATH_STYLE   Use path-style addressing for MinIO/local S3.
 
 Endpoints:
   GET  /v1/health    Readiness probe — no auth required.
@@ -66,6 +75,8 @@ if (args.includes('--help') || args.includes('-h')) {
 let config: ServerConfig;
 try {
     config = loadServerConfig({ argv: optionArgs });
+    // Validate blob-store configuration before opening the database or socket.
+    createBlobStore(config.blobStore);
 } catch (err: any) {
     process.stderr.write(`[gemdex-server] Configuration error: ${err?.message ?? String(err)}\n`);
     process.exit(1);

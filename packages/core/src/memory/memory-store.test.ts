@@ -5,7 +5,7 @@ import { LanceDBVectorDatabase } from '../vectordb';
 import { Embedding, EmbeddingVector } from '../embedding';
 import type { EmbeddingContent } from '../embedding';
 import { MemoryStore } from './memory-store';
-import { FileBlobStore } from './blob-store';
+import { FileBlobStore, S3BlobStore } from './blob-store';
 
 const DIM = 16;
 
@@ -231,6 +231,40 @@ class CountingMultimodalEmbedding extends FakeMultimodalEmbedding {
     }
 }
 
+
+
+class FakeS3Client {
+    readonly objects = new Map<string, Buffer>();
+
+    async send(command: { constructor: { name: string }; input?: Record<string, any> }): Promise<Record<string, any>> {
+        const input = command.input ?? {};
+        const key = input.Key as string | undefined;
+        if (command.constructor.name === 'PutObjectCommand') {
+            this.objects.set(key!, Buffer.from(input.Body as Buffer));
+            return {};
+        }
+        if (command.constructor.name === 'GetObjectCommand') {
+            const object = this.objects.get(key!);
+            if (!object) throw Object.assign(new Error('not found'), { name: 'NotFound', $metadata: { httpStatusCode: 404 } });
+            return { Body: object };
+        }
+        if (command.constructor.name === 'HeadObjectCommand') {
+            if (!this.objects.has(key!)) throw Object.assign(new Error('not found'), { name: 'NotFound', $metadata: { httpStatusCode: 404 } });
+            return {};
+        }
+        if (command.constructor.name === 'ListObjectsV2Command') {
+            const prefix = input.Prefix as string;
+            const keys = Array.from(this.objects.keys()).filter((candidate) => candidate.startsWith(prefix));
+            return { Contents: keys.map((candidate) => ({ Key: candidate })), IsTruncated: false };
+        }
+        if (command.constructor.name === 'DeleteObjectCommand') {
+            this.objects.delete(key!);
+            return {};
+        }
+        throw new Error(`Unhandled command ${command.constructor.name}`);
+    }
+}
+
 /** A multimodal embedding whose calls always fail — used to simulate a network error mid-write. */
 class ThrowingEmbedding extends Embedding {
     protected maxTokens = 8192;
@@ -352,6 +386,37 @@ describe('MemoryStore (attachments)', () => {
         expect(restored!.attachments[0].caption).toBe('spec');
         const blob = await store.readAttachment(mem.id, restored!.attachments[0].id);
         expect(blob!.data.toString()).toBe('PDFISH');
+    });
+
+
+
+    it('round-trips attachment import/export through an S3-compatible blob store', async () => {
+        const s3Client = new FakeS3Client();
+        const s3DbDir = await fs.mkdtemp(path.join(os.tmpdir(), 'gemdex-s3-db-'));
+        try {
+            const s3Store = new MemoryStore({
+                embedding: new FakeMultimodalEmbedding(),
+                vectorDatabase: new LanceDBVectorDatabase({ uri: s3DbDir }),
+                blobStore: new S3BlobStore({ bucket: 'gemdex-test', prefix: 'blobs', client: s3Client }),
+            });
+            const mem = await s3Store.save({
+                content: 's3 spec doc',
+                attachments: [{ ...png('S3PDFISH'), caption: 's3 spec' }],
+            });
+            expect(s3Client.objects.has(`blobs/${mem.id}/0`)).toBe(true);
+
+            const records = await s3Store.exportAll();
+            await s3Store.delete(mem.id);
+            expect(s3Client.objects.has(`blobs/${mem.id}/0`)).toBe(false);
+
+            await s3Store.importRecords(records);
+            const restored = await s3Store.get(mem.id);
+            expect(restored!.attachments).toHaveLength(1);
+            const blob = await s3Store.readAttachment(mem.id, restored!.attachments[0].id);
+            expect(blob!.data.toString()).toBe('S3PDFISH');
+        } finally {
+            await fs.rm(s3DbDir, { recursive: true, force: true });
+        }
     });
 
     it('recall returns attachment metadata on a matching memory', async () => {
