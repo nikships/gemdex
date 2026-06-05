@@ -58,18 +58,18 @@ body {
   box-shadow: 0 2px 8px rgba(63, 48, 38, 0.14);
 }
 
-/* ── Setup / API-key gate ─────────────────────────────────────────────── */
+/* ── Setup / storage choice gate ──────────────────────────────────────── */
 .setup {
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 100vh;
+  min-height: 100vh;
   padding: 24px;
 }
 
 .setup-card {
   width: 100%;
-  max-width: 440px;
+  max-width: 760px;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 18px;
@@ -106,6 +106,45 @@ body {
   color: var(--rust);
 }
 
+.setup-options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  text-align: left;
+}
+
+.setup-option {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 18px;
+  min-height: 245px;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--panel-soft);
+}
+
+.setup-option h2 {
+  margin: 0 0 8px;
+  font-size: 18px;
+}
+
+.setup-option p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.setup-option code {
+  background: var(--paper);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px 5px;
+  font-size: 12px;
+  color: var(--rust);
+}
+
 .setup-form {
   display: flex;
   flex-direction: column;
@@ -117,6 +156,10 @@ body {
   text-align: center;
   font-weight: 500;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.setup-option > button {
+  width: 100%;
 }
 
 .setup-error {
@@ -281,6 +324,18 @@ body {
 }
 
 @media (max-width: 700px) {
+  .setup-card {
+    padding: 32px 22px;
+  }
+
+  .setup-options {
+    grid-template-columns: 1fr;
+  }
+
+  .setup-option {
+    min-height: 0;
+  }
+
   .settings-fields {
     grid-template-columns: 1fr;
   }

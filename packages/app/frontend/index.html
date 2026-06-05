@@ -11,12 +11,26 @@
       <div class="setup-card">
         <img class="logo-mark" src="/brand/logo-mark.png" alt="gemdex" />
         <img class="wordmark" src="/brand/wordmark.png" alt="gemdex — remember once, recall everywhere" />
-        <p class="setup-sub">Enter your Google&nbsp;AI <code>GEMINI_API_KEY</code> to unlock your memory layer. It's stored locally in <code>~/.gemdex/.env</code> and used to embed memories.</p>
-        <form id="setup-form" class="setup-form">
-          <input id="api-key-input" class="title-input" type="password" placeholder="GEMINI_API_KEY" autocomplete="off" spellcheck="false" />
-          <button type="submit" id="api-key-save" class="primary">Save &amp; continue</button>
-          <button type="button" id="setup-settings-btn">Use a remote server</button>
-        </form>
+        <p class="setup-sub">Choose where Gemdex should store and embed your memories. You can use this Mac directly or connect to a Gemdex Server you control.</p>
+        <div class="setup-options">
+          <section class="setup-option">
+            <div class="setup-option-copy">
+              <h2>Local</h2>
+              <p>Use Gemini + LanceDB on this machine. Your Google&nbsp;AI <code>GEMINI_API_KEY</code> is stored locally in <code>~/.gemdex/.env</code>.</p>
+            </div>
+            <form id="setup-form" class="setup-form">
+              <input id="api-key-input" class="title-input" type="password" placeholder="GEMINI_API_KEY" autocomplete="off" spellcheck="false" />
+              <button type="submit" id="api-key-save" class="primary">Use local storage</button>
+            </form>
+          </section>
+          <section class="setup-option">
+            <div class="setup-option-copy">
+              <h2>Remote</h2>
+              <p>Connect through your BYOI Gemdex Server and keep the embedding key on your server instead of this Mac.</p>
+            </div>
+            <button type="button" id="setup-settings-btn" class="primary">Add remote server</button>
+          </section>
+        </div>
         <p id="setup-error" class="setup-error" hidden></p>
       </div>
     </div>

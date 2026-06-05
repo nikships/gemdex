@@ -930,6 +930,11 @@ async function openSettings() {
   }
 }
 
+async function openSetupRemote() {
+  await openSettings();
+  els.remoteName.focus();
+}
+
 function closeSettings() {
   els.settingsModal.hidden = true;
   showSettingsError();
@@ -1053,7 +1058,7 @@ async function removeSelectedRemote() {
 function wireEvents() {
   els.newBtn.addEventListener("click", openNew);
   els.settingsBtn.addEventListener("click", openSettings);
-  els.setupSettingsBtn.addEventListener("click", openSettings);
+  els.setupSettingsBtn.addEventListener("click", openSetupRemote);
   els.recoverySettings.addEventListener("click", openSettings);
   els.recoveryLocal.addEventListener("click", () => applyMode("local"));
   els.settingsClose.addEventListener("click", closeSettings);
@@ -1102,7 +1107,6 @@ function wireEvents() {
 function showSetup(show) {
   els.setup.hidden = !show;
   els.app.hidden = show;
-  if (show) els.apiKeyInput.focus();
 }
 
 /**
