@@ -93,6 +93,8 @@ let editorAttachments = [];
 // Signature of the attachments as loaded for the current memory, used to decide
 // whether an update must re-send the full set (the PUT replaces all media).
 let loadedAttachmentSig = "";
+let listThumbnailRenderId = 0;
+const listThumbnailObjectUrls = new Set();
 
 async function resolveApiBase() {
   // Prefer the base URL handed to us by the native shell.
@@ -215,11 +217,19 @@ function releaseNewObjectUrls() {
   }
 }
 
+function releaseListThumbnailObjectUrls() {
+  for (const url of listThumbnailObjectUrls) URL.revokeObjectURL(url);
+  listThumbnailObjectUrls.clear();
+}
+
 function renderList() {
   const filter = els.filter.value.trim().toLowerCase();
   const visible = memories.filter(
     (m) => !filter || (m.title ?? "").toLowerCase().includes(filter),
   );
+  listThumbnailRenderId += 1;
+  const renderId = listThumbnailRenderId;
+  releaseListThumbnailObjectUrls();
   els.list.innerHTML = "";
   els.empty.hidden = memories.length !== 0;
 
@@ -251,12 +261,31 @@ function renderList() {
       const thumb = document.createElement("img");
       thumb.className = "item-thumb";
       thumb.loading = "lazy";
-      thumb.src = attachmentUrl(m.id, image.id);
       thumb.alt = image.caption || "image attachment";
       thumb.onerror = () => {
+        if (thumb.dataset.objectUrl) {
+          URL.revokeObjectURL(thumb.dataset.objectUrl);
+          listThumbnailObjectUrls.delete(thumb.dataset.objectUrl);
+        }
         thumb.remove();
         li.classList.remove("has-thumb");
       };
+      if (apiToken) {
+        fetchAttachmentObjectUrl(m.id, image.id).then((url) => {
+          if (renderId !== listThumbnailRenderId || !thumb.isConnected) {
+            URL.revokeObjectURL(url);
+            return;
+          }
+          listThumbnailObjectUrls.add(url);
+          thumb.dataset.objectUrl = url;
+          thumb.src = url;
+        }).catch(() => {
+          thumb.remove();
+          li.classList.remove("has-thumb");
+        });
+      } else {
+        thumb.src = attachmentUrl(m.id, image.id);
+      }
       li.classList.add("has-thumb");
       li.insertBefore(thumb, li.firstChild);
     }
@@ -915,6 +944,7 @@ function wireEvents() {
     e.target.value = "";
   });
   els.filter.addEventListener("input", renderList);
+  window.addEventListener("beforeunload", releaseListThumbnailObjectUrls);
 
   // Attachments: picker + drag-drop.
   els.attachBtn.addEventListener("click", () => els.attachInput.click());
