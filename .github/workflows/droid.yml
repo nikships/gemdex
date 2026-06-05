@@ -36,3 +36,6 @@ jobs:
         uses: Factory-AI/droid-action@dev
         with:
           factory_api_key: ${{ secrets.FACTORY_API_KEY }}
+          model: kimi-k2.6
+          reasoning_effort: high
+          
