@@ -1,0 +1,74 @@
+name: gemdex
+
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.2-pg16-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: gemdex
+      POSTGRES_USER: gemdex
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - gemdex-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gemdex -d gemdex"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    security_opt:
+      - no-new-privileges:true
+
+  gemdex-server:
+    image: gemdex-server:local
+    build:
+      context: ../..
+      dockerfile: packages/server/Dockerfile
+    restart: unless-stopped
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${GEMDEX_SERVER_PORT:-8765}:8765"
+    environment:
+      GEMDEX_SERVER_HOST: 0.0.0.0
+      GEMDEX_SERVER_PORT: 8765
+      GEMDEX_SERVER_TOKEN: ${GEMDEX_SERVER_TOKEN:?Set GEMDEX_SERVER_TOKEN in .env}
+      GEMDEX_SERVER_DATABASE_URL: postgres://gemdex:${POSTGRES_PASSWORD}@postgres:5432/gemdex
+      GEMINI_API_KEY: ${GEMINI_API_KEY:?Set GEMINI_API_KEY in .env}
+      GEMDEX_SERVER_ALLOWED_ORIGINS: ${GEMDEX_SERVER_ALLOWED_ORIGINS:-}
+      GEMDEX_SERVER_UNSAFE_DEV_NO_AUTH: "false"
+      BLOB_STORE: file
+      BLOB_DIR: /var/lib/gemdex/blobs
+
+      # S3-compatible alternative: remove BLOB_STORE/BLOB_DIR above, uncomment
+      # these values, and provide the referenced variables in .env.
+      # BLOB_STORE: s3
+      # S3_BUCKET: ${S3_BUCKET}
+      # S3_ENDPOINT: ${S3_ENDPOINT}
+      # S3_REGION: ${S3_REGION:-auto}
+      # S3_PREFIX: ${S3_PREFIX:-}
+      # S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID}
+      # S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY}
+      # S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-false}
+    volumes:
+      - gemdex-blobs:/var/lib/gemdex/blobs
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8765/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 6
+
+volumes:
+  gemdex-postgres:
+  gemdex-blobs:
