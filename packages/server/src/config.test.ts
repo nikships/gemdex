@@ -185,10 +185,19 @@ test('database URL resolves from env, CLI, and config file with env precedence',
     const configPath = path.join(tmpDir, 'config.json');
     try {
         fs.writeFileSync(configPath, JSON.stringify({ databaseUrl: 'postgres://from-file' }), 'utf-8');
-        const fromFile = loadServerConfig({ env: { GEMDEX_SERVER_CONFIG: configPath }, argv: [] });
+        const fromFile = loadServerConfig({
+            env: {
+                GEMDEX_SERVER_CONFIG: configPath,
+                GEMDEX_SERVER_UNSAFE_DEV_NO_AUTH: 'true',
+            },
+            argv: [],
+        });
         assert.equal(fromFile.databaseUrl, 'postgres://from-file');
 
-        const fromCli = loadServerConfig({ env: {}, argv: ['--database-url', 'postgres://from-cli'] });
+        const fromCli = loadServerConfig({
+            env: { GEMDEX_SERVER_UNSAFE_DEV_NO_AUTH: 'true' },
+            argv: ['--database-url', 'postgres://from-cli'],
+        });
         assert.equal(fromCli.databaseUrl, 'postgres://from-cli');
 
         const fromEnv = loadServerConfig({
@@ -196,6 +205,7 @@ test('database URL resolves from env, CLI, and config file with env precedence',
                 GEMDEX_SERVER_CONFIG: configPath,
                 DATABASE_URL: 'postgres://platform',
                 GEMDEX_SERVER_DATABASE_URL: 'postgres://explicit',
+                GEMDEX_SERVER_UNSAFE_DEV_NO_AUTH: 'true',
             },
             argv: ['--database-url', 'postgres://from-cli'],
         });
