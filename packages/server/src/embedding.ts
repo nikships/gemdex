@@ -12,8 +12,15 @@ const MISSING_KEY_ERROR =
 class MissingServerEmbedding extends Embedding {
     protected maxTokens = 8192;
 
+    constructor(
+        private readonly dimension = 3072,
+        private readonly model = 'gemini-embedding-2',
+    ) {
+        super();
+    }
+
     async detectDimension(): Promise<number> {
-        return 3072;
+        return this.dimension;
     }
 
     async embed(_text: string): Promise<EmbeddingVector> {
@@ -29,7 +36,7 @@ class MissingServerEmbedding extends Embedding {
     }
 
     getDimension(): number {
-        return 3072;
+        return this.dimension;
     }
 
     getProvider(): string {
@@ -37,12 +44,14 @@ class MissingServerEmbedding extends Embedding {
     }
 
     isMultimodal(): boolean {
-        return true;
+        return this.model === 'gemini-embedding-2';
     }
 }
 
 export function createServerEmbedding(config: ServerConfig): Embedding {
-    if (!config.geminiApiKey) return new MissingServerEmbedding();
+    if (!config.geminiApiKey) {
+        return new MissingServerEmbedding(config.embeddingDimension, config.embeddingModel);
+    }
     return new GeminiEmbedding({
         apiKey: config.geminiApiKey,
         model: config.embeddingModel,

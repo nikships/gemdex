@@ -69,6 +69,23 @@ test('invalid embedding dimension throws a clear error', () => {
     );
 });
 
+test('embedding dimension rejects non-string and non-number config values', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gemdex-server-config-test-'));
+    const configPath = path.join(tmpDir, 'config.json');
+    try {
+        fs.writeFileSync(configPath, JSON.stringify({
+            token: 'secret',
+            embeddingDimension: true,
+        }), 'utf-8');
+        assert.throws(
+            () => loadServerConfig({ env: { GEMDEX_SERVER_CONFIG: configPath }, argv: [] }),
+            /EMBEDDING_DIMENSION/,
+        );
+    } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+});
+
 test('CLI args --host and --port are parsed', () => {
     const cfg = loadServerConfig({
         env: { GEMDEX_SERVER_TOKEN: 'secret' },

@@ -32,3 +32,12 @@ test('missing server Gemini key fails clearly when embedding is attempted', asyn
         /GEMINI_API_KEY is required on gemdex-server/,
     );
 });
+
+test('missing server Gemini key preserves configured dimension and model metadata', () => {
+    const embedding = createServerEmbedding(config({
+        embeddingDimension: 768,
+        embeddingModel: 'gemini-embedding-001',
+    }));
+    assert.equal(embedding.getDimension(), 768);
+    assert.equal(embedding.isMultimodal(), false);
+});

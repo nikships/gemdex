@@ -66,6 +66,9 @@ function parseBoolean(value: unknown, name: string): boolean | undefined {
 
 function parsePositiveInteger(value: unknown, name: string): number | undefined {
     if (value === undefined || value === '') return undefined;
+    if (typeof value !== 'number' && typeof value !== 'string') {
+        throw new Error(`Invalid ${name} '${String(value)}': must be a positive integer.`);
+    }
     const parsed = Number(value);
     if (!Number.isInteger(parsed) || parsed < 1) {
         throw new Error(`Invalid ${name} '${String(value)}': must be a positive integer.`);
