@@ -15,6 +15,17 @@ claude mcp add gemdex \
 
 No Docker, no daemon. Memories live at `~/.gemdex/lance` by default.
 
+To use a self-hosted Gemdex Server instead, configure remote mode. The client
+does not need `GEMINI_API_KEY`; embedding runs on the server:
+
+```bash
+claude mcp add gemdex \
+  -e GEMDEX_MODE=remote \
+  -e GEMDEX_REMOTE_URL=https://memory.example.com \
+  -e GEMDEX_REMOTE_TOKEN=your-server-token \
+  -- npx -y gemdex-mcp@latest
+```
+
 ## Install for any MCP client
 
 ```json
@@ -49,12 +60,17 @@ The same binary also runs the localhost HTTP manager API used by the desktop app
 npx gemdex serve --port 0   # 127.0.0.1 only; --port 0 = OS picks a free port
 ```
 
-## Required env
+## Environment
 
 | Variable | Description |
 |----------|-------------|
-| `GEMINI_API_KEY` | Google AI Studio API key (needed to embed on save/recall/update) |
+| `GEMDEX_MODE` | `local` (default) or `remote` |
+| `GEMINI_API_KEY` | Required in local mode; Google AI Studio API key |
 | `LANCEDB_PATH` | *(optional)* Custom directory for the embedded store (default `~/.gemdex/lance`) |
+| `GEMDEX_REMOTE_URL` | Required in remote mode; Gemdex Server root URL |
+| `GEMDEX_REMOTE_TOKEN` | Required in remote mode by default; server bearer token |
+| `GEMDEX_REMOTE_TOKEN_ENV_VAR` | Optional alternate env var containing the remote token |
+| `GEMDEX_REMOTE_NAME` | Optional human-readable remote name |
 
 See the [main repo](https://github.com/anand-92/gemdex) for all environment
 variables and configuration options.

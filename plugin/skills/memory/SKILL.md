@@ -1,5 +1,5 @@
 ---
-description: Use the Gemdex memory layer MCP tools (`save_memory`, `recall`, `update_memory`) to give the agent durable, global memory across repos and sessions. EXPLICIT ONLY — save when the user says remember/save to memory, recall when the user points at memory ("check your memory layer", "how do we usually do X", "where are the … credentials"), update to revise. Never auto-capture a session and never recall unprompted. Memories are one global pool; embeddings handle disambiguation. Requires GEMINI_API_KEY. If these tools aren't in your toolset, the MCP isn't connected.
+description: Use the Gemdex memory layer MCP tools (`save_memory`, `recall`, `update_memory`) to give the agent durable, global memory across repos and sessions. EXPLICIT ONLY — save when the user says remember/save to memory, recall when the user points at memory ("check your memory layer", "how do we usually do X", "where are the … credentials"), update to revise. Never auto-capture a session and never recall unprompted. Memories are one global pool; embeddings handle disambiguation. Local mode requires GEMINI_API_KEY; remote mode uses the Gemdex Server owner's key. If these tools aren't in your toolset, the MCP isn't connected.
 ---
 
 # Gemdex memory layer
@@ -71,4 +71,5 @@ This is the most important rule. Act only when the user clearly points at memory
 - `recall` returns each memory's `id`, `title`, full `content`, and a relevance
   score line (`fused=…`). Use the content directly; cite the `title` when
   helpful.
-- All three tools embed via Gemini and require `GEMINI_API_KEY`.
+- All three tools embed via Gemini. Local mode requires `GEMINI_API_KEY`;
+  remote mode delegates embedding to the configured Gemdex Server.

@@ -1,4 +1,9 @@
-import { LanceDBVectorDatabase, LocalMemoryBackend, MemoryBackend } from "gemdex-core";
+import {
+    LanceDBVectorDatabase,
+    LocalMemoryBackend,
+    MemoryBackend,
+    RemoteMemoryBackend,
+} from "gemdex-core";
 import { GemdexConfig } from "./config.js";
 import { createEmbeddingInstance, logEmbeddingProviderInfo } from "./embedding.js";
 
@@ -9,6 +14,13 @@ import { createEmbeddingInstance, logEmbeddingProviderInfo } from "./embedding.j
  * vice-versa.
  */
 export function createMemoryBackend(config: GemdexConfig): MemoryBackend {
+    if (config.mode === 'remote') {
+        if (!config.remote) {
+            throw new Error('Remote mode is selected but no resolved Gemdex Server connection is available.');
+        }
+        return new RemoteMemoryBackend(config.remote);
+    }
+
     const embedding = createEmbeddingInstance(config);
     logEmbeddingProviderInfo(config, embedding);
 

@@ -24,6 +24,7 @@ import { createConfig, logConfigurationSummary, showHelpMessage, GemdexConfig } 
 import { createMemoryBackend } from "./memory.js";
 import { MemoryToolHandlers } from "./handlers.js";
 import { runServe } from "./serve.js";
+import { MCP_TOOL_NAMES } from "./tool-names.js";
 
 const SAVE_MEMORY_DESCRIPTION = `
 Persist a new memory to the user's global, durable memory layer.
@@ -130,7 +131,7 @@ class GemdexMemoryServer {
         this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
             tools: [
                 {
-                    name: "save_memory",
+                    name: MCP_TOOL_NAMES[0],
                     description: SAVE_MEMORY_DESCRIPTION,
                     inputSchema: {
                         type: "object",
@@ -149,7 +150,7 @@ class GemdexMemoryServer {
                     },
                 },
                 {
-                    name: "recall",
+                    name: MCP_TOOL_NAMES[1],
                     description: RECALL_DESCRIPTION,
                     inputSchema: {
                         type: "object",
@@ -170,7 +171,7 @@ class GemdexMemoryServer {
                     },
                 },
                 {
-                    name: "update_memory",
+                    name: MCP_TOOL_NAMES[2],
                     description: UPDATE_MEMORY_DESCRIPTION,
                     inputSchema: {
                         type: "object",
@@ -198,11 +199,11 @@ class GemdexMemoryServer {
         this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             const { name, arguments: args } = request.params;
             switch (name) {
-                case "save_memory":
+                case MCP_TOOL_NAMES[0]:
                     return await this.handlers.handleSaveMemory(args);
-                case "recall":
+                case MCP_TOOL_NAMES[1]:
                     return await this.handlers.handleRecall(args);
-                case "update_memory":
+                case MCP_TOOL_NAMES[2]:
                     return await this.handlers.handleUpdateMemory(args);
                 default:
                     throw new Error(`Unknown tool: ${name}`);
