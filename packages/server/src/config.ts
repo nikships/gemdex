@@ -9,6 +9,8 @@ export interface ServerConfig {
     unsafeDevNoAuth: boolean;
     /** Browser origins allowed by CORS. Empty denies cross-origin browser data access. */
     allowedOrigins: string[];
+    /** Optional Postgres connection string for the remote memory backend. */
+    databaseUrl?: string;
 }
 
 export interface LoadServerConfigOptions {
@@ -21,8 +23,8 @@ export interface LoadServerConfigOptions {
  * arguments, and an optional JSON config file.
  *
  * Priority (highest to lowest):
- *   1. Explicit env vars (GEMDEX_SERVER_HOST, GEMDEX_SERVER_PORT, GEMDEX_SERVER_TOKEN, etc.).
- *   2. CLI args (--host, --port).
+ *   1. Explicit env vars (GEMDEX_SERVER_HOST, GEMDEX_SERVER_PORT, GEMDEX_SERVER_TOKEN, DATABASE_URL).
+ *   2. CLI args (--host, --port, --database-url, --allowed-origin).
  *   3. Config file (GEMDEX_SERVER_CONFIG env var or --config <path> arg).
  *   4. Built-in defaults (host: 127.0.0.1, port: 8765).
  */
@@ -37,6 +39,7 @@ export function loadServerConfig(options: LoadServerConfigOptions = {}): ServerC
     let argConfig: string | undefined;
     const argAllowedOrigins: string[] = [];
     let argUnsafeDevNoAuth: boolean | undefined;
+    let argDatabaseUrl: string | undefined;
 
     for (let i = 0; i < argv.length; i++) {
         const arg = argv[i];
@@ -61,6 +64,10 @@ export function loadServerConfig(options: LoadServerConfigOptions = {}): ServerC
             argAllowedOrigins.push(arg.slice('--allowed-origin='.length));
         } else if (arg === '--unsafe-dev-no-auth') {
             argUnsafeDevNoAuth = true;
+        } else if (arg === '--database-url') {
+            argDatabaseUrl = argv[++i];
+        } else if (arg.startsWith('--database-url=')) {
+            argDatabaseUrl = arg.slice('--database-url='.length);
         }
     }
 
@@ -130,12 +137,22 @@ export function loadServerConfig(options: LoadServerConfigOptions = {}): ServerC
         );
     }
 
+    // Resolve optional Postgres database URL: env > CLI arg > file. DATABASE_URL
+    // is supported for platform defaults; GEMDEX_SERVER_DATABASE_URL is the
+    // explicit Gemdex-specific name.
+    const databaseUrl =
+        env['GEMDEX_SERVER_DATABASE_URL'] ??
+        env['DATABASE_URL'] ??
+        argDatabaseUrl ??
+        (typeof fileConfig['databaseUrl'] === 'string' ? fileConfig['databaseUrl'] : undefined);
+
     return {
         host,
         port: portNum,
         unsafeDevNoAuth,
         allowedOrigins,
         ...(token !== undefined && { token }),
+        ...(databaseUrl !== undefined && { databaseUrl }),
     };
 }
 
@@ -179,4 +196,3 @@ function resolveAllowedOrigins(
     }
     return [];
 }
-
