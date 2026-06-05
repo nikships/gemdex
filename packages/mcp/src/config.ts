@@ -68,6 +68,15 @@ Usage:
   npx gemdex serve [--port N]      Start the localhost HTTP sidecar that backs
                                    the desktop manager app. --port 0 picks a
                                    free port.
+  npx gemdex remote add <name> <url>
+                                   Add a named remote and securely prompt for
+                                   its bearer token.
+  npx gemdex remote list           List configured remotes.
+  npx gemdex remote status [name]  Check health and authentication.
+  npx gemdex mode local            Use the embedded local backend.
+  npx gemdex mode remote <name>    Use a configured remote backend.
+  npx gemdex import-local-to-remote [name]
+                                   Copy local memories to a remote by id.
 
 Optional:
   GEMDEX_MODE             local (default) or remote.
