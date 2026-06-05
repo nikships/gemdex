@@ -4,8 +4,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AddressInfo } from "node:net";
+import { createServer as httpServer } from "node:http";
 import { LanceDBVectorDatabase, LocalMemoryBackend, Embedding, EmbeddingVector, FileBlobStore } from "gemdex-core";
 import type { EmbeddingContent } from "gemdex-core";
+import { createMemoryApiHandler } from "./http-api.js";
 import { createServer } from "./serve.js";
 
 const DIM = 16;
@@ -91,6 +93,39 @@ test("GET /config reports configured when a store is present", async () => {
     const res = await fetch(`${base}/config`);
     assert.equal(res.status, 200);
     assert.deepEqual(await res.json(), { configured: true });
+});
+
+test("shared memory API handler mounts data routes without desktop /config", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gemdex-shared-api-"));
+    const db = new LanceDBVectorDatabase({ uri: dir });
+    const store = new LocalMemoryBackend({ embedding: new FakeEmbedding(), vectorDatabase: db });
+    const srv = httpServer(createMemoryApiHandler({
+        store,
+        corsHeaders: { 'Access-Control-Allow-Origin': 'https://server.example.test' },
+    }));
+    await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
+    const addr = srv.address() as AddressInfo;
+    const srvBase = `http://127.0.0.1:${addr.port}`;
+    try {
+        const configRes = await fetch(`${srvBase}/config`);
+        assert.equal(configRes.status, 404);
+
+        const createRes = await fetch(`${srvBase}/memories`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ content: "shared handler memory" }),
+        });
+        assert.equal(createRes.status, 201);
+        assert.equal(createRes.headers.get("access-control-allow-origin"), "https://server.example.test");
+
+        const listRes = await fetch(`${srvBase}/memories`);
+        assert.equal(listRes.status, 200);
+        const { memories } = await json(listRes);
+        assert.equal(memories.length, 1);
+    } finally {
+        await new Promise<void>((resolve) => srv.close(() => resolve()));
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
 });
 
 test("data routes answer 503 needsKey when no store is configured", async () => {
