@@ -55,6 +55,34 @@ const METHOD_ALLOW_HEADER = 'GET, POST, PUT, PATCH, DELETE, OPTIONS';
 const HEADER_ALLOW_HEADER = 'Content-Type, X-Gemdex-Token';
 const SAFE_INLINE_ATTACHMENT_MIME_TYPES = new Set([...SUPPORTED_MIME_TYPES, 'text/plain']);
 
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function invalidOptionalString(body: Record<string, unknown>, field: string): string | null {
+    return body[field] !== undefined && typeof body[field] !== 'string'
+        ? `'${field}' must be a string when provided`
+        : null;
+}
+
+function validateImportRecord(record: unknown, index: number): string | null {
+    if (!isJsonObject(record)) return `record #${index + 1} must be an object`;
+    for (const field of ['id', 'title', 'content'] as const) {
+        if (typeof record[field] !== 'string') {
+            return `record #${index + 1} requires a string '${field}'`;
+        }
+    }
+    for (const field of ['createdAt', 'updatedAt'] as const) {
+        if (typeof record[field] !== 'number' || !Number.isFinite(record[field])) {
+            return `record #${index + 1} requires a finite numeric '${field}'`;
+        }
+    }
+    if (record.attachments !== undefined && !Array.isArray(record.attachments)) {
+        return `record #${index + 1} 'attachments' must be an array when provided`;
+    }
+    return null;
+}
+
 function attachmentResponseHeaders(mimeType: string): { contentType: string; headers: Record<string, string> } {
     const normalized = typeof mimeType === 'string' ? mimeType.toLowerCase() : '';
     const headers: Record<string, string> = {
@@ -169,6 +197,16 @@ export async function handleMemoryApiRequest(
         // POST /memories — create (text and/or inline media attachments)
         if (method === 'POST' && pathname === '/memories') {
             const body = await readBody(req, ATTACHMENT_BODY_LIMIT);
+            if (!isJsonObject(body)) {
+                sendJson(res, 400, { error: 'Request body must be a JSON object' }, corsHeaders);
+                return true;
+            }
+            const contentError = invalidOptionalString(body, 'content');
+            const titleError = invalidOptionalString(body, 'title');
+            if (contentError || titleError) {
+                sendJson(res, 400, { error: contentError ?? titleError }, corsHeaders);
+                return true;
+            }
             if (body?.attachments !== undefined && !Array.isArray(body.attachments)) {
                 sendJson(res, 400, { error: "'attachments' must be an array" }, corsHeaders);
                 return true;
@@ -181,7 +219,8 @@ export async function handleMemoryApiRequest(
                 return true;
             }
             try {
-                const memory = await store.save({ content, title: body.title, ...(attachments && { attachments }) });
+                const title = typeof body.title === 'string' ? body.title : undefined;
+                const memory = await store.save({ content, title, ...(attachments && { attachments }) });
                 sendJson(res, 201, { memory }, corsHeaders);
             } catch (error: any) {
                 sendJson(res, 400, { error: error?.message ?? 'Failed to save memory' }, corsHeaders);
@@ -203,8 +242,19 @@ export async function handleMemoryApiRequest(
                 sendJson(res, 400, { error: "Invalid payload: 'records' must be an array" }, corsHeaders);
                 return true;
             }
-            const result = await store.importRecords(body.records);
-            sendJson(res, 200, result, corsHeaders);
+            for (let i = 0; i < body.records.length; i++) {
+                const validationError = validateImportRecord(body.records[i], i);
+                if (validationError) {
+                    sendJson(res, 400, { error: validationError }, corsHeaders);
+                    return true;
+                }
+            }
+            try {
+                const result = await store.importRecords(body.records);
+                sendJson(res, 200, result, corsHeaders);
+            } catch (error: any) {
+                sendJson(res, 400, { error: error?.message ?? 'Import failed' }, corsHeaders);
+            }
             return true;
         }
 
@@ -214,13 +264,29 @@ export async function handleMemoryApiRequest(
         // attachment lifted from an existing memory.
         if (method === 'POST' && pathname === '/recall') {
             const body = await readBody(req, ATTACHMENT_BODY_LIMIT);
+            if (!isJsonObject(body)) {
+                sendJson(res, 400, { error: 'Request body must be a JSON object' }, corsHeaders);
+                return true;
+            }
+            const queryError = invalidOptionalString(body, 'query');
+            if (queryError) {
+                sendJson(res, 400, { error: queryError }, corsHeaders);
+                return true;
+            }
             if (body?.attachments !== undefined && !Array.isArray(body.attachments)) {
                 sendJson(res, 400, { error: "'attachments' must be an array" }, corsHeaders);
                 return true;
             }
             const query = typeof body?.query === 'string' ? body.query : '';
             const attachments = Array.isArray(body?.attachments) ? body.attachments : undefined;
-            const limit = typeof body?.limit === 'number' && body.limit > 0 ? Math.min(body.limit, 50) : 10;
+            if (
+                body.limit !== undefined &&
+                (typeof body.limit !== 'number' || !Number.isInteger(body.limit) || body.limit < 1 || body.limit > 50)
+            ) {
+                sendJson(res, 400, { error: "'limit' must be an integer between 1 and 50" }, corsHeaders);
+                return true;
+            }
+            const limit = typeof body.limit === 'number' ? body.limit : 10;
             const hasAttachments = (attachments?.length ?? 0) > 0;
             if (query.trim().length === 0 && !hasAttachments) {
                 sendJson(res, 400, { error: "'query' or at least one attachment is required" }, corsHeaders);
@@ -306,8 +372,18 @@ export async function handleMemoryApiRequest(
                 return true;
             }
 
-            if (method === 'PUT') {
+            if (method === 'PUT' || method === 'PATCH') {
                 const body = await readBody(req, ATTACHMENT_BODY_LIMIT);
+                if (!isJsonObject(body)) {
+                    sendJson(res, 400, { error: 'Request body must be a JSON object' }, corsHeaders);
+                    return true;
+                }
+                const contentError = invalidOptionalString(body, 'content');
+                const titleError = invalidOptionalString(body, 'title');
+                if (contentError || titleError) {
+                    sendJson(res, 400, { error: contentError ?? titleError }, corsHeaders);
+                    return true;
+                }
                 if (body?.attachments !== undefined && !Array.isArray(body.attachments)) {
                     sendJson(res, 400, { error: "'attachments' must be an array" }, corsHeaders);
                     return true;
@@ -320,8 +396,8 @@ export async function handleMemoryApiRequest(
                     return true;
                 }
                 const input: { content?: string; title?: string; attachments?: any[] } = {};
-                if (hasContent) input.content = body.content;
-                if (hasTitle) input.title = body.title;
+                if (hasContent) input.content = body.content as string;
+                if (hasTitle) input.title = body.title as string;
                 if (hasAttachments) input.attachments = body.attachments;
                 try {
                     const memory = await store.update(id, input);
@@ -334,6 +410,10 @@ export async function handleMemoryApiRequest(
             }
 
             if (method === 'DELETE') {
+                if (!await store.get(id)) {
+                    sendJson(res, 404, { error: 'Memory not found' }, corsHeaders);
+                    return true;
+                }
                 await store.delete(id);
                 sendJson(res, 200, { ok: true }, corsHeaders);
                 return true;
