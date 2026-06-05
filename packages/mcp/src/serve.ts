@@ -76,6 +76,13 @@ interface DesktopSettingsSummary {
     remotes: DesktopRemoteSummary[];
 }
 
+interface DesktopConfigSummary {
+    configured: boolean;
+    mode: 'local' | 'remote';
+    needsKey: boolean;
+    activeRemote?: Pick<DesktopRemoteSummary, 'name' | 'url' | 'hasToken'>;
+}
+
 function clientConfigStore(ctx: ServeContext): ClientConfigStore {
     ctx.clientConfigStore ??= new ClientConfigStore();
     return ctx.clientConfigStore;
@@ -128,6 +135,31 @@ function settingsSummary(ctx: ServeContext): DesktopSettingsSummary {
             ...remote,
             hasToken: Boolean(configStore.getEnv(remote.tokenEnvVar)?.trim()),
         })),
+    };
+}
+
+function activeRemoteSummary(ctx: ServeContext): Pick<DesktopRemoteSummary, 'name' | 'url' | 'hasToken'> | undefined {
+    if (ctx.config.mode !== 'remote' || !ctx.config.remoteName) return undefined;
+    const configStore = clientConfigStore(ctx);
+    const remote = configStore.get(ctx.config.remoteName);
+    const url = remote?.url ?? ctx.config.remote?.url;
+    if (!url) return undefined;
+    return {
+        name: ctx.config.remoteName,
+        url,
+        hasToken: Boolean(remote
+            ? configStore.getEnv(remote.tokenEnvVar)?.trim()
+            : ctx.config.remote?.token.trim()),
+    };
+}
+
+function configSummary(ctx: ServeContext): DesktopConfigSummary {
+    const activeRemote = activeRemoteSummary(ctx);
+    return {
+        configured: ctx.store !== null,
+        mode: ctx.config.mode,
+        needsKey: ctx.config.mode === 'local' && ctx.store === null,
+        ...(activeRemote && { activeRemote }),
     };
 }
 
@@ -313,11 +345,7 @@ export function createServer(ctx: ServeContext): http.Server {
             // expose sensitive memory data. /config stays a desktop-sidecar
             // concern; shared memory API handlers do not mount it.
             if (method === 'GET' && pathname === '/config') {
-                sendJson(res, 200, {
-                    configured: ctx.store !== null,
-                    mode: ctx.config.mode,
-                    needsKey: ctx.config.mode === 'local' && ctx.store === null,
-                }, corsHeaders);
+                sendJson(res, 200, configSummary(ctx), corsHeaders);
                 return;
             }
 
