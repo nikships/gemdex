@@ -1,7 +1,8 @@
 import * as http from "http";
 import * as crypto from "crypto";
-import { MemoryBackend, envManager } from "gemdex-core";
+import { MemoryBackend, RemoteMemoryBackend, envManager } from "gemdex-core";
 import { buildCorsHeaders, handleMemoryApiRequest, readBody, sendJson } from "gemdex-core";
+import { ClientConfigStore, StoredRemote, tokenEnvVarForRemote } from "./cli-config.js";
 import { createConfig, GemdexConfig } from "./config.js";
 import { createMemoryBackend } from "./memory.js";
 
@@ -11,9 +12,12 @@ import { createMemoryBackend } from "./memory.js";
  * interactive shell env), so the desktop app can prompt for the key and POST
  * it to /config. Until then `store` is null and the data routes answer 503.
  */
-interface ServeContext {
+export interface ServeContext {
     config: GemdexConfig;
     store: MemoryBackend | null;
+    clientConfigStore?: ClientConfigStore;
+    createBackend?: (config: GemdexConfig) => MemoryBackend;
+    fetch?: typeof fetch;
     /**
      * When set, the server enforces two security controls:
      *  1. `Origin` header on every non-OPTIONS request must match this value
@@ -32,17 +36,166 @@ interface ServeContext {
     token?: string;
 }
 
-function buildStore(config: GemdexConfig): MemoryBackend | null {
+function buildStore(
+    config: GemdexConfig,
+    createBackend: (config: GemdexConfig) => MemoryBackend = createMemoryBackend,
+): MemoryBackend | null {
     if (config.mode === 'local' && !config.geminiApiKey) return null;
-    return createMemoryBackend(config);
+    return createBackend(config);
 }
 
 /** Persist the key to ~/.gemdex/.env, expose it to this process, and (re)build the store. */
 function configureApiKey(ctx: ServeContext, apiKey: string): void {
     envManager.set('GEMINI_API_KEY', apiKey);
     process.env['GEMINI_API_KEY'] = apiKey;
-    ctx.config = createConfig();
-    ctx.store = buildStore(ctx.config);
+    ctx.config = {
+        ...ctx.config,
+        geminiApiKey: apiKey,
+    };
+    if (ctx.config.mode === 'local') {
+        ctx.store = buildStore(ctx.config, ctx.createBackend);
+    }
+}
+
+interface DesktopRemoteSummary extends StoredRemote {
+    name: string;
+    hasToken: boolean;
+}
+
+interface DesktopSettingsSummary {
+    mode: 'local' | 'remote';
+    activeRemote?: string;
+    configured: boolean;
+    localConfigured: boolean;
+    remotes: DesktopRemoteSummary[];
+}
+
+function clientConfigStore(ctx: ServeContext): ClientConfigStore {
+    ctx.clientConfigStore ??= new ClientConfigStore();
+    return ctx.clientConfigStore;
+}
+
+function createBackend(ctx: ServeContext, config: GemdexConfig): MemoryBackend {
+    return (ctx.createBackend ?? createMemoryBackend)(config);
+}
+
+function localConfig(ctx: ServeContext): GemdexConfig {
+    return {
+        ...ctx.config,
+        mode: 'local',
+        geminiApiKey: ctx.config.geminiApiKey ?? envManager.get('GEMINI_API_KEY'),
+        remoteName: undefined,
+        remote: undefined,
+    };
+}
+
+function resolveStoredRemote(
+    ctx: ServeContext,
+    name: string,
+): { remote: StoredRemote; token: string } {
+    const configStore = clientConfigStore(ctx);
+    const remote = configStore.get(name);
+    if (!remote) throw new Error(`Remote "${name}" is not configured.`);
+    const token = configStore.getEnv(remote.tokenEnvVar)?.trim();
+    if (!token) throw new Error(`Remote "${name}" does not have a configured bearer token.`);
+    return { remote, token };
+}
+
+function remoteConfig(ctx: ServeContext, name: string): GemdexConfig {
+    const { remote, token } = resolveStoredRemote(ctx, name);
+    return {
+        ...ctx.config,
+        mode: 'remote',
+        remoteName: name,
+        remote: { url: remote.url, token },
+    };
+}
+
+function settingsSummary(ctx: ServeContext): DesktopSettingsSummary {
+    const configStore = clientConfigStore(ctx);
+    return {
+        mode: ctx.config.mode,
+        ...(ctx.config.mode === 'remote' && ctx.config.remoteName && { activeRemote: ctx.config.remoteName }),
+        configured: ctx.store !== null,
+        localConfigured: Boolean(ctx.config.geminiApiKey ?? envManager.get('GEMINI_API_KEY')),
+        remotes: configStore.list().map((remote) => ({
+            ...remote,
+            hasToken: Boolean(configStore.getEnv(remote.tokenEnvVar)?.trim()),
+        })),
+    };
+}
+
+async function testRemoteConnection(
+    ctx: ServeContext,
+    name: string,
+): Promise<{ reachable: boolean; authenticated: boolean; detail?: string }> {
+    const { remote, token } = resolveStoredRemote(ctx, name);
+    try {
+        const response = await (ctx.fetch ?? fetch)(`${remote.url}/v1/health`, {
+            signal: AbortSignal.timeout(5_000),
+        });
+        if (!response.ok) {
+            return {
+                reachable: false,
+                authenticated: false,
+                detail: `Health check returned HTTP ${response.status}.`,
+            };
+        }
+    } catch (error) {
+        return {
+            reachable: false,
+            authenticated: false,
+            detail: error instanceof Error ? error.message : String(error),
+        };
+    }
+
+    try {
+        await new RemoteMemoryBackend({ url: remote.url, token, fetch: ctx.fetch }).list();
+        return { reachable: true, authenticated: true };
+    } catch (error) {
+        return {
+            reachable: true,
+            authenticated: false,
+            detail: error instanceof Error ? error.message : String(error),
+        };
+    }
+}
+
+async function migrateLocalToRemote(
+    ctx: ServeContext,
+    name: string,
+): Promise<{ created: number; updated: number; skipped: number }> {
+    const sourceConfig = localConfig(ctx);
+    if (!sourceConfig.geminiApiKey) {
+        throw new Error('Configure GEMINI_API_KEY before importing local memories.');
+    }
+    const local = ctx.config.mode === 'local' && ctx.store
+        ? ctx.store
+        : createBackend(ctx, sourceConfig);
+    const targetConfig = remoteConfig(ctx, name);
+    const remote = ctx.config.mode === 'remote' && ctx.config.remoteName === name && ctx.store
+        ? ctx.store
+        : createBackend(ctx, targetConfig);
+    const records = await local.exportAll();
+    let created = 0;
+    let updated = 0;
+    let skipped = 0;
+    for (const record of records) {
+        try {
+            const existed = await remote.get(record.id) !== null;
+            const result = await remote.importRecords([record]);
+            if (result.imported !== 1) {
+                skipped += 1;
+            } else if (existed) {
+                updated += 1;
+            } else {
+                created += 1;
+            }
+        } catch {
+            skipped += 1;
+        }
+    }
+    return { created, updated, skipped };
 }
 
 /**
@@ -154,7 +307,11 @@ export function createServer(ctx: ServeContext): http.Server {
             // expose sensitive memory data. /config stays a desktop-sidecar
             // concern; shared memory API handlers do not mount it.
             if (method === 'GET' && pathname === '/config') {
-                sendJson(res, 200, { configured: ctx.store !== null }, corsHeaders);
+                sendJson(res, 200, {
+                    configured: ctx.store !== null,
+                    mode: ctx.config.mode,
+                    needsKey: ctx.config.mode === 'local' && ctx.store === null,
+                }, corsHeaders);
                 return;
             }
 
@@ -179,6 +336,139 @@ export function createServer(ctx: ServeContext): http.Server {
             // reading or mutating their memory layer via cross-origin requests.
             if (!isTokenValid(req, ctx.token)) {
                 sendJson(res, 401, { error: 'Unauthorized' }, corsHeaders);
+                return;
+            }
+
+            if (method === 'GET' && pathname === '/settings') {
+                sendJson(res, 200, settingsSummary(ctx), corsHeaders);
+                return;
+            }
+
+            if (method === 'POST' && pathname === '/settings/remotes') {
+                const body = await readBody(req);
+                const name = typeof body?.name === 'string' ? body.name.trim() : '';
+                const remoteUrl = typeof body?.url === 'string' ? body.url.trim() : '';
+                const token = typeof body?.token === 'string' ? body.token.trim() : '';
+                if (!name || !remoteUrl) {
+                    sendJson(res, 400, { error: "'name' and 'url' are required" }, corsHeaders);
+                    return;
+                }
+                const configStore = clientConfigStore(ctx);
+                try {
+                    const existing = configStore.get(name);
+                    if (!existing && !token) {
+                        throw new Error("'token' is required for a new remote");
+                    }
+                    if (existing && !token && !configStore.getEnv(existing.tokenEnvVar)?.trim()) {
+                        throw new Error("'token' is required because this remote does not have one configured");
+                    }
+                    const tokenEnvVar = existing?.tokenEnvVar ?? tokenEnvVarForRemote(name);
+                    configStore.add(name, remoteUrl, tokenEnvVar);
+                    if (token) {
+                        configStore.setEnv(tokenEnvVar, token);
+                        process.env[tokenEnvVar] = token;
+                    }
+                    if (ctx.config.mode === 'remote' && ctx.config.remoteName === name) {
+                        ctx.config = remoteConfig(ctx, name);
+                        ctx.store = createBackend(ctx, ctx.config);
+                    }
+                    sendJson(res, 200, settingsSummary(ctx), corsHeaders);
+                } catch (error) {
+                    sendJson(res, 400, {
+                        error: error instanceof Error ? error.message : String(error),
+                    }, corsHeaders);
+                }
+                return;
+            }
+
+            const remoteSettingsMatch = pathname.match(/^\/settings\/remotes\/([^/]+)$/);
+            if (method === 'DELETE' && remoteSettingsMatch) {
+                const name = decodeURIComponent(remoteSettingsMatch[1]);
+                const configStore = clientConfigStore(ctx);
+                try {
+                    const existing = configStore.get(name);
+                    if (!configStore.remove(name)) {
+                        sendJson(res, 404, { error: `Remote "${name}" is not configured.` }, corsHeaders);
+                        return;
+                    }
+                    if (existing?.tokenEnvVar === tokenEnvVarForRemote(name)) {
+                        delete process.env[existing.tokenEnvVar];
+                    }
+                    if (ctx.config.mode === 'remote' && ctx.config.remoteName === name) {
+                        ctx.config = localConfig(ctx);
+                        ctx.store = buildStore(ctx.config, ctx.createBackend);
+                    }
+                    sendJson(res, 200, settingsSummary(ctx), corsHeaders);
+                } catch (error) {
+                    sendJson(res, 400, {
+                        error: error instanceof Error ? error.message : String(error),
+                    }, corsHeaders);
+                }
+                return;
+            }
+
+            if (method === 'POST' && pathname === '/settings/mode') {
+                const body = await readBody(req);
+                const mode = typeof body?.mode === 'string' ? body.mode.trim().toLowerCase() : '';
+                try {
+                    if (mode === 'local') {
+                        clientConfigStore(ctx).activateLocal();
+                        ctx.config = localConfig(ctx);
+                        ctx.store = buildStore(ctx.config, ctx.createBackend);
+                    } else if (mode === 'remote') {
+                        const name = typeof body?.name === 'string' ? body.name.trim() : '';
+                        if (!name) throw new Error("'name' is required for remote mode.");
+                        const nextConfig = remoteConfig(ctx, name);
+                        clientConfigStore(ctx).activateRemote(name);
+                        ctx.config = nextConfig;
+                        ctx.store = createBackend(ctx, ctx.config);
+                    } else {
+                        throw new Error("'mode' must be local or remote.");
+                    }
+                    sendJson(res, 200, settingsSummary(ctx), corsHeaders);
+                } catch (error) {
+                    sendJson(res, 400, {
+                        error: error instanceof Error ? error.message : String(error),
+                    }, corsHeaders);
+                }
+                return;
+            }
+
+            if (method === 'POST' && pathname === '/settings/test') {
+                const body = await readBody(req);
+                const name = typeof body?.name === 'string'
+                    ? body.name.trim()
+                    : ctx.config.remoteName ?? '';
+                if (!name) {
+                    sendJson(res, 400, { error: "'name' is required" }, corsHeaders);
+                    return;
+                }
+                try {
+                    sendJson(res, 200, await testRemoteConnection(ctx, name), corsHeaders);
+                } catch (error) {
+                    sendJson(res, 400, {
+                        error: error instanceof Error ? error.message : String(error),
+                    }, corsHeaders);
+                }
+                return;
+            }
+
+            if (method === 'POST' && pathname === '/settings/import-local') {
+                const body = await readBody(req);
+                const name = typeof body?.name === 'string'
+                    ? body.name.trim()
+                    : ctx.config.remoteName ?? '';
+                if (!name) {
+                    sendJson(res, 400, { error: "'name' is required" }, corsHeaders);
+                    return;
+                }
+                try {
+                    sendJson(res, 200, await migrateLocalToRemote(ctx, name), corsHeaders);
+                } catch (error) {
+                    sendJson(res, 400, {
+                        error: error instanceof Error ? error.message : String(error),
+                    }, corsHeaders);
+                }
                 return;
             }
 
@@ -230,7 +520,13 @@ export async function runServe(args: string[]): Promise<void> {
     // otherwise we accept only `zero://app` as the production origin.
     const allowedOrigin = process.env.GEMDEX_WEBVIEW_ORIGIN ?? 'zero://app';
 
-    const ctx: ServeContext = { config, store: buildStore(config), token, allowedOrigin };
+    const ctx: ServeContext = {
+        config,
+        store: buildStore(config),
+        token,
+        allowedOrigin,
+        clientConfigStore: new ClientConfigStore(),
+    };
     const server = createServer(ctx);
 
     await new Promise<void>((resolve) => {

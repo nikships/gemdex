@@ -8,6 +8,11 @@ import {
   humanSize,
   kindFromMime,
 } from "./attachments.js";
+import {
+  connectionStatus,
+  migrationStatus,
+  remoteOptionLabel,
+} from "./settings.js";
 
 /**
  * Gemdex Memory — management UI.
@@ -24,6 +29,7 @@ const els = {
   setupForm: document.querySelector("#setup-form"),
   apiKeyInput: document.querySelector("#api-key-input"),
   apiKeySave: document.querySelector("#api-key-save"),
+  setupSettingsBtn: document.querySelector("#setup-settings-btn"),
   setupError: document.querySelector("#setup-error"),
   status: document.querySelector("#status"),
   list: document.querySelector("#memory-list"),
@@ -37,6 +43,7 @@ const els = {
   saveBtn: document.querySelector("#save-btn"),
   deleteBtn: document.querySelector("#delete-btn"),
   newBtn: document.querySelector("#new-btn"),
+  settingsBtn: document.querySelector("#settings-btn"),
   exportBtn: document.querySelector("#export-btn"),
   importBtn: document.querySelector("#import-btn"),
   importFile: document.querySelector("#import-file"),
@@ -51,6 +58,22 @@ const els = {
   similarList: document.querySelector("#similar-list"),
   similarEmpty: document.querySelector("#similar-empty"),
   similarClose: document.querySelector("#similar-close"),
+  settingsModal: document.querySelector("#settings-modal"),
+  settingsClose: document.querySelector("#settings-close"),
+  settingsError: document.querySelector("#settings-error"),
+  modeLocal: document.querySelector("#mode-local"),
+  modeRemote: document.querySelector("#mode-remote"),
+  remoteSelect: document.querySelector("#remote-select"),
+  remoteUse: document.querySelector("#remote-use"),
+  remoteTest: document.querySelector("#remote-test"),
+  remoteImport: document.querySelector("#remote-import"),
+  remoteRemove: document.querySelector("#remote-remove"),
+  remoteStatus: document.querySelector("#remote-status"),
+  remoteForm: document.querySelector("#remote-form"),
+  remoteName: document.querySelector("#remote-name"),
+  remoteUrl: document.querySelector("#remote-url"),
+  remoteToken: document.querySelector("#remote-token"),
+  remoteSave: document.querySelector("#remote-save"),
 };
 
 let apiBase = "";
@@ -59,6 +82,7 @@ let apiBase = "";
 let apiToken = "";
 let memories = [];
 let selectedId = null; // null while editing/creating a brand-new memory
+let settingsState = null;
 
 // Working set of attachments for the open editor. Each item is either:
 //   { source: "existing", id, kind, mimeType, byteLength, caption, url }
@@ -682,8 +706,219 @@ function setStatus(text, isError = false) {
   els.status.classList.toggle("error", isError);
 }
 
+function selectedRemoteName() {
+  return els.remoteSelect.value || settingsState?.activeRemote || "";
+}
+
+function showSettingsError(message = "") {
+  els.settingsError.textContent = message;
+  els.settingsError.hidden = !message;
+}
+
+function renderSettings() {
+  if (!settingsState) return;
+  els.modeLocal.classList.toggle("active", settingsState.mode === "local");
+  els.modeRemote.classList.toggle("active", settingsState.mode === "remote");
+  els.remoteSelect.innerHTML = "";
+  for (const remote of settingsState.remotes || []) {
+    const option = document.createElement("option");
+    option.value = remote.name;
+    option.textContent = remoteOptionLabel(remote);
+    els.remoteSelect.appendChild(option);
+  }
+  if (settingsState.activeRemote) els.remoteSelect.value = settingsState.activeRemote;
+  updateRemoteControls();
+  els.remoteStatus.textContent = settingsState.mode === "remote"
+    ? `Using ${settingsState.activeRemote || "remote storage"}.`
+    : "Using the embedded local store.";
+  els.remoteStatus.classList.remove("error", "success");
+}
+
+function updateRemoteControls() {
+  const remotes = settingsState?.remotes || [];
+  const hasRemote = remotes.length > 0;
+  const selected = remotes.find((remote) => remote.name === selectedRemoteName());
+  const usable = Boolean(selected?.hasToken);
+  els.remoteSelect.disabled = !hasRemote;
+  els.modeRemote.disabled = !usable;
+  els.remoteUse.disabled = !usable;
+  els.remoteTest.disabled = !usable;
+  els.remoteImport.disabled = !usable || !settingsState?.localConfigured;
+  els.remoteRemove.disabled = !hasRemote;
+}
+
+function populateRemoteForm() {
+  const selected = (settingsState?.remotes || []).find(
+    (remote) => remote.name === selectedRemoteName(),
+  );
+  if (!selected) return;
+  els.remoteName.value = selected.name;
+  els.remoteUrl.value = selected.url;
+  els.remoteToken.value = "";
+  updateRemoteControls();
+}
+
+async function refreshSettings() {
+  settingsState = await api("/settings");
+  renderSettings();
+  return settingsState;
+}
+
+async function openSettings() {
+  showSettingsError();
+  els.remoteStatus.textContent = "Loading storage settings…";
+  els.settingsModal.hidden = false;
+  try {
+    await refreshSettings();
+  } catch (err) {
+    showSettingsError(err.message);
+  }
+}
+
+function closeSettings() {
+  els.settingsModal.hidden = true;
+  showSettingsError();
+  els.remoteToken.value = "";
+}
+
+async function applyMode(mode, name) {
+  showSettingsError();
+  try {
+    settingsState = await api("/settings/mode", {
+      method: "POST",
+      body: JSON.stringify({ mode, ...(name && { name }) }),
+    });
+    renderSettings();
+    const config = await api("/config");
+    if (config.configured) {
+      showSetup(false);
+      await loadMemories();
+    } else {
+      setStatus("API key required");
+      showSetup(true);
+    }
+  } catch (err) {
+    showSettingsError(err.message);
+  }
+}
+
+async function saveRemote(event) {
+  event.preventDefault();
+  showSettingsError();
+  const payload = {
+    name: els.remoteName.value.trim(),
+    url: els.remoteUrl.value.trim(),
+    token: els.remoteToken.value.trim(),
+  };
+  els.remoteToken.value = "";
+  els.remoteSave.disabled = true;
+  try {
+    settingsState = await api("/settings/remotes", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    els.remoteName.value = "";
+    els.remoteUrl.value = "";
+    renderSettings();
+    if (payload.name) {
+      els.remoteSelect.value = payload.name;
+      updateRemoteControls();
+    }
+    els.remoteStatus.textContent = `Saved ${payload.name}.`;
+    els.remoteStatus.classList.add("success");
+  } catch (err) {
+    showSettingsError(err.message);
+  } finally {
+    payload.token = "";
+    els.remoteSave.disabled = false;
+  }
+}
+
+async function testSelectedRemote() {
+  const name = selectedRemoteName();
+  if (!name) return;
+  showSettingsError();
+  els.remoteStatus.textContent = `Testing ${name}…`;
+  try {
+    const result = await api("/settings/test", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    });
+    const status = connectionStatus(name, result);
+    els.remoteStatus.textContent = status.text;
+    els.remoteStatus.classList.toggle("error", status.isError);
+    els.remoteStatus.classList.toggle("success", !status.isError);
+  } catch (err) {
+    els.remoteStatus.textContent = err.message;
+    els.remoteStatus.classList.add("error");
+  }
+}
+
+async function importLocalToSelectedRemote() {
+  const name = selectedRemoteName();
+  if (!name || !confirm(`Import local memories to ${name}? Existing ids will be updated.`)) return;
+  showSettingsError();
+  els.remoteImport.disabled = true;
+  els.remoteStatus.textContent = `Importing local memories to ${name}…`;
+  try {
+    const result = await api("/settings/import-local", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    });
+    const status = migrationStatus(result);
+    els.remoteStatus.textContent = status.text;
+    els.remoteStatus.classList.toggle("error", status.isError);
+    els.remoteStatus.classList.toggle("success", !status.isError);
+    if (settingsState?.mode === "remote" && settingsState.activeRemote === name) {
+      await loadMemories();
+    }
+  } catch (err) {
+    els.remoteStatus.textContent = err.message;
+    els.remoteStatus.classList.add("error");
+  } finally {
+    els.remoteImport.disabled = !settingsState?.localConfigured;
+  }
+}
+
+async function removeSelectedRemote() {
+  const name = selectedRemoteName();
+  if (!name || !confirm(`Remove the ${name} remote configuration?`)) return;
+  showSettingsError();
+  try {
+    settingsState = await api(`/settings/remotes/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    });
+    renderSettings();
+    if (settingsState.mode === "local") {
+      const config = await api("/config");
+      if (config.configured) {
+        showSetup(false);
+        await loadMemories();
+      } else {
+        showSetup(true);
+      }
+    }
+  } catch (err) {
+    showSettingsError(err.message);
+  }
+}
+
 function wireEvents() {
   els.newBtn.addEventListener("click", openNew);
+  els.settingsBtn.addEventListener("click", openSettings);
+  els.setupSettingsBtn.addEventListener("click", openSettings);
+  els.settingsClose.addEventListener("click", closeSettings);
+  els.settingsModal.addEventListener("click", (event) => {
+    if (event.target === els.settingsModal) closeSettings();
+  });
+  els.modeLocal.addEventListener("click", () => applyMode("local"));
+  els.modeRemote.addEventListener("click", () => applyMode("remote", selectedRemoteName()));
+  els.remoteUse.addEventListener("click", () => applyMode("remote", selectedRemoteName()));
+  els.remoteSelect.addEventListener("change", populateRemoteForm);
+  els.remoteTest.addEventListener("click", testSelectedRemote);
+  els.remoteImport.addEventListener("click", importLocalToSelectedRemote);
+  els.remoteRemove.addEventListener("click", removeSelectedRemote);
+  els.remoteForm.addEventListener("submit", saveRemote);
   els.editor.addEventListener("submit", saveCurrent);
   els.deleteBtn.addEventListener("click", deleteCurrent);
   els.exportBtn.addEventListener("click", exportAll);
@@ -720,9 +955,8 @@ function showSetup(show) {
   if (show) els.apiKeyInput.focus();
 }
 
-async function isConfigured() {
-  const body = await api("/config");
-  return Boolean(body && body.configured);
+async function getConfiguration() {
+  return api("/config");
 }
 
 async function submitApiKey(event) {
@@ -767,7 +1001,8 @@ async function init() {
     setStatus("Could not reach the memory store sidecar.", true);
     return;
   }
-  if (await isConfigured()) {
+  const config = await getConfiguration();
+  if (config.configured) {
     showSetup(false);
     await loadMemories();
   } else {
