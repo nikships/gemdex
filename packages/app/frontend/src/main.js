@@ -56,6 +56,7 @@ const els = {
   similarPanel: document.querySelector("#similar-panel"),
   similarTitle: document.querySelector("#similar-title"),
   similarList: document.querySelector("#similar-list"),
+  similarError: document.querySelector("#similar-error"),
   similarEmpty: document.querySelector("#similar-empty"),
   similarClose: document.querySelector("#similar-close"),
   settingsModal: document.querySelector("#settings-modal"),
@@ -628,6 +629,8 @@ async function findSimilar(item) {
   if (item.source !== "existing" || !selectedId) return;
   els.similarPanel.hidden = false;
   els.similarList.innerHTML = "";
+  els.similarError.hidden = true;
+  els.similarError.innerHTML = "";
   els.similarEmpty.hidden = true;
   els.similarTitle.textContent = "Finding similar memories…";
   try {
@@ -657,14 +660,56 @@ async function findSimilar(item) {
       els.similarList.appendChild(li);
     }
   } catch (err) {
-    els.similarTitle.textContent = "Similar memories";
+    renderSimilarError(err, item);
     setStatus(`Find similar failed: ${err.message}`, true);
   }
+}
+
+function renderSimilarError(err, item) {
+  const message = err?.message || "Unknown error";
+  const likelyRemote = settingsState?.mode === "remote" || /gemdex server|remote|bearer|unauthorized/i.test(message);
+  const guidance = likelyRemote
+    ? "The active remote could not complete recall. Open Storage settings to test the remote, update its URL or token, then retry."
+    : "Recall by example could not complete. Check your storage settings, then retry.";
+
+  els.similarTitle.textContent = "Find similar needs attention";
+  els.similarList.innerHTML = "";
+  els.similarEmpty.hidden = true;
+  els.similarError.innerHTML = "";
+  els.similarError.hidden = false;
+
+  const summary = document.createElement("p");
+  summary.className = "similar-error-summary";
+  summary.textContent = guidance;
+
+  const detail = document.createElement("p");
+  detail.className = "similar-error-detail";
+  detail.textContent = message;
+
+  const actions = document.createElement("div");
+  actions.className = "similar-error-actions";
+
+  const settingsBtn = document.createElement("button");
+  settingsBtn.type = "button";
+  settingsBtn.className = "ghost";
+  settingsBtn.textContent = "Open Storage settings";
+  settingsBtn.addEventListener("click", openSettings);
+
+  const retryBtn = document.createElement("button");
+  retryBtn.type = "button";
+  retryBtn.className = "primary";
+  retryBtn.textContent = "Retry";
+  retryBtn.addEventListener("click", () => findSimilar(item));
+
+  actions.append(settingsBtn, retryBtn);
+  els.similarError.append(summary, detail, actions);
 }
 
 function hideSimilar() {
   els.similarPanel.hidden = true;
   els.similarList.innerHTML = "";
+  els.similarError.hidden = true;
+  els.similarError.innerHTML = "";
 }
 
 async function deleteCurrent() {
