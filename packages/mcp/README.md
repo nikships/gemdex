@@ -26,6 +26,28 @@ claude mcp add gemdex \
   -- npx -y gemdex-mcp@latest
 ```
 
+### Configure remotes with the CLI
+
+```bash
+# Prompts for the bearer token without echoing it.
+npx gemdex remote add production https://memory.example.com
+
+npx gemdex remote list
+npx gemdex mode remote production
+npx gemdex status
+
+# Return to the embedded local backend.
+npx gemdex mode local
+
+# Copy the local store to a named remote, preserving memory ids.
+npx gemdex import-local-to-remote production
+```
+
+Named remotes live in `~/.gemdex/config.json`. Bearer tokens are stored
+separately in `~/.gemdex/.env` with user-only file permissions and are never
+printed. For automation, use `--token-stdin`; to manage the secret externally,
+use `--token-env MY_TOKEN_VAR`.
+
 ## Install for any MCP client
 
 ```json

@@ -25,6 +25,7 @@ import { createMemoryBackend } from "./memory.js";
 import { MemoryToolHandlers } from "./handlers.js";
 import { runServe } from "./serve.js";
 import { MCP_TOOL_NAMES } from "./tool-names.js";
+import { runCli } from "./cli.js";
 
 const SAVE_MEMORY_DESCRIPTION = `
 Persist a new memory to the user's global, durable memory layer.
@@ -231,6 +232,12 @@ async function main() {
     // that backs the desktop manager app, instead of the stdio MCP server.
     if (args[0] === 'serve') {
         await runServe(args.slice(1));
+        return;
+    }
+
+    const cliExitCode = await runCli(args);
+    if (cliExitCode !== null) {
+        process.exitCode = cliExitCode;
         return;
     }
 
