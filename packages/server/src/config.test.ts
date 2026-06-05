@@ -147,7 +147,6 @@ test('env vars override config file values', () => {
     }
 });
 
-
 test('CLI args parse allowed origins and unsafe dev mode', () => {
     const cfg = loadServerConfig({
         env: {},
@@ -179,4 +178,29 @@ test('invalid unsafe dev mode boolean throws a clear error', () => {
         () => loadServerConfig({ env: { GEMDEX_SERVER_UNSAFE_DEV_NO_AUTH: 'maybe' }, argv: [] }),
         /GEMDEX_SERVER_UNSAFE_DEV_NO_AUTH/,
     );
+});
+
+test('database URL resolves from env, CLI, and config file with env precedence', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gemdex-server-config-test-'));
+    const configPath = path.join(tmpDir, 'config.json');
+    try {
+        fs.writeFileSync(configPath, JSON.stringify({ databaseUrl: 'postgres://from-file' }), 'utf-8');
+        const fromFile = loadServerConfig({ env: { GEMDEX_SERVER_CONFIG: configPath }, argv: [] });
+        assert.equal(fromFile.databaseUrl, 'postgres://from-file');
+
+        const fromCli = loadServerConfig({ env: {}, argv: ['--database-url', 'postgres://from-cli'] });
+        assert.equal(fromCli.databaseUrl, 'postgres://from-cli');
+
+        const fromEnv = loadServerConfig({
+            env: {
+                GEMDEX_SERVER_CONFIG: configPath,
+                DATABASE_URL: 'postgres://platform',
+                GEMDEX_SERVER_DATABASE_URL: 'postgres://explicit',
+            },
+            argv: ['--database-url', 'postgres://from-cli'],
+        });
+        assert.equal(fromEnv.databaseUrl, 'postgres://explicit');
+    } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
 });

@@ -19,10 +19,13 @@
         "prepublishOnly": "pnpm build"
     },
     "dependencies": {
-        "gemdex-core": "workspace:*"
+        "gemdex-core": "workspace:*",
+        "pg": "^8.21.0"
     },
     "devDependencies": {
         "@types/node": "^20.0.0",
+        "@types/pg": "^8.20.0",
+        "pg-mem": "^3.0.14",
         "tsx": "^4.19.4",
         "typescript": "^5.0.0"
     },

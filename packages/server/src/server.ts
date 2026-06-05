@@ -10,6 +10,7 @@ import {
 } from 'gemdex-core';
 import type { MemoryBackend } from 'gemdex-core';
 import type { ServerConfig } from './config.js';
+import { createPostgresPool, migrateDatabase, PostgresMemoryBackend } from './postgres.js';
 
 // Read the version from package.json so it never drifts from the published
 // version. createRequire works in ESM and resolves relative to this module
@@ -171,10 +172,22 @@ export function createServer({ store = null, token, unsafeDevNoAuth = false, all
 /**
  * Start the server and log the bound address.
  */
-export function startServer(config: ServerConfig, store?: MemoryBackend | null): Promise<http.Server> {
+export async function startServer(config: ServerConfig, store?: MemoryBackend | null): Promise<http.Server> {
+    let resolvedStore = store ?? null;
+    if (!resolvedStore && config.databaseUrl) {
+        const pool = createPostgresPool(config.databaseUrl);
+        try {
+            await migrateDatabase(pool);
+        } catch (error) {
+            await pool.end().catch(() => undefined);
+            throw error;
+        }
+        resolvedStore = new PostgresMemoryBackend({ pool });
+    }
+
     return new Promise((resolve) => {
         const server = createServer({
-            store: store ?? null,
+            store: resolvedStore,
             token: config.token,
             unsafeDevNoAuth: config.unsafeDevNoAuth,
             allowedOrigins: config.allowedOrigins,
