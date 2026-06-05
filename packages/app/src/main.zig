@@ -20,18 +20,127 @@ extern fn gemdex_sparkle_start() void;
 
 const command_policies = [_]zero_native.BridgeCommandPolicy{
     .{ .name = "gemdex.getApiBase", .origins = &bridge_origins },
+    .{ .name = "gemdex.getStatus", .origins = &bridge_origins },
+    .{ .name = "gemdex.bootstrap", .origins = &bridge_origins },
 };
 
-/// Gemdex Memory — a manage-only desktop app. The Zig shell is brain-dead:
-/// it opens the window, spawns the Node sidecar (`gemdex serve`) on launch,
-/// discovers the localhost port and per-launch auth token the sidecar printed,
-/// hands both to the WebView via the `gemdex.getApiBase` bridge command, and
-/// kills the sidecar on exit. All memory logic lives in the Node sidecar
-/// (gemdex-core + LanceDB).
+/// Lifecycle of the Node sidecar, owned entirely by the Zig shell and surfaced
+/// to the WebView through `gemdex.getStatus`. First launch only ever *probes*
+/// an already-available runtime (offline, no network); installing the
+/// `gemdex-mcp` package is reserved for an explicit, UI-approved action
+/// (`gemdex.bootstrap`). No memory logic lives here — Zig only
+/// installs/starts/checks the sidecar.
+const Phase = enum(u8) {
+    /// Launch in progress; nothing decided yet.
+    starting = 0,
+    /// Sidecar is up; `api_base` + `api_token` are valid.
+    ready = 1,
+    /// node/npx are not on the login-shell PATH — not installable by us.
+    needs_node = 2,
+    /// Node is present but the sidecar package isn't available offline; the UI
+    /// may request a (network) install.
+    needs_bootstrap = 3,
+    /// A bootstrap install/start is running on the worker thread.
+    installing = 4,
+    /// A start or install attempt failed; the UI can retry.
+    failed = 5,
+};
+
+/// How to launch `gemdex serve`. The shell command differs only in how the
+/// package is resolved; all three exec Node so `stop()` can reap the process.
+const ServeMode = enum { dev, offline, install };
+
+fn phaseName(phase: Phase) []const u8 {
+    return switch (phase) {
+        .starting => "starting",
+        .ready => "ready",
+        .needs_node => "needs_node",
+        .needs_bootstrap => "needs_bootstrap",
+        .installing => "installing",
+        // Surfaced to the frontend as the generic recoverable error state.
+        .failed => "error",
+    };
+}
+
+/// Decide what launch should do from two facts. Pure + unit-tested.
+const LaunchDecision = enum { dev_start, probe_offline, needs_node };
+fn decideLaunch(has_serve_cmd: bool, node_available: bool) LaunchDecision {
+    if (has_serve_cmd) return .dev_start;
+    if (!node_available) return .needs_node;
+    return .probe_offline;
+}
+
+/// The shell command for a given serve mode. `exec` lets the shell hand its pid
+/// to Node so our kill reaps the sidecar. `--offline` resolves only from the
+/// npm/npx cache (no network); `-y` permits the one network install.
+fn serveCommand(mode: ServeMode) []const u8 {
+    return switch (mode) {
+        .dev => "exec node \"$GEMDEX_SERVE_CMD\" serve --port 0",
+        .offline => "exec npx --offline gemdex-mcp serve --port 0",
+        .install => "exec npx -y gemdex-mcp serve --port 0",
+    };
+}
+
+/// Render the `gemdex.getStatus` payload. Pure + unit-tested. `detail` must be
+/// free of `"`/`\` (we only ever pass fixed, quote-free messages).
+fn writeStatusJson(
+    output: []u8,
+    phase: Phase,
+    base: []const u8,
+    token: []const u8,
+    detail: []const u8,
+    previously_installed: bool,
+) []const u8 {
+    return std.fmt.bufPrint(
+        output,
+        "{{\"phase\":\"{s}\",\"base\":\"{s}\",\"token\":\"{s}\",\"detail\":\"{s}\",\"previouslyInstalled\":{}}}",
+        .{ phaseName(phase), base, token, detail, previously_installed },
+    ) catch output[0..0];
+}
+
+fn writeAcceptedJson(output: []u8, accepted: bool) []const u8 {
+    return std.fmt.bufPrint(output, "{{\"accepted\":{}}}", .{accepted}) catch output[0..0];
+}
+
+/// Extract the `install` flag from the trusted bootstrap payload. The frontend
+/// sends compact JSON (`{"install":true}`); we find the quoted `"install"` key,
+/// skip to its `:` value, and require the literal `true` token — so sibling keys
+/// like `"installing"` or string values can't trip a false positive.
+fn parseInstallFlag(payload: []const u8) bool {
+    const key = "\"install\"";
+    const key_idx = std.mem.indexOf(u8, payload, key) orelse return false;
+    const after_key = key_idx + key.len;
+    const colon_rel = std.mem.indexOfScalar(u8, payload[after_key..], ':') orelse return false;
+    var i = after_key + colon_rel + 1;
+    while (i < payload.len and (payload[i] == ' ' or payload[i] == '\t')) : (i += 1) {}
+    return std.mem.startsWith(u8, payload[i..], "true");
+}
+
+/// Gemdex Memory — a manage-only desktop app. The Zig shell opens the window,
+/// brings up the Node sidecar (`gemdex serve`), discovers the localhost port +
+/// per-launch auth token it printed, hands both to the WebView via the
+/// `gemdex.getApiBase` bridge command, and kills the sidecar on exit. Slow,
+/// user-approved installs run on a worker thread so the UI thread never blocks;
+/// the WebView polls `gemdex.getStatus` for progress. All memory logic lives in
+/// the Node sidecar (gemdex-core + LanceDB).
 const App = struct {
     env_map: *std.process.Environ.Map,
     io: std.Io,
     gpa: std.mem.Allocator,
+
+    /// Guards the cross-thread fields below (everything the worker writes and
+    /// the bridge handlers read). Critical sections are tiny.
+    mutex: std.Io.Mutex = .init,
+    /// Current `Phase`. The worker writes it with `.release` and bridge handlers
+    /// read it with `.acquire`; that pair also publishes the mutex-guarded
+    /// `api_base`/`api_token`/`detail` writes that precede a `.ready` transition.
+    phase: std.atomic.Value(u8) = .init(@intFromEnum(Phase.starting)),
+    /// True while the bootstrap worker thread is running; blocks re-entry.
+    worker_busy: std.atomic.Value(bool) = .init(false),
+    /// Set by `stop()` so an in-flight worker bails out instead of racing the
+    /// teardown of the sidecar it's bringing up.
+    shutting_down: std.atomic.Value(bool) = .init(false),
+
     sidecar: ?std.process.Child = null,
     api_base_buf: [64]u8 = undefined,
     api_base: []const u8 = "",
@@ -39,9 +148,15 @@ const App = struct {
     /// the handshake buffer below; `api_token` is a slice into it.
     handshake_buf: [256]u8 = undefined,
     api_token: []const u8 = "",
-    /// JSON response buffer for the getApiBase bridge handler.
-    bridge_resp_buf: [256]u8 = undefined,
-    handlers: [1]zero_native.BridgeHandler = undefined,
+    /// Last actionable status message (fixed, quote-free strings only).
+    detail_buf: [256]u8 = undefined,
+    detail: []const u8 = "",
+    /// Whether a prior launch already bootstrapped the sidecar (marker present).
+    previously_installed: bool = false,
+
+    /// JSON response buffer for the bridge handlers.
+    bridge_resp_buf: [512]u8 = undefined,
+    handlers: [3]zero_native.BridgeHandler = undefined,
 
     fn app(self: *@This()) zero_native.App {
         return .{
@@ -63,94 +178,176 @@ const App = struct {
     }
 
     fn bridge(self: *@This()) zero_native.BridgeDispatcher {
-        self.handlers = .{.{ .name = "gemdex.getApiBase", .context = self, .invoke_fn = getApiBase }};
+        self.handlers = .{
+            .{ .name = "gemdex.getApiBase", .context = self, .invoke_fn = getApiBase },
+            .{ .name = "gemdex.getStatus", .context = self, .invoke_fn = getStatus },
+            .{ .name = "gemdex.bootstrap", .context = self, .invoke_fn = bootstrap },
+        };
         return .{
             .policy = .{ .enabled = true, .commands = &command_policies },
             .registry = .{ .handlers = &self.handlers },
         };
     }
 
-    /// Build the sidecar argv. We launch through the user's login shell
-    /// (`$SHELL -lc`) so the sidecar inherits the real interactive PATH: a
-    /// .app launched from Finder/Dock gets only a minimal PATH
-    /// (`/usr/bin:/bin:/usr/sbin:/sbin`), which has neither Homebrew nor nvm,
-    /// so a bare `npx`/`node` would not be found. A login shell sources the
-    /// profile where `brew shellenv` (etc.) live and recovers it.
-    ///
-    /// Defaults to `npx -y gemdex-mcp serve --port 0` (no manual install when
-    /// system Node is present). For local development, set GEMDEX_SERVE_CMD to
-    /// a node entry script to run that instead.
-    fn buildArgv(self: *@This(), buf: *[3][]const u8) []const []const u8 {
-        const shell = blk: {
-            if (self.env_map.get("SHELL")) |s| {
-                if (s.len > 0) break :blk s;
-            }
-            break :blk "/bin/zsh";
-        };
-        buf[0] = shell;
-        buf[1] = "-lc";
+    fn setPhase(self: *@This(), phase: Phase) void {
+        self.phase.store(@intFromEnum(phase), .release);
+    }
 
-        // GEMDEX_SERVE_CMD is inherited by the child shell, so the command
-        // strings can reference it directly. `exec` lets the shell hand its
-        // pid to Node so our `stop()` kill actually reaps the sidecar.
-        if (self.env_map.get("GEMDEX_SERVE_CMD")) |cmd| {
-            if (cmd.len > 0) {
-                buf[2] = "exec node \"$GEMDEX_SERVE_CMD\" serve --port 0";
-                return buf[0..3];
-            }
+    fn currentPhase(self: *@This()) Phase {
+        return @enumFromInt(self.phase.load(.acquire));
+    }
+
+    fn setDetail(self: *@This(), message: []const u8) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const n = @min(message.len, self.detail_buf.len);
+        @memcpy(self.detail_buf[0..n], message[0..n]);
+        self.detail = self.detail_buf[0..n];
+    }
+
+    /// The user's login shell, used as `$SHELL -lc <cmd>` so the sidecar
+    /// inherits the real interactive PATH: a .app launched from Finder/Dock
+    /// gets only a minimal PATH (`/usr/bin:/bin:/usr/sbin:/sbin`), which has
+    /// neither Homebrew nor nvm, so a bare `npx`/`node` would not be found. A
+    /// login shell sources the profile where `brew shellenv` (etc.) live.
+    fn shellPath(self: *@This()) []const u8 {
+        if (self.env_map.get("SHELL")) |s| {
+            if (s.len > 0) return s;
         }
-        buf[2] = "exec npx -y gemdex-mcp serve --port 0";
+        return "/bin/zsh";
+    }
+
+    fn hasServeCmd(self: *@This()) bool {
+        if (self.env_map.get("GEMDEX_SERVE_CMD")) |cmd| return cmd.len > 0;
+        return false;
+    }
+
+    fn buildServeArgv(self: *@This(), buf: *[3][]const u8, mode: ServeMode) []const []const u8 {
+        buf[0] = self.shellPath();
+        buf[1] = "-lc";
+        buf[2] = serveCommand(mode);
         return buf[0..3];
     }
 
-    fn start(context: *anyopaque, runtime: *zero_native.Runtime) anyerror!void {
-        _ = runtime;
-        const self: *@This() = @ptrCast(@alignCast(context));
-        self.api_base = "";
-        self.api_token = "";
+    /// Whether `node` and `npx` resolve on the login-shell PATH.
+    fn nodeAvailable(self: *@This()) bool {
+        const result = std.process.run(self.gpa, self.io, .{
+            .argv = &.{ self.shellPath(), "-lc", "command -v node >/dev/null 2>&1 && command -v npx >/dev/null 2>&1" },
+            .stdout_limit = .limited(256),
+            .stderr_limit = .limited(256),
+        }) catch return false;
+        defer self.gpa.free(result.stdout);
+        defer self.gpa.free(result.stderr);
+        return switch (result.term) {
+            .exited => |code| code == 0,
+            else => false,
+        };
+    }
 
+    /// Spawn `gemdex serve` in `mode`, read its handshake, and on success store
+    /// the base URL + token and flip to `.ready`. Returns whether the sidecar
+    /// came up. Never installs unless `mode == .install`. Called from the main
+    /// thread at launch and the worker thread during bootstrap (never both at
+    /// once — `worker_busy` gates re-entry).
+    ///
+    /// The freshly spawned child is kept in a *local* during the handshake (we
+    /// never alias `&self.sidecar.?`, which a concurrent `resetSidecar` could
+    /// null out from under us) and only published into `self.sidecar` once it's
+    /// up. If shutdown was requested while we were starting, the local child is
+    /// reaped here so it never leaks.
+    fn startSidecar(self: *@This(), mode: ServeMode) bool {
         var argv_buf: [3][]const u8 = undefined;
-        const argv = self.buildArgv(&argv_buf);
+        const argv = self.buildServeArgv(&argv_buf, mode);
 
-        const child = std.process.spawn(self.io, .{
+        var child = std.process.spawn(self.io, .{
             .argv = argv,
             .stdin = .ignore,
             .stdout = .pipe,
             .stderr = .inherit,
         }) catch |err| {
             std.debug.print("[gemdex] failed to spawn sidecar: {s}\n", .{@errorName(err)});
-            return;
+            return false;
         };
-        self.sidecar = child;
 
-        // Read the `PORT=<n> TOKEN=<hex>` handshake line the sidecar prints on bind.
-        const handshake = readHandshake(self.io, &self.sidecar.?, &self.handshake_buf) catch |err| {
+        var local_buf: [256]u8 = undefined;
+        const handshake = readHandshake(self.io, &child, &local_buf) catch |err| {
             std.debug.print("[gemdex] failed to read sidecar handshake: {s}\n", .{@errorName(err)});
-            self.resetSidecar();
-            return;
+            child.kill(self.io);
+            return false;
         };
-        if (handshake.port == 0) {
-            std.debug.print("[gemdex] sidecar did not report a port\n", .{});
-            self.resetSidecar();
-            return;
+        if (handshake.port == 0 or self.shutting_down.load(.acquire)) {
+            child.kill(self.io);
+            return false;
         }
 
+        // Publish the live child + connection details atomically.
+        self.mutex.lockUncancelable(self.io);
+        self.sidecar = child;
         self.api_base = std.fmt.bufPrint(&self.api_base_buf, "http://127.0.0.1:{d}", .{handshake.port}) catch "";
-        self.api_token = handshake.token;
+        const n = @min(handshake.token.len, self.handshake_buf.len);
+        @memcpy(self.handshake_buf[0..n], handshake.token[0..n]);
+        self.api_token = self.handshake_buf[0..n];
+        self.detail = "";
+        self.mutex.unlock(self.io);
+        self.setPhase(.ready);
         std.debug.print("[gemdex] sidecar ready at {s} (token length={d})\n", .{ self.api_base, self.api_token.len });
+        return true;
+    }
 
-        // Start Sparkle's auto-updater. `start` runs on the main thread from
-        // zero-native's launch event, which is Sparkle's required init point.
-        if (sparkle_enabled) gemdex_sparkle_start();
+    fn start(context: *anyopaque, runtime: *zero_native.Runtime) anyerror!void {
+        _ = runtime;
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.previously_installed = self.markerExists();
+
+        const decision = if (self.hasServeCmd())
+            decideLaunch(true, false)
+        else
+            decideLaunch(false, self.nodeAvailable());
+
+        switch (decision) {
+            .dev_start => {
+                if (!self.startSidecar(.dev)) {
+                    self.setDetail("Could not start the development sidecar (GEMDEX_SERVE_CMD).");
+                    self.setPhase(.failed);
+                }
+            },
+            .probe_offline => {
+                // Launch never installs: probe the cache only. A miss means the
+                // package isn't available yet, so we ask the UI to bootstrap.
+                if (!self.startSidecar(.offline)) {
+                    self.setDetail("The Gemdex memory sidecar isn't installed yet.");
+                    self.setPhase(.needs_bootstrap);
+                }
+            },
+            .needs_node => {
+                self.setDetail("Node.js (node + npx) was not found. Install Node 20+ and reopen Gemdex.");
+                self.setPhase(.needs_node);
+            },
+        }
+
+        // Start Sparkle's auto-updater once we're actually running. `start` runs
+        // on the main thread from zero-native's launch event, which is Sparkle's
+        // required init point.
+        if (sparkle_enabled and self.currentPhase() == .ready) gemdex_sparkle_start();
     }
 
     fn stop(context: *anyopaque, runtime: *zero_native.Runtime) anyerror!void {
         _ = runtime;
         const self: *@This() = @ptrCast(@alignCast(context));
+        // Signal any in-flight bootstrap worker to stop publishing, then wait
+        // briefly for it to finish so we don't kill a child it's still touching.
+        self.shutting_down.store(true, .release);
+        var waited_ms: i64 = 0;
+        while (self.worker_busy.load(.acquire) and waited_ms < 1500) {
+            self.io.sleep(std.Io.Duration.fromMilliseconds(20), .awake) catch break;
+            waited_ms += 20;
+        }
         self.resetSidecar();
     }
 
     fn resetSidecar(self: *@This()) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         if (self.sidecar) |*child| {
             child.kill(self.io);
             self.sidecar = null;
@@ -159,10 +356,106 @@ const App = struct {
         self.api_token = "";
     }
 
+    /// Bootstrap worker: runs the slow install/start off the UI thread. On
+    /// success `startSidecar` flips to `.ready` and we drop a marker; on failure
+    /// we record an actionable message and flip to `.failed`.
+    fn bootstrapWorker(self: *@This(), install: bool) void {
+        defer self.worker_busy.store(false, .release);
+        if (self.startSidecar(if (install) .install else .offline)) {
+            self.writeMarker();
+            return;
+        }
+        if (install) {
+            self.setDetail("Install failed. Check your internet connection and that Node/npm work, then retry.");
+        } else {
+            self.setDetail("Could not start the memory sidecar. Retry, or reinstall it.");
+        }
+        self.setPhase(.failed);
+    }
+
     fn getApiBase(context: *anyopaque, invocation: zero_native.bridge.Invocation, output: []u8) anyerror![]const u8 {
         _ = invocation;
         const self: *@This() = @ptrCast(@alignCast(context));
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         return std.fmt.bufPrint(output, "{{\"base\":\"{s}\",\"token\":\"{s}\"}}", .{ self.api_base, self.api_token });
+    }
+
+    fn getStatus(context: *anyopaque, invocation: zero_native.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        _ = invocation;
+        const self: *@This() = @ptrCast(@alignCast(context));
+        const phase = self.currentPhase();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return writeStatusJson(output, phase, self.api_base, self.api_token, self.detail, self.previously_installed);
+    }
+
+    /// UI-approved bootstrap. `{"install":true}` permits the one network
+    /// install; `{"install":false}` is a cache-only retry. Kicks off the worker
+    /// thread and returns immediately so the UI thread never blocks; the WebView
+    /// polls `gemdex.getStatus` for the result.
+    fn bootstrap(context: *anyopaque, invocation: zero_native.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        const install = parseInstallFlag(invocation.request.payload);
+
+        // Claim the worker slot; reject if one is already running.
+        if (self.worker_busy.cmpxchgStrong(false, true, .acq_rel, .monotonic) != null) {
+            return writeAcceptedJson(output, false);
+        }
+
+        self.setPhase(.installing);
+        self.setDetail(if (install) "Installing the Gemdex memory sidecar…" else "Starting the Gemdex memory sidecar…");
+        // Drop any half-started sidecar before re-launching.
+        self.resetSidecar();
+
+        const thread = std.Thread.spawn(.{}, bootstrapWorker, .{ self, install }) catch {
+            self.worker_busy.store(false, .release);
+            self.setDetail("Could not start the installer. Please retry.");
+            self.setPhase(.failed);
+            return writeAcceptedJson(output, false);
+        };
+        thread.detach();
+        return writeAcceptedJson(output, true);
+    }
+
+    /// Absolute path to the bootstrap marker (`~/.gemdex/desktop.json`). Returns
+    /// the slice written into `buf`, or "" if HOME is unavailable / too long.
+    fn markerPath(self: *@This(), buf: []u8) []const u8 {
+        const home = self.env_map.get("HOME") orelse return "";
+        if (home.len == 0) return "";
+        const path = std.fmt.bufPrint(buf, "{s}/.gemdex/desktop.json", .{home}) catch return "";
+        // Guard against a silently-truncated path from an over-long HOME.
+        if (!std.mem.endsWith(u8, path, "/.gemdex/desktop.json")) return "";
+        return path;
+    }
+
+    fn markerExists(self: *@This()) bool {
+        var buf: [1024]u8 = undefined;
+        const path = self.markerPath(&buf);
+        if (path.len == 0) return false;
+        std.Io.Dir.cwd().access(self.io, path, .{}) catch return false;
+        return true;
+    }
+
+    /// Persist non-secret runtime state recording that the sidecar was
+    /// bootstrapped. Best-effort; never blocks startup on failure. This is the
+    /// only state the shell writes, and it is not the memory store.
+    fn writeMarker(self: *@This()) void {
+        const home = self.env_map.get("HOME") orelse return;
+        if (home.len == 0) return;
+        var dir_buf: [1024]u8 = undefined;
+        const dir = std.fmt.bufPrint(&dir_buf, "{s}/.gemdex", .{home}) catch return;
+        var path_buf: [1024]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "{s}/desktop.json", .{dir}) catch return;
+        const now_ms = std.Io.Clock.now(.real, self.io).toMilliseconds();
+        var data_buf: [128]u8 = undefined;
+        const data = std.fmt.bufPrint(&data_buf, "{{\"sidecarBootstrappedAt\":{d},\"method\":\"npx\"}}", .{now_ms}) catch return;
+        var cwd = std.Io.Dir.cwd();
+        cwd.createDirPath(self.io, dir) catch return;
+        cwd.writeFile(self.io, .{ .sub_path = path, .data = data }) catch return;
+        self.mutex.lockUncancelable(self.io);
+        self.previously_installed = true;
+        self.mutex.unlock(self.io);
     }
 };
 
@@ -272,4 +565,60 @@ test "parseHandshakeLine extracts port and token" {
     // Malformed line
     const h4 = parseHandshakeLine("no port here", &dummy);
     try std.testing.expectEqual(@as(u16, 0), h4.port);
+}
+
+test "decideLaunch prefers dev, then probes, then needs node" {
+    // GEMDEX_SERVE_CMD set → dev start regardless of node availability.
+    try std.testing.expectEqual(LaunchDecision.dev_start, decideLaunch(true, false));
+    try std.testing.expectEqual(LaunchDecision.dev_start, decideLaunch(true, true));
+    // No dev cmd, node present → offline probe (never installs at launch).
+    try std.testing.expectEqual(LaunchDecision.probe_offline, decideLaunch(false, true));
+    // No dev cmd, no node → not installable by us.
+    try std.testing.expectEqual(LaunchDecision.needs_node, decideLaunch(false, false));
+}
+
+test "serveCommand never installs except in install mode" {
+    try std.testing.expect(std.mem.indexOf(u8, serveCommand(.dev), "GEMDEX_SERVE_CMD") != null);
+    // The offline probe must not authorize an install (`-y`).
+    try std.testing.expect(std.mem.indexOf(u8, serveCommand(.offline), "--offline") != null);
+    try std.testing.expect(std.mem.indexOf(u8, serveCommand(.offline), "-y") == null);
+    // Only install mode authorizes the network install.
+    try std.testing.expect(std.mem.indexOf(u8, serveCommand(.install), "-y") != null);
+}
+
+test "writeStatusJson renders phase, fields, and error alias" {
+    var buf: [512]u8 = undefined;
+
+    const ready = writeStatusJson(&buf, .ready, "http://127.0.0.1:5051", "abc", "", true);
+    try std.testing.expect(std.mem.indexOf(u8, ready, "\"phase\":\"ready\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ready, "\"base\":\"http://127.0.0.1:5051\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ready, "\"token\":\"abc\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ready, "\"previouslyInstalled\":true") != null);
+
+    // `.failed` is surfaced to the frontend as the generic "error" phase.
+    const failed = writeStatusJson(&buf, .failed, "", "", "boom", false);
+    try std.testing.expect(std.mem.indexOf(u8, failed, "\"phase\":\"error\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, failed, "\"detail\":\"boom\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, failed, "\"previouslyInstalled\":false") != null);
+
+    const needs = writeStatusJson(&buf, .needs_bootstrap, "", "", "", false);
+    try std.testing.expect(std.mem.indexOf(u8, needs, "\"phase\":\"needs_bootstrap\"") != null);
+}
+
+test "writeAcceptedJson emits the accepted flag" {
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("{\"accepted\":true}", writeAcceptedJson(&buf, true));
+    try std.testing.expectEqualStrings("{\"accepted\":false}", writeAcceptedJson(&buf, false));
+}
+
+test "parseInstallFlag reads the install boolean" {
+    try std.testing.expect(parseInstallFlag("{\"install\":true}"));
+    try std.testing.expect(parseInstallFlag("{\"install\": true}"));
+    try std.testing.expect(!parseInstallFlag("{\"install\":false}"));
+    try std.testing.expect(!parseInstallFlag("null"));
+    try std.testing.expect(!parseInstallFlag("{}"));
+    // Sibling key must not trip a false positive.
+    try std.testing.expect(!parseInstallFlag("{\"installing\":true}"));
+    // String value, not the boolean literal.
+    try std.testing.expect(!parseInstallFlag("{\"install\":\"true\"}"));
 }

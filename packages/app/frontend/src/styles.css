@@ -682,6 +682,37 @@ button:disabled {
   margin-top: 18px;
 }
 
+.recovery-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 16px 0 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.spinner {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--rust);
+  border-radius: 50%;
+  animation: gemdex-spin 0.8s linear infinite;
+}
+
+@keyframes gemdex-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation-duration: 2s;
+  }
+}
+
 .editor {
   display: flex;
   flex-direction: column;

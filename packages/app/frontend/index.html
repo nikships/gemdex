@@ -66,10 +66,15 @@
             <h2 id="recovery-title">Remote memory store unavailable</h2>
             <p id="recovery-message"></p>
             <div class="recovery-actions">
+              <button type="button" id="recovery-bootstrap" class="primary" hidden>Install &amp; start</button>
               <button type="button" id="recovery-settings" class="primary">Open Storage settings</button>
               <button type="button" id="recovery-local">Use local storage</button>
               <button type="button" id="recovery-retry">Retry connection</button>
             </div>
+            <p id="recovery-progress" class="recovery-progress" hidden>
+              <span class="spinner" aria-hidden="true"></span>
+              <span id="recovery-progress-text"></span>
+            </p>
           </div>
 
           <div class="placeholder" id="placeholder">

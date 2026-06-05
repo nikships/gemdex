@@ -41,9 +41,12 @@ const els = {
   recoveryPanel: document.querySelector("#recovery-panel"),
   recoveryTitle: document.querySelector("#recovery-title"),
   recoveryMessage: document.querySelector("#recovery-message"),
+  recoveryBootstrap: document.querySelector("#recovery-bootstrap"),
   recoverySettings: document.querySelector("#recovery-settings"),
   recoveryLocal: document.querySelector("#recovery-local"),
   recoveryRetry: document.querySelector("#recovery-retry"),
+  recoveryProgress: document.querySelector("#recovery-progress"),
+  recoveryProgressText: document.querySelector("#recovery-progress-text"),
   placeholder: document.querySelector("#placeholder"),
   editor: document.querySelector("#editor"),
   title: document.querySelector("#title-input"),
@@ -115,6 +118,9 @@ const listThumbnailObjectUrls = new Set();
 let settingsOpener = null;
 let confirmOpener = null;
 let confirmResolver = null;
+// Handle for the sidecar status poll loop (null when not polling).
+let pollHandle = null;
+const POLL_INTERVAL_MS = 700;
 
 const focusableSelector = [
   "a[href]",
@@ -162,9 +168,14 @@ function trapFocus(event, root) {
   }
 }
 
+/** Whether the native Zig shell's bridge is available (false in dev/browser/tests). */
+function hasBridge() {
+  return Boolean(window.zero && typeof window.zero.invoke === "function");
+}
+
 async function resolveApiBase() {
   // Prefer the base URL handed to us by the native shell.
-  if (window.zero && typeof window.zero.invoke === "function") {
+  if (hasBridge()) {
     try {
       const res = await window.zero.invoke("gemdex.getApiBase", {});
       if (res && typeof res.base === "string" && res.base.length > 0) {
@@ -181,6 +192,38 @@ async function resolveApiBase() {
   // Dev / browser fallback: assume a sidecar on the conventional dev port,
   // else same origin.
   return "";
+}
+
+/**
+ * Ask the native shell for the current sidecar lifecycle phase. Returns null
+ * when the bridge is unavailable (dev / browser / tests) so callers fall back
+ * to the legacy health-poll path.
+ */
+async function fetchStatus() {
+  if (!hasBridge()) return null;
+  try {
+    const res = await window.zero.invoke("gemdex.getStatus", {});
+    if (res && typeof res.phase === "string") return res;
+  } catch (err) {
+    console.warn("getStatus bridge failed:", err);
+  }
+  return null;
+}
+
+/**
+ * Request a UI-approved bootstrap. `install` true permits the one-time network
+ * install; false is a cache-only retry. The shell starts the work on a
+ * background thread and returns immediately — we then poll fetchStatus().
+ */
+async function requestBootstrap(install) {
+  if (!hasBridge()) return false;
+  try {
+    const res = await window.zero.invoke("gemdex.bootstrap", { install });
+    return Boolean(res?.accepted);
+  } catch (err) {
+    console.warn("bootstrap bridge failed:", err);
+    return false;
+  }
 }
 
 // Per-launch auth token header for every request. The sidecar requires it on
@@ -978,9 +1021,78 @@ function renderBackendBadge() {
 
 function clearRecovery() {
   els.recoveryPanel.hidden = true;
+  els.recoveryBootstrap.hidden = true;
   els.recoverySettings.hidden = false;
   els.recoveryLocal.hidden = false;
   els.recoveryRetry.hidden = true;
+  els.recoveryProgress.hidden = true;
+}
+
+function setRecoveryProgress(message = "") {
+  els.recoveryProgressText.textContent = message;
+  els.recoveryProgress.hidden = message.length === 0;
+}
+
+/**
+ * First-run bootstrap recovery. Shown when the native shell reports the sidecar
+ * isn't installed yet (`needs_bootstrap`) or a previous install/start failed
+ * (`error`). Offers a single approved install action; the actual install runs
+ * natively in the Zig shell.
+ */
+function showBootstrapRecovery({ title, message, installLabel = "Install & start", progress = "" } = {}) {
+  els.recoveryTitle.textContent = title;
+  els.recoveryMessage.textContent = message;
+  els.recoveryBootstrap.textContent = installLabel;
+  els.recoveryBootstrap.hidden = false;
+  els.recoverySettings.hidden = true;
+  els.recoveryLocal.hidden = true;
+  els.recoveryRetry.hidden = true;
+  setRecoveryProgress(progress);
+  els.recoveryPanel.hidden = false;
+  els.placeholder.hidden = true;
+  els.editor.hidden = true;
+  els.recoveryBootstrap.disabled = false;
+  showSetup(false);
+  hideSimilar();
+}
+
+/**
+ * `installing` phase: native install/start in progress. No actions — just a
+ * spinner and message; the poller advances to ready/error.
+ */
+function showInstallingRecovery(message) {
+  els.recoveryTitle.textContent = "Setting up Gemdex";
+  els.recoveryMessage.textContent = "";
+  els.recoveryBootstrap.hidden = true;
+  els.recoverySettings.hidden = true;
+  els.recoveryLocal.hidden = true;
+  els.recoveryRetry.hidden = true;
+  setRecoveryProgress(message || "Working…");
+  els.recoveryPanel.hidden = false;
+  els.placeholder.hidden = true;
+  els.editor.hidden = true;
+  showSetup(false);
+  hideSimilar();
+}
+
+/**
+ * `needs_node` phase: a prerequisite we can't install for the user. Show a
+ * specific, actionable error with a retry (re-checks after they install Node).
+ */
+function showNodeMissingRecovery(message) {
+  els.recoveryTitle.textContent = "Node.js is required";
+  els.recoveryMessage.textContent = message
+    || "Gemdex needs Node.js (node + npx) on your PATH. Install Node 20+ from nodejs.org, then retry.";
+  els.recoveryBootstrap.hidden = true;
+  els.recoverySettings.hidden = true;
+  els.recoveryLocal.hidden = true;
+  els.recoveryRetry.hidden = false;
+  setRecoveryProgress();
+  els.recoveryPanel.hidden = false;
+  els.placeholder.hidden = true;
+  els.editor.hidden = true;
+  showSetup(false);
+  hideSimilar();
 }
 
 function showRemoteRecovery(error) {
@@ -1233,6 +1345,7 @@ function wireEvents() {
   els.recoverySettings.addEventListener("click", openSettings);
   els.recoveryLocal.addEventListener("click", () => applyMode("local"));
   els.recoveryRetry.addEventListener("click", initAfterEvents);
+  els.recoveryBootstrap.addEventListener("click", startBootstrap);
   els.settingsClose.addEventListener("click", closeSettings);
   els.settingsModal.addEventListener("click", (event) => {
     if (event.target === els.settingsModal) closeSettings();
@@ -1366,8 +1479,21 @@ async function init() {
 
 async function initAfterEvents() {
   renderBackendBadge();
-  apiBase = await resolveApiBase();
   setStatus("waiting for memory store…");
+  // With the native shell we drive off its lifecycle phase (which knows about
+  // bootstrap/install). Without it (dev / browser / tests) we keep the legacy
+  // health-poll path so nothing else has to change.
+  const status = await fetchStatus();
+  if (!status) {
+    await legacyConnect();
+    return;
+  }
+  await handlePhase(status);
+}
+
+/** Legacy connect path used when the native status bridge is unavailable. */
+async function legacyConnect() {
+  apiBase = await resolveApiBase();
   const healthy = await waitForHealth();
   if (!healthy) {
     showSetup(false);
@@ -1376,6 +1502,99 @@ async function initAfterEvents() {
     return;
   }
   if (!(await syncConfigGate())) setStatus("API key required");
+}
+
+/**
+ * React to one sidecar lifecycle phase reported by the native shell. `ready`
+ * connects normally; transient phases poll; the rest render targeted recovery.
+ */
+async function handlePhase(status) {
+  switch (status.phase) {
+    case "ready":
+      apiBase = await resolveApiBase();
+      clearRecovery();
+      if (!(await syncConfigGate())) setStatus("API key required");
+      return;
+    case "needs_bootstrap":
+      showBootstrapRecovery({
+        title: status.previouslyInstalled ? "Reconnect the memory store" : "Finish setting up Gemdex",
+        message: status.detail
+          || "Gemdex needs to install its local memory sidecar before you can start. This downloads the Node package once.",
+        installLabel: status.previouslyInstalled ? "Reinstall & start" : "Install & start",
+      });
+      setStatus("Setup required", true);
+      return;
+    case "installing":
+      showInstallingRecovery(status.detail);
+      setStatus("Setting up…");
+      pollStatus();
+      return;
+    case "needs_node":
+      showNodeMissingRecovery(status.detail);
+      setStatus("Node.js is required", true);
+      return;
+    case "error":
+      showBootstrapRecovery({
+        title: "Setup didn’t finish",
+        message: status.detail || "The memory sidecar could not start.",
+        installLabel: "Try again",
+      });
+      setStatus("Setup failed", true);
+      return;
+    case "starting":
+    default:
+      setStatus("waiting for memory store…");
+      pollStatus();
+      return;
+  }
+}
+
+/**
+ * Poll the native status bridge while the sidecar is in a transient phase
+ * (starting / installing). Stops as soon as a terminal phase is reached and
+ * hands off to handlePhase().
+ */
+async function pollStatus() {
+  if (pollHandle) return; // a poll loop is already running
+  const tick = async () => {
+    const status = await fetchStatus();
+    if (!status) {
+      pollHandle = null;
+      await legacyConnect();
+      return;
+    }
+    if (status.phase === "starting" || status.phase === "installing") {
+      if (status.phase === "installing") setRecoveryProgress(status.detail || "Working…");
+      pollHandle = setTimeout(tick, POLL_INTERVAL_MS);
+      return;
+    }
+    pollHandle = null;
+    await handlePhase(status);
+  };
+  pollHandle = setTimeout(tick, POLL_INTERVAL_MS);
+}
+
+/** Approve the native install/start, then poll until it resolves. */
+async function startBootstrap() {
+  // `error`/needs_bootstrap after a prior install means the package may already
+  // be cached, but a fresh user-approved action should still permit a network
+  // install — so always pass install:true from this button.
+  els.recoveryBootstrap.disabled = true;
+  showInstallingRecovery("Installing the Gemdex memory sidecar…");
+  setStatus("Installing…");
+  const accepted = await requestBootstrap(true);
+  if (!accepted) {
+    // Either the bridge is gone or a worker is already busy; reflect status.
+    const status = await fetchStatus();
+    if (status) {
+      await handlePhase(status);
+    } else {
+      showSidecarRecovery();
+      setStatus("Could not start setup.", true);
+    }
+    return;
+  }
+  pollStatus();
 }
 
 if (!import.meta.vitest) {
@@ -1388,6 +1607,12 @@ export const __private = {
   syncConfigGate,
   showRemoteRecovery,
   showSidecarRecovery,
+  showBootstrapRecovery,
+  showNodeMissingRecovery,
+  showInstallingRecovery,
+  handlePhase,
+  startBootstrap,
+  clearRecovery,
   openSettings,
   closeSettings,
   confirmAction,
