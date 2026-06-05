@@ -29,6 +29,14 @@ local media into the WebView requires the relaxed `img-src` / `media-src` /
 `http://127.0.0.1:*` and `blob:`); keep that policy as tight as these features
 allow.
 
+Remote mode still talks only to the localhost sidecar. The frontend must never
+connect directly to a configured Gemdex Server, and the CSP must not be broadened
+to arbitrary remote origins for `connect-src`, media, frames, or objects. The
+sidecar owns outbound remote traffic because it can attach the stored bearer
+token without exposing it to frontend JavaScript; the WebView receives only the
+per-launch localhost base URL and request token. If a remote feature needs new
+network access, add a localhost sidecar route instead of widening the CSP.
+
 ## Architecture
 
 - **Zig shell** (`src/main.zig`): opens the window, applies the CSP /
