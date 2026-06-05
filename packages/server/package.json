@@ -1,0 +1,43 @@
+{
+    "name": "gemdex-server",
+    "version": "0.1.0",
+    "description": "Self-hostable Gemdex Server — the official BYOI remote backend HTTP service",
+    "type": "module",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "bin": {
+        "gemdex-server": "dist/index.js"
+    },
+    "scripts": {
+        "build": "pnpm clean && tsc --build --force",
+        "clean": "rimraf dist",
+        "lint": "eslint src --ext .ts",
+        "lint:fix": "eslint src --ext .ts --fix",
+        "typecheck": "tsc --noEmit",
+        "test": "node --import tsx --test src/*.test.ts",
+        "start": "tsx src/index.ts",
+        "prepublishOnly": "pnpm build"
+    },
+    "dependencies": {
+        "gemdex-core": "workspace:*"
+    },
+    "devDependencies": {
+        "@types/node": "^20.0.0",
+        "tsx": "^4.19.4",
+        "typescript": "^5.0.0"
+    },
+    "files": [
+        "dist",
+        "README.md"
+    ],
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/anand-92/gemdex.git",
+        "directory": "packages/server"
+    },
+    "license": "MIT",
+    "author": "Nikhil Anand",
+    "publishConfig": {
+        "access": "public"
+    }
+}

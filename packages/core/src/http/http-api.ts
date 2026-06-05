@@ -1,6 +1,6 @@
-import * as http from "http";
-import { SUPPORTED_MIME_TYPES } from "gemdex-core";
-import type { MemoryBackend } from "gemdex-core";
+import * as http from 'http';
+import { SUPPORTED_MIME_TYPES } from '../memory/attachment-validator';
+import type { MemoryBackend } from '../memory/backend';
 
 /**
  * Build CORS response headers for a given request context. When an

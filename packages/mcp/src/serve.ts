@@ -1,7 +1,7 @@
 import * as http from "http";
 import * as crypto from "crypto";
 import { MemoryBackend, envManager } from "gemdex-core";
-import { buildCorsHeaders, handleMemoryApiRequest, readBody, sendJson } from "./http-api.js";
+import { buildCorsHeaders, handleMemoryApiRequest, readBody, sendJson } from "gemdex-core";
 import { createConfig, GemdexConfig } from "./config.js";
 import { createMemoryBackend } from "./memory.js";
 

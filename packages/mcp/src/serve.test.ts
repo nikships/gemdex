@@ -7,7 +7,7 @@ import type { AddressInfo } from "node:net";
 import { createServer as httpServer } from "node:http";
 import { LanceDBVectorDatabase, LocalMemoryBackend, Embedding, EmbeddingVector, FileBlobStore } from "gemdex-core";
 import type { EmbeddingContent, MemoryBackend } from "gemdex-core";
-import { createMemoryApiHandler } from "./http-api.js";
+import { createMemoryApiHandler } from "gemdex-core";
 import { createServer } from "./serve.js";
 
 const DIM = 16;
