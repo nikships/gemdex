@@ -829,7 +829,7 @@ function renderBackendBadge() {
   els.backendBadge.textContent = backend.needsKey ? "Local: needs API key" : "Local backend";
   els.backendBadge.title = backend.needsKey
     ? "Local backend selected; API key required"
-    : "Active local backend on this Mac";
+    : "Active local backend";
 }
 
 function selectedRemoteName() {
@@ -916,8 +916,6 @@ async function applyMode(mode, name) {
       method: "POST",
       body: JSON.stringify({ mode, ...(name && { name }) }),
     });
-    await refreshConfigState();
-    renderSettings();
     if (!(await syncConfigGate())) setStatus("API key required");
   } catch (err) {
     showSettingsError(err.message);
@@ -1012,8 +1010,6 @@ async function removeSelectedRemote() {
     settingsState = await api(`/settings/remotes/${encodeURIComponent(name)}`, {
       method: "DELETE",
     });
-    await refreshConfigState();
-    renderSettings();
     await syncConfigGate();
   } catch (err) {
     showSettingsError(err.message);
