@@ -83,6 +83,7 @@ let apiToken = "";
 let memories = [];
 let selectedId = null; // null while editing/creating a brand-new memory
 let settingsState = null;
+let configState = null;
 
 // Working set of attachments for the open editor. Each item is either:
 //   { source: "existing", id, kind, mimeType, byteLength, caption, url }
@@ -707,8 +708,31 @@ function setStatus(text, isError = false) {
   els.status.classList.toggle("error", isError);
 }
 
+function updateConfigState(config) {
+  configState = config ?? null;
+  return configState;
+}
+
+async function refreshConfigState() {
+  return updateConfigState(await api("/config"));
+}
+
+function activeBackend() {
+  if (!configState) return null;
+  return {
+    mode: configState.mode,
+    configured: Boolean(configState.configured),
+    needsKey: Boolean(configState.needsKey),
+    activeRemote: configState.activeRemote ?? null,
+  };
+}
+
+function activeRemoteName() {
+  return activeBackend()?.activeRemote?.name ?? "";
+}
+
 function selectedRemoteName() {
-  return els.remoteSelect.value || settingsState?.activeRemote || "";
+  return els.remoteSelect.value || activeRemoteName() || "";
 }
 
 function showSettingsError(message = "") {
@@ -727,10 +751,11 @@ function renderSettings() {
     option.textContent = remoteOptionLabel(remote);
     els.remoteSelect.appendChild(option);
   }
-  if (settingsState.activeRemote) els.remoteSelect.value = settingsState.activeRemote;
+  const activeName = activeRemoteName();
+  if (activeName) els.remoteSelect.value = activeName;
   updateRemoteControls();
   els.remoteStatus.textContent = settingsState.mode === "remote"
-    ? `Using ${settingsState.activeRemote || "remote storage"}.`
+    ? `Using ${activeName || "remote storage"}.`
     : "Using the embedded local store.";
   els.remoteStatus.classList.remove("error", "success");
 }
@@ -770,7 +795,8 @@ async function openSettings() {
   els.remoteStatus.textContent = "Loading storage settings…";
   els.settingsModal.hidden = false;
   try {
-    await refreshSettings();
+    await Promise.all([refreshSettings(), refreshConfigState()]);
+    renderSettings();
   } catch (err) {
     showSettingsError(err.message);
   }
@@ -818,6 +844,8 @@ async function saveRemote(event) {
       els.remoteSelect.value = payload.name;
       updateRemoteControls();
     }
+    await refreshConfigState();
+    renderSettings();
     els.remoteStatus.textContent = `Saved ${payload.name}.`;
     els.remoteStatus.classList.add("success");
   } catch (err) {
@@ -863,7 +891,7 @@ async function importLocalToSelectedRemote() {
     els.remoteStatus.textContent = status.text;
     els.remoteStatus.classList.toggle("error", status.isError);
     els.remoteStatus.classList.toggle("success", !status.isError);
-    if (settingsState?.mode === "remote" && settingsState.activeRemote === name) {
+    if (activeBackend()?.mode === "remote" && activeRemoteName() === name) {
       await loadMemories();
     }
   } catch (err) {
@@ -883,7 +911,7 @@ async function removeSelectedRemote() {
       method: "DELETE",
     });
     renderSettings();
-    if (settingsState.mode === "local") await syncConfigGate();
+    await syncConfigGate();
   } catch (err) {
     showSettingsError(err.message);
   }
@@ -947,7 +975,8 @@ function showSetup(show) {
  * store is configured so callers can add their own not-configured messaging.
  */
 async function syncConfigGate() {
-  const config = await api("/config");
+  const config = await refreshConfigState();
+  if (settingsState) renderSettings();
   if (config.configured) {
     showSetup(false);
     await loadMemories();
@@ -968,6 +997,7 @@ async function submitApiKey(event) {
       method: "POST",
       body: JSON.stringify({ apiKey }),
     });
+    updateConfigState(body);
     if (!body?.configured) throw new Error("Key was not accepted.");
     els.apiKeyInput.value = "";
     showSetup(false);
