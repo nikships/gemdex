@@ -353,6 +353,22 @@ test("desktop settings configure, test, switch, migrate, and remove remotes with
         assert.equal(switchResponse.status, 200);
         assert.equal((await switchResponse.json() as any).activeRemote, 'prod');
 
+        const remoteConfig = await fetch(`${settingsBase}/config`);
+        assert.equal(remoteConfig.status, 200);
+        const remoteConfigText = await remoteConfig.text();
+        assert.doesNotMatch(remoteConfigText, /long-lived-secret/);
+        assert.doesNotMatch(remoteConfigText, /tokenEnvVar/);
+        assert.deepEqual(JSON.parse(remoteConfigText), {
+            configured: true,
+            mode: 'remote',
+            needsKey: false,
+            activeRemote: {
+                name: 'prod',
+                url: 'https://memory.example.com',
+                hasToken: true,
+            },
+        });
+
         const remoteList = await fetch(`${settingsBase}/memories`, { headers });
         assert.equal(remoteList.status, 200);
         assert.equal((await remoteList.json() as any).memories.length, 1);
