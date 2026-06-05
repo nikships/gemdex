@@ -36,6 +36,54 @@ test('env vars override defaults', () => {
     assert.equal(cfg.token, 'secret');
     assert.equal(cfg.unsafeDevNoAuth, false);
     assert.deepEqual(cfg.allowedOrigins, ['https://app.example.test', 'https://desktop.example.test']);
+    assert.equal(cfg.embeddingModel, 'gemini-embedding-2');
+});
+
+test('server-owned Gemini embedding config resolves from env', () => {
+    const cfg = loadServerConfig({
+        env: {
+            GEMDEX_SERVER_TOKEN: 'secret',
+            GEMINI_API_KEY: 'server-key',
+            EMBEDDING_MODEL: 'gemini-embedding-001',
+            EMBEDDING_DIMENSION: '768',
+            GEMINI_BASE_URL: 'https://gemini.example.test',
+        },
+        argv: [],
+    });
+    assert.equal(cfg.geminiApiKey, 'server-key');
+    assert.equal(cfg.embeddingModel, 'gemini-embedding-001');
+    assert.equal(cfg.embeddingDimension, 768);
+    assert.equal(cfg.geminiBaseUrl, 'https://gemini.example.test');
+});
+
+test('invalid embedding dimension throws a clear error', () => {
+    assert.throws(
+        () => loadServerConfig({
+            env: {
+                GEMDEX_SERVER_TOKEN: 'secret',
+                EMBEDDING_DIMENSION: 'not-a-dimension',
+            },
+            argv: [],
+        }),
+        /EMBEDDING_DIMENSION/,
+    );
+});
+
+test('embedding dimension rejects non-string and non-number config values', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gemdex-server-config-test-'));
+    const configPath = path.join(tmpDir, 'config.json');
+    try {
+        fs.writeFileSync(configPath, JSON.stringify({
+            token: 'secret',
+            embeddingDimension: true,
+        }), 'utf-8');
+        assert.throws(
+            () => loadServerConfig({ env: { GEMDEX_SERVER_CONFIG: configPath }, argv: [] }),
+            /EMBEDDING_DIMENSION/,
+        );
+    } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
 });
 
 test('CLI args --host and --port are parsed', () => {
@@ -116,11 +164,21 @@ test('config file values are used when no env override', () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gemdex-server-config-test-'));
     const configPath = path.join(tmpDir, 'config.json');
     try {
-        fs.writeFileSync(configPath, JSON.stringify({ host: '0.0.0.0', port: 4567, token: 'from-file' }), 'utf-8');
+        fs.writeFileSync(configPath, JSON.stringify({
+            host: '0.0.0.0',
+            port: 4567,
+            token: 'from-file',
+            geminiApiKey: 'file-key',
+            embeddingModel: 'gemini-embedding-001',
+            embeddingDimension: 1536,
+        }), 'utf-8');
         const cfg = loadServerConfig({ env: { GEMDEX_SERVER_CONFIG: configPath }, argv: [] });
         assert.equal(cfg.host, '0.0.0.0');
         assert.equal(cfg.port, 4567);
         assert.equal(cfg.token, 'from-file');
+        assert.equal(cfg.geminiApiKey, 'file-key');
+        assert.equal(cfg.embeddingModel, 'gemini-embedding-001');
+        assert.equal(cfg.embeddingDimension, 1536);
     } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
     }

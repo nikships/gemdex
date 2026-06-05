@@ -1,8 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
+import { DataType, newDb } from 'pg-mem';
 import type { MemoryBackend } from 'gemdex-core';
 import type {
+    EmbeddingContent,
+    EmbeddingVector,
     Memory,
     MemoryAttachment,
     MemoryAttachmentInput,
@@ -16,13 +19,16 @@ import type {
 } from 'gemdex-core';
 import {
     DEFAULT_ATTACHMENT_LIMITS,
+    Embedding,
     SUPPORTED_API_VERSION,
     SUPPORTED_PROTOCOL_VERSION,
     mimeToKind,
     validateAttachments,
 } from 'gemdex-core';
 import type { ServerVersionInfo } from 'gemdex-core';
-import { createServer } from './server.js';
+import type { ServerConfig } from './config.js';
+import type { DatabasePool } from './postgres.js';
+import { createConfiguredStore, createServer } from './server.js';
 
 /**
  * Minimal in-memory MemoryBackend stub for testing the shared handler
@@ -163,6 +169,67 @@ class FakeMemoryBackend implements MemoryBackend {
             };
         });
     }
+}
+
+class FakeServerEmbedding extends Embedding {
+    protected maxTokens = 8192;
+    calls = 0;
+
+    async detectDimension(): Promise<number> {
+        return 4;
+    }
+
+    async embed(text: string): Promise<EmbeddingVector> {
+        return (await this.embedBatch([text]))[0];
+    }
+
+    async embedBatch(texts: string[]): Promise<EmbeddingVector[]> {
+        this.calls += texts.length;
+        return texts.map(() => ({ vector: [1, 0, 0, 0], dimension: 4 }));
+    }
+
+    async embedContentBatch(contents: EmbeddingContent[]): Promise<EmbeddingVector[]> {
+        this.calls += contents.length;
+        return contents.map(() => ({ vector: [1, 0, 0, 0], dimension: 4 }));
+    }
+
+    getDimension(): number {
+        return 4;
+    }
+
+    getProvider(): string {
+        return 'fake-server';
+    }
+
+    isMultimodal(): boolean {
+        return true;
+    }
+}
+
+function createPgMemPool(): DatabasePool {
+    const db = newDb({ autoCreateForeignKeyIndices: true, noAstCoverageCheck: true });
+    db.registerExtension('vector', (schema) => {
+        schema.registerEquivalentType({
+            name: 'vector',
+            equivalentTo: DataType.text,
+            isValid: (value) => typeof value === 'string' && value.startsWith('['),
+        });
+    });
+    const adapter = db.adapters.createPg();
+    return new adapter.Pool() as DatabasePool;
+}
+
+function postgresServerConfig(): ServerConfig {
+    return {
+        host: '127.0.0.1',
+        port: 8765,
+        token: 'test-token',
+        unsafeDevNoAuth: false,
+        allowedOrigins: [],
+        databaseUrl: 'postgres://injected-pool',
+        embeddingModel: 'gemini-embedding-2',
+        blobStore: { kind: 'file' },
+    };
 }
 
 async function withServer(
@@ -377,6 +444,59 @@ test('v1 memory API enforces the 20 MiB decoded attachment limit', async () => {
         assert.equal(response.status, 400);
         assert.match((await response.json() as { error: string }).error, /per-attachment limit/);
     });
+});
+
+test('configured server routes execute embeddings on the server-owned backend', async () => {
+    const pool = createPgMemPool();
+    const embedding = new FakeServerEmbedding();
+    const store = await createConfiguredStore(postgresServerConfig(), {
+        pool,
+        embedding,
+        usePgVectorQueries: false,
+    });
+    assert.ok(store);
+    try {
+        await withServer(store, async (base) => {
+            const createResponse = await fetch(`${base}/v1/memories`, {
+                method: 'POST',
+                headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content: 'server embeds this remote content' }),
+            });
+            assert.equal(createResponse.status, 201);
+
+            const recallResponse = await fetch(`${base}/v1/recall`, {
+                method: 'POST',
+                headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+                body: JSON.stringify({ query: 'remote content' }),
+            });
+            assert.equal(recallResponse.status, 200);
+            assert.ok(embedding.calls >= 2);
+        });
+    } finally {
+        await pool.end();
+    }
+});
+
+test('configured server routes report a missing server Gemini key on embedding work', async () => {
+    const pool = createPgMemPool();
+    const store = await createConfiguredStore(postgresServerConfig(), {
+        pool,
+        usePgVectorQueries: false,
+    });
+    assert.ok(store);
+    try {
+        await withServer(store, async (base) => {
+            const response = await fetch(`${base}/v1/memories`, {
+                method: 'POST',
+                headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content: 'requires a server embedding' }),
+            });
+            assert.equal(response.status, 400);
+            assert.match((await response.json() as { error: string }).error, /GEMINI_API_KEY.*gemdex-server/);
+        });
+    } finally {
+        await pool.end();
+    }
 });
 
 test('health and version routes work even when store is null', async () => {
