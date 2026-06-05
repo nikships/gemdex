@@ -23,8 +23,12 @@ export type BlobStoreConfig = FileBlobStoreConfig | S3BlobStoreConfig;
 export interface ServerConfig {
     host: string;
     port: number;
-    /** Optional bearer token. Auth is enforced in GEM-13; stored here for forward-compat. */
+    /** Bearer token required for data-route auth unless unsafeDevNoAuth is true. */
     token?: string;
+    /** Explicit unsafe local/dev mode that disables bearer-token auth. */
+    unsafeDevNoAuth: boolean;
+    /** Browser origins allowed by CORS. Empty denies cross-origin browser data access. */
+    allowedOrigins: string[];
     /** Attachment blob storage backend for self-hosted deployments. */
     blobStore: BlobStoreConfig;
 }
@@ -102,10 +106,13 @@ export function loadServerConfig(options: LoadServerConfigOptions = {}): ServerC
     const env = options.env ?? process.env;
     const argv = options.argv ?? process.argv.slice(2);
 
-    // Parse CLI args for --host, --port, --config.
+    // Parse CLI args for --host, --port, --config, --allowed-origin, and
+    // --unsafe-dev-no-auth.
     let argHost: string | undefined;
     let argPort: string | undefined;
     let argConfig: string | undefined;
+    const argAllowedOrigins: string[] = [];
+    let argUnsafeDevNoAuth: boolean | undefined;
 
     for (let i = 0; i < argv.length; i++) {
         const arg = argv[i];
@@ -121,6 +128,15 @@ export function loadServerConfig(options: LoadServerConfigOptions = {}): ServerC
             argConfig = argv[++i];
         } else if (arg.startsWith('--config=')) {
             argConfig = arg.slice('--config='.length);
+        } else if (arg === '--allowed-origin') {
+            const value = argv[++i];
+            if (value !== undefined) {
+                argAllowedOrigins.push(value);
+            }
+        } else if (arg.startsWith('--allowed-origin=')) {
+            argAllowedOrigins.push(arg.slice('--allowed-origin='.length));
+        } else if (arg === '--unsafe-dev-no-auth') {
+            argUnsafeDevNoAuth = true;
         }
     }
 
@@ -171,15 +187,65 @@ export function loadServerConfig(options: LoadServerConfigOptions = {}): ServerC
         );
     }
 
-    // Resolve optional token: env > file.
+    // Resolve token: env > file. Required unless unsafe dev mode is explicit.
     const token =
-        env['GEMDEX_SERVER_TOKEN'] ??
-        (typeof fileConfig['token'] === 'string' ? fileConfig['token'] : undefined);
+        normalizeNonEmpty(env['GEMDEX_SERVER_TOKEN']) ??
+        (typeof fileConfig['token'] === 'string' ? normalizeNonEmpty(fileConfig['token']) : undefined);
+
+    const unsafeDevNoAuth =
+        parseBoolean(env['GEMDEX_SERVER_UNSAFE_DEV_NO_AUTH'], 'GEMDEX_SERVER_UNSAFE_DEV_NO_AUTH') ??
+        argUnsafeDevNoAuth ??
+        (typeof fileConfig['unsafeDevNoAuth'] === 'boolean' ? fileConfig['unsafeDevNoAuth'] : false);
+
+    const allowedOrigins = resolveAllowedOrigins(env, argAllowedOrigins, fileConfig);
+
+    if (!token && !unsafeDevNoAuth) {
+        throw new Error(
+            'GEMDEX_SERVER_TOKEN is required for gemdex-server. Set a strong bearer token, ' +
+            'or explicitly set GEMDEX_SERVER_UNSAFE_DEV_NO_AUTH=true for unsafe local development only.',
+        );
+    }
 
     return {
         host,
         port: portNum,
-        ...(token !== undefined && { token }),
+        unsafeDevNoAuth,
+        allowedOrigins,
         blobStore: resolveBlobStore(env, fileConfig),
+        ...(token !== undefined && { token }),
     };
 }
+
+function normalizeNonEmpty(value: string | undefined): string | undefined {
+    if (value === undefined) return undefined;
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function splitOrigins(value: string): string[] {
+    return value.split(',').map((origin) => origin.trim()).filter(Boolean);
+}
+
+function resolveAllowedOrigins(
+    env: Record<string, string | undefined>,
+    argAllowedOrigins: string[],
+    fileConfig: Record<string, unknown>,
+): string[] {
+    const envOrigins = env['GEMDEX_SERVER_ALLOWED_ORIGINS'];
+    if (envOrigins !== undefined) {
+        return splitOrigins(envOrigins);
+    }
+    if (argAllowedOrigins.length > 0) {
+        return argAllowedOrigins.flatMap(splitOrigins);
+    }
+    if (Array.isArray(fileConfig['allowedOrigins'])) {
+        return fileConfig['allowedOrigins']
+            .filter((origin): origin is string => typeof origin === 'string')
+            .flatMap(splitOrigins);
+    }
+    if (typeof fileConfig['allowedOrigins'] === 'string') {
+        return splitOrigins(fileConfig['allowedOrigins']);
+    }
+    return [];
+}
+

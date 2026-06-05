@@ -15,13 +15,21 @@ Options:
                       container or network-wide exposure.
   -p, --port <port>   Listening port (default: 8765).
   -c, --config <path> Path to a JSON config file. Env vars override file values.
+  --allowed-origin <origin>
+                      Browser origin allowed by CORS. Repeat or comma-separate.
+  --unsafe-dev-no-auth
+                      Disable bearer-token auth for unsafe local development only.
   -h, --help          Show this help message.
 
 Environment variables:
   GEMDEX_SERVER_HOST    Bind address (default: 127.0.0.1).
   GEMDEX_SERVER_PORT    Listening port (default: 8765).
   GEMDEX_SERVER_CONFIG  Path to a JSON config file.
-  GEMDEX_SERVER_TOKEN   Bearer token for auth (enforced in a later release).
+  GEMDEX_SERVER_TOKEN   Required bearer token for all data routes.
+  GEMDEX_SERVER_ALLOWED_ORIGINS
+                        Comma-separated browser origins allowed by CORS.
+  GEMDEX_SERVER_UNSAFE_DEV_NO_AUTH
+                        Set true only for unsafe local development without auth.
   BLOB_STORE            Attachment store: file or s3 (default: file).
   BLOB_DIR              Directory for BLOB_STORE=file.
   S3_BUCKET             Bucket for BLOB_STORE=s3.
@@ -38,8 +46,10 @@ Endpoints:
   GET  /v1/memories  List memories (requires a configured backend).
   ...and the full /v1/* memory API.
 
-Note: storage backend and auth are configured in later releases (GEM-10–14).
-Until then, data routes return 503.
+Security: data routes require Authorization: Bearer <token> unless
+GEMDEX_SERVER_UNSAFE_DEV_NO_AUTH=true is explicitly set. Configure
+GEMDEX_SERVER_ALLOWED_ORIGINS for browser/desktop clients; by default,
+cross-origin browser data access is denied.
 `);
 }
 
