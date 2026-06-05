@@ -5,11 +5,20 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { loadServerConfig } from './config.js';
 
-test('defaults: host 127.0.0.1, port 8765', () => {
-    const cfg = loadServerConfig({ env: {}, argv: [] });
+test('missing token throws unless unsafe dev mode is explicit', () => {
+    assert.throws(
+        () => loadServerConfig({ env: {}, argv: [] }),
+        /GEMDEX_SERVER_TOKEN/,
+    );
+});
+
+test('unsafe dev mode keeps host and port defaults without a token', () => {
+    const cfg = loadServerConfig({ env: { GEMDEX_SERVER_UNSAFE_DEV_NO_AUTH: 'true' }, argv: [] });
     assert.equal(cfg.host, '127.0.0.1');
     assert.equal(cfg.port, 8765);
     assert.equal(cfg.token, undefined);
+    assert.equal(cfg.unsafeDevNoAuth, true);
+    assert.deepEqual(cfg.allowedOrigins, []);
 });
 
 test('env vars override defaults', () => {
@@ -18,17 +27,20 @@ test('env vars override defaults', () => {
             GEMDEX_SERVER_HOST: '0.0.0.0',
             GEMDEX_SERVER_PORT: '9000',
             GEMDEX_SERVER_TOKEN: 'secret',
+            GEMDEX_SERVER_ALLOWED_ORIGINS: 'https://app.example.test, https://desktop.example.test',
         },
         argv: [],
     });
     assert.equal(cfg.host, '0.0.0.0');
     assert.equal(cfg.port, 9000);
     assert.equal(cfg.token, 'secret');
+    assert.equal(cfg.unsafeDevNoAuth, false);
+    assert.deepEqual(cfg.allowedOrigins, ['https://app.example.test', 'https://desktop.example.test']);
 });
 
 test('CLI args --host and --port are parsed', () => {
     const cfg = loadServerConfig({
-        env: {},
+        env: { GEMDEX_SERVER_TOKEN: 'secret' },
         argv: ['--host', '0.0.0.0', '--port', '3000'],
     });
     assert.equal(cfg.host, '0.0.0.0');
@@ -37,7 +49,7 @@ test('CLI args --host and --port are parsed', () => {
 
 test('invalid port 0 throws a clear error', () => {
     assert.throws(
-        () => loadServerConfig({ env: { GEMDEX_SERVER_PORT: '0' }, argv: [] }),
+        () => loadServerConfig({ env: { GEMDEX_SERVER_TOKEN: 'secret', GEMDEX_SERVER_PORT: '0' }, argv: [] }),
         (err: unknown) => {
             assert.ok(err instanceof Error);
             assert.ok(err.message.includes('0'), `message should mention the bad value: ${err.message}`);
@@ -49,7 +61,7 @@ test('invalid port 0 throws a clear error', () => {
 
 test('invalid port 70000 throws a clear error', () => {
     assert.throws(
-        () => loadServerConfig({ env: { GEMDEX_SERVER_PORT: '70000' }, argv: [] }),
+        () => loadServerConfig({ env: { GEMDEX_SERVER_TOKEN: 'secret', GEMDEX_SERVER_PORT: '70000' }, argv: [] }),
         (err: unknown) => {
             assert.ok(err instanceof Error);
             assert.ok(err.message.includes('70000'), `message should mention the bad value: ${err.message}`);
@@ -60,7 +72,7 @@ test('invalid port 70000 throws a clear error', () => {
 
 test('invalid port "abc" throws a clear error', () => {
     assert.throws(
-        () => loadServerConfig({ env: { GEMDEX_SERVER_PORT: 'abc' }, argv: [] }),
+        () => loadServerConfig({ env: { GEMDEX_SERVER_TOKEN: 'secret', GEMDEX_SERVER_PORT: 'abc' }, argv: [] }),
         (err: unknown) => {
             assert.ok(err instanceof Error);
             assert.ok(err.message.toLowerCase().includes('port'), `message should mention port: ${err.message}`);
@@ -72,7 +84,7 @@ test('invalid port "abc" throws a clear error', () => {
 test('missing config file throws a clear error naming the path', () => {
     const missingPath = '/tmp/gemdex-server-does-not-exist-12345.json';
     assert.throws(
-        () => loadServerConfig({ env: { GEMDEX_SERVER_CONFIG: missingPath }, argv: [] }),
+        () => loadServerConfig({ env: { GEMDEX_SERVER_TOKEN: 'secret', GEMDEX_SERVER_CONFIG: missingPath }, argv: [] }),
         (err: unknown) => {
             assert.ok(err instanceof Error);
             assert.ok(err.message.includes(missingPath), `message should name the path: ${err.message}`);
@@ -87,7 +99,7 @@ test('invalid JSON config file throws a clear error naming the path', () => {
     try {
         fs.writeFileSync(configPath, '{ not valid json }', 'utf-8');
         assert.throws(
-            () => loadServerConfig({ env: { GEMDEX_SERVER_CONFIG: configPath }, argv: [] }),
+            () => loadServerConfig({ env: { GEMDEX_SERVER_TOKEN: 'secret', GEMDEX_SERVER_CONFIG: configPath }, argv: [] }),
             (err: unknown) => {
                 assert.ok(err instanceof Error);
                 assert.ok(err.message.includes(configPath), `message should name the path: ${err.message}`);
@@ -122,6 +134,7 @@ test('env vars override config file values', () => {
         const cfg = loadServerConfig({
             env: {
                 GEMDEX_SERVER_CONFIG: configPath,
+                GEMDEX_SERVER_TOKEN: 'secret',
                 GEMDEX_SERVER_HOST: '192.168.1.1',
                 GEMDEX_SERVER_PORT: '9999',
             },
@@ -132,4 +145,38 @@ test('env vars override config file values', () => {
     } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
     }
+});
+
+
+test('CLI args parse allowed origins and unsafe dev mode', () => {
+    const cfg = loadServerConfig({
+        env: {},
+        argv: [
+            '--unsafe-dev-no-auth',
+            '--allowed-origin',
+            'https://app.example.test',
+            '--allowed-origin=https://desktop.example.test, https://cli.example.test',
+        ],
+    });
+    assert.equal(cfg.unsafeDevNoAuth, true);
+    assert.deepEqual(cfg.allowedOrigins, [
+        'https://app.example.test',
+        'https://desktop.example.test',
+        'https://cli.example.test',
+    ]);
+});
+
+test('--allowed-origin as the final arg with no value does not crash', () => {
+    const cfg = loadServerConfig({
+        env: { GEMDEX_SERVER_TOKEN: 'secret' },
+        argv: ['--allowed-origin'],
+    });
+    assert.deepEqual(cfg.allowedOrigins, []);
+});
+
+test('invalid unsafe dev mode boolean throws a clear error', () => {
+    assert.throws(
+        () => loadServerConfig({ env: { GEMDEX_SERVER_UNSAFE_DEV_NO_AUTH: 'maybe' }, argv: [] }),
+        /GEMDEX_SERVER_UNSAFE_DEV_NO_AUTH/,
+    );
 });
