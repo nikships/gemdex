@@ -267,6 +267,7 @@ test('BLOB_STORE=s3 requires a bucket', () => {
 test('empty S3 credential env vars fall back to AWS_* equivalents', () => {
     const cfg = loadServerConfig({
         env: {
+            GEMDEX_SERVER_UNSAFE_DEV_NO_AUTH: 'true',
             BLOB_STORE: 's3',
             S3_BUCKET: 'gemdex-blobs',
             S3_ACCESS_KEY_ID: '',
