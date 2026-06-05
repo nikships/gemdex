@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createBlobStore } from './blob-store.js';
 import { loadServerConfig } from './config.js';
 import { startServer } from './server.js';
 
@@ -21,6 +22,14 @@ Environment variables:
   GEMDEX_SERVER_PORT    Listening port (default: 8765).
   GEMDEX_SERVER_CONFIG  Path to a JSON config file.
   GEMDEX_SERVER_TOKEN   Bearer token for auth (enforced in a later release).
+  BLOB_STORE            Attachment store: file or s3 (default: file).
+  BLOB_DIR              Directory for BLOB_STORE=file.
+  S3_BUCKET             Bucket for BLOB_STORE=s3.
+  S3_ENDPOINT           S3-compatible endpoint (R2, MinIO, etc.).
+  S3_REGION             S3 region (default: auto for S3-compatible stores).
+  S3_ACCESS_KEY_ID      Access key (falls back to AWS_ACCESS_KEY_ID).
+  S3_SECRET_ACCESS_KEY  Secret key (falls back to AWS_SECRET_ACCESS_KEY).
+  S3_FORCE_PATH_STYLE   Use path-style addressing for MinIO/local S3.
 
 Endpoints:
   GET  /v1/health    Readiness probe — no auth required.
@@ -44,6 +53,11 @@ if (args.includes('--help') || args.includes('-h')) {
 let config;
 try {
     config = loadServerConfig({ argv: args });
+    // Validate blob store configuration at startup even before GEM-9 wires the
+    // full memory backend into the self-hostable server. This catches missing
+    // S3/bucket/credential shape errors early while preserving the current
+    // no-backend 503 behavior for memory routes.
+    createBlobStore(config.blobStore);
 } catch (err: any) {
     process.stderr.write(`[gemdex-server] Configuration error: ${err?.message ?? String(err)}\n`);
     process.exit(1);

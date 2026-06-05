@@ -1,10 +1,32 @@
 import * as fs from 'fs';
 
+export type BlobStoreKind = 'file' | 's3';
+
+export interface FileBlobStoreConfig {
+    kind: 'file';
+    directory?: string;
+}
+
+export interface S3BlobStoreConfig {
+    kind: 's3';
+    bucket: string;
+    prefix?: string;
+    endpoint?: string;
+    region?: string;
+    accessKeyId?: string;
+    secretAccessKey?: string;
+    forcePathStyle?: boolean;
+}
+
+export type BlobStoreConfig = FileBlobStoreConfig | S3BlobStoreConfig;
+
 export interface ServerConfig {
     host: string;
     port: number;
     /** Optional bearer token. Auth is enforced in GEM-13; stored here for forward-compat. */
     token?: string;
+    /** Attachment blob storage backend for self-hosted deployments. */
+    blobStore: BlobStoreConfig;
 }
 
 export interface LoadServerConfigOptions {
@@ -12,15 +34,69 @@ export interface LoadServerConfigOptions {
     argv?: string[];
 }
 
+function optionalString(value: unknown): string | undefined {
+    return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function parseBoolean(value: unknown, name: string): boolean | undefined {
+    if (value === undefined || value === '') return undefined;
+    if (typeof value === 'boolean') return value;
+    if (typeof value !== 'string') {
+        throw new Error(`Invalid ${name}: must be true or false.`);
+    }
+    const normalized = value.toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+    if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+    throw new Error(`Invalid ${name} '${value}': must be true or false.`);
+}
+
+function resolveBlobStore(env: Record<string, string | undefined>, fileConfig: Record<string, unknown>): BlobStoreConfig {
+    const fileBlobStore = fileConfig['blobStore'] && typeof fileConfig['blobStore'] === 'object'
+        ? fileConfig['blobStore'] as Record<string, unknown>
+        : {};
+    const kindRaw = env['BLOB_STORE'] ?? optionalString(fileBlobStore['kind']) ?? 'file';
+    const kind = kindRaw.toLowerCase();
+
+    if (kind === 'file') {
+        const directory = env['BLOB_DIR'] ?? optionalString(fileBlobStore['directory']);
+        return { kind: 'file', ...(directory && { directory }) };
+    }
+
+    if (kind === 's3') {
+        const bucket = env['S3_BUCKET'] ?? optionalString(fileBlobStore['bucket']);
+        if (!bucket) {
+            throw new Error('BLOB_STORE=s3 requires S3_BUCKET (or blobStore.bucket in the config file).');
+        }
+        const endpoint = env['S3_ENDPOINT'] ?? optionalString(fileBlobStore['endpoint']);
+        const region = env['S3_REGION'] ?? optionalString(fileBlobStore['region']) ?? 'auto';
+        const prefix = env['S3_PREFIX'] ?? optionalString(fileBlobStore['prefix']);
+        const accessKeyId = env['S3_ACCESS_KEY_ID'] ?? env['AWS_ACCESS_KEY_ID'] ?? optionalString(fileBlobStore['accessKeyId']);
+        const secretAccessKey = env['S3_SECRET_ACCESS_KEY'] ?? env['AWS_SECRET_ACCESS_KEY'] ?? optionalString(fileBlobStore['secretAccessKey']);
+        const forcePathStyle = parseBoolean(env['S3_FORCE_PATH_STYLE'] ?? fileBlobStore['forcePathStyle'], 'S3_FORCE_PATH_STYLE');
+        return {
+            kind: 's3',
+            bucket,
+            region,
+            ...(endpoint && { endpoint }),
+            ...(prefix && { prefix }),
+            ...(accessKeyId && { accessKeyId }),
+            ...(secretAccessKey && { secretAccessKey }),
+            ...(forcePathStyle !== undefined && { forcePathStyle }),
+        };
+    }
+
+    throw new Error(`Invalid BLOB_STORE '${kindRaw}': expected 'file' or 's3'.`);
+}
+
 /**
  * Resolve the server configuration from environment variables, optional CLI
  * arguments, and an optional JSON config file.
  *
  * Priority (highest to lowest):
- *   1. Explicit env vars (GEMDEX_SERVER_HOST, GEMDEX_SERVER_PORT, GEMDEX_SERVER_TOKEN).
+ *   1. Explicit env vars (GEMDEX_SERVER_*, BLOB_STORE/BLOB_DIR/S3_*).
  *   2. CLI args (--host, --port).
  *   3. Config file (GEMDEX_SERVER_CONFIG env var or --config <path> arg).
- *   4. Built-in defaults (host: 127.0.0.1, port: 8765).
+ *   4. Built-in defaults (host: 127.0.0.1, port: 8765, BLOB_STORE=file).
  */
 export function loadServerConfig(options: LoadServerConfigOptions = {}): ServerConfig {
     const env = options.env ?? process.env;
@@ -100,5 +176,10 @@ export function loadServerConfig(options: LoadServerConfigOptions = {}): ServerC
         env['GEMDEX_SERVER_TOKEN'] ??
         (typeof fileConfig['token'] === 'string' ? fileConfig['token'] : undefined);
 
-    return { host, port: portNum, ...(token !== undefined && { token }) };
+    return {
+        host,
+        port: portNum,
+        ...(token !== undefined && { token }),
+        blobStore: resolveBlobStore(env, fileConfig),
+    };
 }

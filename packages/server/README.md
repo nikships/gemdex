@@ -30,6 +30,15 @@ gemdex-server --host 0.0.0.0 --port 8765
 | `GEMDEX_SERVER_PORT`   | `8765`      | Listening port. Must be an integer between 1 and 65535.        |
 | `GEMDEX_SERVER_CONFIG` | (none)      | Path to a JSON config file. Env vars override file values.     |
 | `GEMDEX_SERVER_TOKEN`  | (none)      | Bearer token for auth. Enforced in a later release (GEM-13).   |
+| `BLOB_STORE`           | `file`      | Attachment blob store driver: `file` or `s3`.                  |
+| `BLOB_DIR`             | `~/.gemdex/blobs` | Directory for `BLOB_STORE=file`.                         |
+| `S3_BUCKET`            | (none)      | Bucket for `BLOB_STORE=s3`. Required for S3 mode.              |
+| `S3_ENDPOINT`          | (none)      | S3-compatible endpoint for R2, MinIO, etc. Omit for AWS S3.    |
+| `S3_REGION`            | `auto`      | Region for `BLOB_STORE=s3`.                                    |
+| `S3_PREFIX`            | (none)      | Optional key prefix for Gemdex blobs.                          |
+| `S3_ACCESS_KEY_ID`     | (AWS env)   | S3 access key; falls back to `AWS_ACCESS_KEY_ID`.              |
+| `S3_SECRET_ACCESS_KEY` | (AWS env)   | S3 secret key; falls back to `AWS_SECRET_ACCESS_KEY`.          |
+| `S3_FORCE_PATH_STYLE`  | (none)      | Set `true` for path-style S3 services such as many MinIO setups. |
 
 ### Host / Port Defaults
 
@@ -62,6 +71,23 @@ You can pass a JSON config file via `--config <path>` or `GEMDEX_SERVER_CONFIG`:
 ```
 
 Explicit environment variables always override file values.
+
+Blob storage can also be configured in the file:
+
+```json
+{
+  "blobStore": {
+    "kind": "s3",
+    "bucket": "gemdex-blobs",
+    "endpoint": "https://example.r2.cloudflarestorage.com",
+    "region": "auto",
+    "prefix": "production/blobs"
+  }
+}
+```
+
+Use `BLOB_STORE=file` with `BLOB_DIR=/path/to/blobs` for local single-node deployments. Use `BLOB_STORE=s3` with `S3_BUCKET` plus endpoint/credential variables for AWS S3, Cloudflare R2, MinIO, or other S3-compatible stores. Attachment size validation remains the same as inline base64 uploads: each attachment is capped at 20 MiB before bytes are written to any blob driver.
+
 
 ## Endpoints
 
