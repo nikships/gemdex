@@ -38,6 +38,11 @@ const els = {
   list: document.querySelector("#memory-list"),
   empty: document.querySelector("#empty"),
   filter: document.querySelector("#filter"),
+  recoveryPanel: document.querySelector("#recovery-panel"),
+  recoveryTitle: document.querySelector("#recovery-title"),
+  recoveryMessage: document.querySelector("#recovery-message"),
+  recoverySettings: document.querySelector("#recovery-settings"),
+  recoveryLocal: document.querySelector("#recovery-local"),
   placeholder: document.querySelector("#placeholder"),
   editor: document.querySelector("#editor"),
   title: document.querySelector("#title-input"),
@@ -834,6 +839,26 @@ function renderBackendBadge() {
     : "Active local backend";
 }
 
+function clearRecovery() {
+  els.recoveryPanel.hidden = true;
+}
+
+function showRemoteRecovery(error) {
+  const backend = activeBackend();
+  if (backend?.mode !== "remote") return false;
+  const remoteName = activeRemoteName() || "remote storage";
+  els.recoveryTitle.textContent = `${remoteName} is unreachable`;
+  els.recoveryMessage.textContent = `${error.message} Open Storage settings to test or edit the remote, or switch to local storage if it is configured.`;
+  els.recoveryLocal.hidden = !settingsState?.localConfigured;
+  els.recoveryPanel.hidden = false;
+  els.placeholder.hidden = true;
+  els.editor.hidden = true;
+  hideSimilar();
+  selectedId = null;
+  renderList();
+  return true;
+}
+
 function selectedRemoteName() {
   return els.remoteSelect.value || activeRemoteName() || "";
 }
@@ -1029,6 +1054,8 @@ function wireEvents() {
   els.newBtn.addEventListener("click", openNew);
   els.settingsBtn.addEventListener("click", openSettings);
   els.setupSettingsBtn.addEventListener("click", openSettings);
+  els.recoverySettings.addEventListener("click", openSettings);
+  els.recoveryLocal.addEventListener("click", () => applyMode("local"));
   els.settingsClose.addEventListener("click", closeSettings);
   els.settingsModal.addEventListener("click", (event) => {
     if (event.target === els.settingsModal) closeSettings();
@@ -1088,6 +1115,7 @@ async function syncConfigGate() {
   if (settingsState) renderSettings();
   if (config.configured) {
     showSetup(false);
+    clearRecovery();
     await loadMemories();
     return true;
   }
@@ -1122,8 +1150,13 @@ async function submitApiKey(event) {
 async function loadMemories() {
   try {
     await refreshList();
+    clearRecovery();
     setStatus(`${memories.length} ${memories.length === 1 ? "memory" : "memories"}`);
   } catch (err) {
+    if (showRemoteRecovery(err)) {
+      setStatus(`Remote unavailable: ${err.message}`, true);
+      return;
+    }
     setStatus(`Error: ${err.message}`, true);
   }
 }
