@@ -3,20 +3,78 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { newDb } from 'pg-mem';
-import { FileBlobStore } from 'gemdex-core';
+import { DataType, newDb } from 'pg-mem';
+import {
+    Embedding,
+    EmbeddingContent,
+    EmbeddingVector,
+    FileBlobStore,
+} from 'gemdex-core';
 import { migrateDatabase, PostgresMemoryBackend, type DatabasePool } from './postgres.js';
 
 function createPool(): DatabasePool {
     const db = newDb({ autoCreateForeignKeyIndices: true, noAstCoverageCheck: true });
+    db.registerExtension('vector', (schema) => {
+        schema.registerEquivalentType({
+            name: 'vector',
+            equivalentTo: DataType.text,
+            isValid: (value) => typeof value === 'string' && value.startsWith('['),
+        });
+    });
     const adapter = db.adapters.createPg();
     return new adapter.Pool() as DatabasePool;
+}
+
+class FakeEmbedding extends Embedding {
+    protected maxTokens = 8192;
+
+    async detectDimension(): Promise<number> {
+        return 4;
+    }
+
+    async embed(text: string): Promise<EmbeddingVector> {
+        return (await this.embedBatch([text]))[0];
+    }
+
+    async embedBatch(texts: string[]): Promise<EmbeddingVector[]> {
+        return texts.map((text) => ({
+            vector: text.toLowerCase().includes('alpha')
+                ? [1, 0, 0, 0]
+                : text.toLowerCase().includes('beta')
+                    ? [0, 1, 0, 0]
+                    : [0, 0, 0, 1],
+            dimension: 4,
+        }));
+    }
+
+    async embedContentBatch(contents: EmbeddingContent[]): Promise<EmbeddingVector[]> {
+        return Promise.all(contents.map(async (content) => {
+            if (typeof content === 'string') return this.embed(content);
+            const decoded = Buffer.from(content.inlineData.data, 'base64').toString();
+            return {
+                vector: decoded.includes('red') ? [0, 0, 1, 0] : [0, 0, 0, 1],
+                dimension: 4,
+            };
+        }));
+    }
+
+    getDimension(): number {
+        return 4;
+    }
+
+    getProvider(): string {
+        return 'fake';
+    }
+
+    isMultimodal(): boolean {
+        return true;
+    }
 }
 
 async function withMigratedBackend<T>(fn: (backend: PostgresMemoryBackend, pool: DatabasePool) => Promise<T>): Promise<T> {
     const pool = createPool();
     await migrateDatabase(pool);
-    const backend = new PostgresMemoryBackend({ pool });
+    const backend = new PostgresMemoryBackend({ pool, usePgVectorQueries: false });
     try {
         return await fn(backend, pool);
     } finally {
@@ -46,7 +104,7 @@ test('migrations create a clean database from scratch and record bookkeeping', a
         const migrations = await pool.query<{ version: string }>(
             'SELECT version FROM gemdex_schema_migrations ORDER BY version',
         );
-        assert.deepEqual(migrations.rows.map((row) => row.version), ['001']);
+        assert.deepEqual(migrations.rows.map((row) => row.version), ['001', '002']);
     } finally {
         await pool.end();
     }
@@ -103,7 +161,14 @@ test('PostgresMemoryBackend persists save/update/delete/list/export/import acros
 });
 
 test('schema stores chunks separately while recall returns full parent memories', async () => {
-    await withMigratedBackend(async (backend, pool) => {
+    const pool = createPool();
+    await migrateDatabase(pool);
+    const backend = new PostgresMemoryBackend({
+        pool,
+        embedding: new FakeEmbedding(),
+        usePgVectorQueries: false,
+    });
+    try {
         const longContent = `${'intro '.repeat(400)}needle-section ${'details '.repeat(400)}`;
         const memory = await backend.save({ content: longContent, title: 'Chunked parent' });
 
@@ -114,11 +179,56 @@ test('schema stores chunks separately while recall returns full parent memories'
         assert.ok(chunks.rows.length > 1, 'long memory should be split into multiple retrieval chunks');
         assert.ok(chunks.rows.every((row) => row.content.length < longContent.length));
 
-        const results = await backend.recall('needle-section', 5);
+        const results = await backend.recall('needle-section alpha', 5);
         assert.equal(results.length, 1);
         assert.equal(results[0].id, memory.id);
         assert.equal(results[0].content, longContent);
+    } finally {
+        await backend.close();
+    }
+});
+
+test('hybrid recall supports text, media, mixed RRF, and parent dedupe', async () => {
+    const pool = createPool();
+    await migrateDatabase(pool);
+    const backend = new PostgresMemoryBackend({
+        pool,
+        embedding: new FakeEmbedding(),
+        usePgVectorQueries: false,
     });
+    try {
+        const red = Buffer.from('red image bytes').toString('base64');
+        const alphaWithMedia = await backend.save({
+            title: 'Alpha with media',
+            content: `alpha ${'details '.repeat(500)}`,
+            attachments: [{ mimeType: 'image/png', data: red }],
+        });
+        const alphaTextOnly = await backend.save({
+            title: 'Alpha text only',
+            content: 'alpha reference',
+        });
+        const beta = await backend.save({
+            title: 'Beta',
+            content: 'beta reference',
+        });
+
+        const textResults = await backend.recall('alpha', 10);
+        assert.deepEqual(new Set(textResults.map((result) => result.id)), new Set([
+            alphaWithMedia.id,
+            alphaTextOnly.id,
+        ]));
+        assert.equal(textResults.filter((result) => result.id === alphaWithMedia.id).length, 1);
+
+        const mediaResults = await backend.recall(undefined, 10, [{ mimeType: 'image/png', data: red }]);
+        assert.equal(mediaResults[0].id, alphaWithMedia.id);
+
+        const mixedResults = await backend.recall('alpha', 10, [{ mimeType: 'image/png', data: red }]);
+        assert.equal(mixedResults[0].id, alphaWithMedia.id);
+        assert.ok(mixedResults[0].score > mixedResults.find((result) => result.id === alphaTextOnly.id)!.score);
+        assert.ok(!mixedResults.some((result) => result.id === beta.id));
+    } finally {
+        await backend.close();
+    }
 });
 
 test('list and recall batch-load attachments and group them by their own memory', async () => {
