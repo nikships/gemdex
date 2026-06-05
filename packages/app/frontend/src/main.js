@@ -932,7 +932,7 @@ async function openSettings() {
 
 async function openSetupRemote() {
   await openSettings();
-  els.remoteName.focus();
+  requestAnimationFrame(() => els.remoteName.focus());
 }
 
 function closeSettings() {
