@@ -10,6 +10,7 @@ import {
 } from 'gemdex-core';
 import type { MemoryBackend } from 'gemdex-core';
 import type { ServerConfig } from './config.js';
+import { createBlobStore } from './blob-store.js';
 import { createPostgresPool, migrateDatabase, PostgresMemoryBackend } from './postgres.js';
 
 // Read the version from package.json so it never drifts from the published
@@ -182,7 +183,11 @@ export async function startServer(config: ServerConfig, store?: MemoryBackend | 
             await pool.end().catch(() => undefined);
             throw error;
         }
-        resolvedStore = new PostgresMemoryBackend({ pool });
+        resolvedStore = new PostgresMemoryBackend({
+            pool,
+            blobStore: createBlobStore(config.blobStore),
+            blobStorageProvider: config.blobStore.kind,
+        });
     }
 
     return new Promise((resolve) => {

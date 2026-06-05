@@ -215,10 +215,10 @@ The initial migration creates:
   full parent memory rather than exposing fragments.
 - `gemdex_memory_attachments` — stable per-memory attachment metadata (`id`,
   modality, MIME type, byte length, optional caption, and blob reference).
-- `gemdex_attachment_blobs` — blob-reference records. The v1 implementation uses
-  `storage_provider = 'postgres'` and stores bytes in `data` so export/import and
-  attachment reads survive process restarts; future deployments can point these
-  references at external blob storage without changing attachment metadata.
+- `gemdex_attachment_blobs` — blob-reference records. With `BLOB_STORE=file` or
+  `BLOB_STORE=s3`, bytes live in the configured blob driver and Postgres stores
+  the provider, opaque key, checksum, and byte length. The backend still reads
+  legacy inline `data` rows for compatibility.
 
 ### Running Migrations
 
