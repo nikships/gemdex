@@ -106,6 +106,8 @@ const App = struct {
     fn start(context: *anyopaque, runtime: *zero_native.Runtime) anyerror!void {
         _ = runtime;
         const self: *@This() = @ptrCast(@alignCast(context));
+        self.api_base = "";
+        self.api_token = "";
 
         var argv_buf: [3][]const u8 = undefined;
         const argv = self.buildArgv(&argv_buf);
@@ -124,10 +126,12 @@ const App = struct {
         // Read the `PORT=<n> TOKEN=<hex>` handshake line the sidecar prints on bind.
         const handshake = readHandshake(self.io, &self.sidecar.?, &self.handshake_buf) catch |err| {
             std.debug.print("[gemdex] failed to read sidecar handshake: {s}\n", .{@errorName(err)});
+            self.resetSidecar();
             return;
         };
         if (handshake.port == 0) {
             std.debug.print("[gemdex] sidecar did not report a port\n", .{});
+            self.resetSidecar();
             return;
         }
 
@@ -143,10 +147,16 @@ const App = struct {
     fn stop(context: *anyopaque, runtime: *zero_native.Runtime) anyerror!void {
         _ = runtime;
         const self: *@This() = @ptrCast(@alignCast(context));
+        self.resetSidecar();
+    }
+
+    fn resetSidecar(self: *@This()) void {
         if (self.sidecar) |*child| {
             child.kill(self.io);
             self.sidecar = null;
         }
+        self.api_base = "";
+        self.api_token = "";
     }
 
     fn getApiBase(context: *anyopaque, invocation: zero_native.bridge.Invocation, output: []u8) anyerror![]const u8 {

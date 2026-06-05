@@ -26,10 +26,6 @@ const PackageTarget = enum {
     linux,
 };
 
-// Default to the globally-installed zero-native framework. Override with
-// `-Dzero-native-path=/path/to/zero-native` when building elsewhere (e.g. CI
-// that runs `npm install -g zero-native`).
-const default_zero_native_path = "/Users/nikhilanand/.npm-global/lib/node_modules/zero-native";
 const app_exe_name = "gemdex-memory";
 
 pub fn build(b: *std.Build) void {
@@ -44,7 +40,7 @@ pub fn build(b: *std.Build) void {
     const cef_dir_override = b.option([]const u8, "cef-dir", "Override CEF root directory for Chromium builds");
     const cef_auto_install_override = b.option(bool, "cef-auto-install", "Override app.zon CEF auto-install setting");
     const package_target = b.option(PackageTarget, "package-target", "Package target: macos, windows, linux") orelse .macos;
-    const zero_native_path = b.option([]const u8, "zero-native-path", "Path to the zero-native framework checkout") orelse default_zero_native_path;
+    const zero_native_path = resolveZeroNativePath(b, b.option([]const u8, "zero-native-path", "Path to the zero-native framework checkout"));
     const optimize_name = @tagName(optimize);
     const selected_platform: PlatformOption = switch (platform_option) {
         .auto => if (target.result.os.tag == .macos) .macos else if (target.result.os.tag == .linux) .linux else if (target.result.os.tag == .windows) .windows else .@"null",
@@ -181,6 +177,70 @@ fn macosSdkPath(b: *std.Build) ?[]const u8 {
         return null;
     }
     return std.mem.trimEnd(u8, result.stdout, "\r\n");
+}
+
+fn resolveZeroNativePath(b: *std.Build, explicit_path: ?[]const u8) []const u8 {
+    if (explicit_path) |path| {
+        if (isZeroNativePath(b, path)) return path;
+        failZeroNativePath("the -Dzero-native-path value is not a zero-native framework checkout", path);
+    }
+
+    const local_path = b.pathFromRoot("node_modules/zero-native");
+    if (isZeroNativePath(b, local_path)) return local_path;
+
+    if (globalNpmRoot(b)) |npm_root| {
+        const global_path = b.pathJoin(&.{ npm_root, "zero-native" });
+        if (isZeroNativePath(b, global_path)) return global_path;
+    }
+
+    failZeroNativePath("could not find zero-native", null);
+}
+
+fn isZeroNativePath(b: *std.Build, path: []const u8) bool {
+    const root_zig = b.pathJoin(&.{ path, "src", "root.zig" });
+    std.Io.Dir.cwd().access(b.graph.io, root_zig, .{}) catch return false;
+    return true;
+}
+
+fn globalNpmRoot(b: *std.Build) ?[]const u8 {
+    const result = std.process.run(b.allocator, b.graph.io, .{
+        .argv = &.{ "npm", "root", "-g" },
+        .stdout_limit = .limited(4096),
+        .stderr_limit = .limited(4096),
+    }) catch return null;
+    defer b.allocator.free(result.stderr);
+    if (result.term != .exited or result.term.exited != 0) {
+        b.allocator.free(result.stdout);
+        return null;
+    }
+    const trimmed = std.mem.trim(u8, result.stdout, "\r\n ");
+    if (trimmed.len == 0) {
+        b.allocator.free(result.stdout);
+        return null;
+    }
+    const root = b.allocator.dupe(u8, trimmed) catch @panic("out of memory");
+    b.allocator.free(result.stdout);
+    return root;
+}
+
+fn failZeroNativePath(reason: []const u8, bad_path: ?[]const u8) noreturn {
+    std.debug.print(
+        \\[gemdex] {s}.
+        \\
+    , .{reason});
+    if (bad_path) |path| {
+        std.debug.print(
+            \\[gemdex] Checked: {s}
+            \\
+        , .{path});
+    }
+    std.debug.print(
+        \\[gemdex] Install zero-native with `npm install` in packages/app or `npm install -g zero-native`,
+        \\ or pass `-Dzero-native-path=/path/to/zero-native`.
+        \\[gemdex] Expected the framework root to contain `src/root.zig`.
+        \\
+    , .{});
+    @panic("unable to resolve zero-native path");
 }
 
 fn localModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, path: []const u8) *std.Build.Module {
