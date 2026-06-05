@@ -85,9 +85,9 @@ the `.app` itself.)
 ## Requirements
 
 - **Zig 0.16** (the zero-native template targets 0.16 APIs).
-- The **zero-native** framework. The build defaults to a global install
-  (`npm install -g zero-native`); override the path with
-  `-Dzero-native-path=/path/to/zero-native`.
+- The **zero-native** framework. The build resolves it from
+  `-Dzero-native-path=/path/to/zero-native`, then `packages/app/node_modules`,
+  then the global npm root (`npm install -g zero-native`).
 - A system Node (for `npx -y gemdex serve`), or set `GEMDEX_SERVE_CMD` to a
   local `gemdex-mcp` entry script for development.
 - `GEMINI_API_KEY` in the environment (the sidecar embeds on create/edit).
