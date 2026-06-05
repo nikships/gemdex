@@ -103,6 +103,49 @@ jobs:
         working-directory: packages/app
         run: zig build -Dplatform=linux "-Dzero-native-path=${{ steps.zn.outputs.path }}"
 
+  byoi-integration:
+    name: BYOI integration (Postgres + MCP + sidecar)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.2-pg16-bookworm
+        env:
+          POSTGRES_DB: gemdex_integration
+          POSTGRES_USER: gemdex
+          POSTGRES_PASSWORD: integration-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gemdex -d gemdex_integration"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      BYOI_TEST_DATABASE_URL: postgres://gemdex:integration-password@127.0.0.1:5432/gemdex_integration
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build packages
+        run: pnpm build
+
+      - name: Run deterministic BYOI integration
+        run: pnpm test:byoi
+
   docker:
     name: Docker compose smoke test
     runs-on: ubuntu-latest

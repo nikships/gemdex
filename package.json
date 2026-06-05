@@ -14,6 +14,7 @@
         "lint": "pnpm -r lint",
         "lint:fix": "pnpm -r run lint:fix",
         "typecheck": "pnpm -r run typecheck",
+        "test:byoi": "node packages/mcp/integration/byoi.mjs",
         "release:core": "pnpm --filter gemdex-core... run build && pnpm --filter gemdex-core publish --access public --no-git-checks",
         "release:mcp": "pnpm --filter gemdex-mcp... run build && pnpm --filter gemdex-mcp publish --access public --no-git-checks"
     },
