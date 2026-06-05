@@ -261,6 +261,21 @@ test('CORS preflight allows a configured origin and Authorization header', async
     }, { token: 'test-token', allowedOrigins: ['https://app.example.test'] });
 });
 
+test('CORS matches a configured origin that has a trailing slash', async () => {
+    const store = new FakeMemoryBackend();
+    await withServer(store, async (base) => {
+        const res = await fetch(`${base}/v1/memories`, {
+            method: 'OPTIONS',
+            headers: {
+                Origin: 'https://app.example.test',
+                'Access-Control-Request-Method': 'GET',
+            },
+        });
+        assert.equal(res.status, 204);
+        assert.equal(res.headers.get('access-control-allow-origin'), 'https://app.example.test');
+    }, { token: 'test-token', allowedOrigins: ['https://app.example.test/'] });
+});
+
 test('CORS preflight rejects a disallowed origin', async () => {
     const store = new FakeMemoryBackend();
     await withServer(store, async (base) => {

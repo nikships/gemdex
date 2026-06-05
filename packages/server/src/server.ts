@@ -45,7 +45,10 @@ const ALLOW_METHODS = 'GET, POST, PUT, PATCH, DELETE, OPTIONS';
 const ALLOW_HEADERS = 'Content-Type, Authorization';
 
 function normalizeOrigins(origins: string[] | undefined): Set<string> {
-    return new Set((origins ?? []).map((origin) => origin.trim()).filter(Boolean));
+    // Strip trailing slashes so a configured origin like
+    // "https://app.example.com/" matches the browser-sent Origin header
+    // ("https://app.example.com"), which never includes a trailing slash.
+    return new Set((origins ?? []).map((origin) => origin.trim().replace(/\/+$/, '')).filter(Boolean));
 }
 
 function buildServerCorsHeaders(req: http.IncomingMessage, allowedOrigins: Set<string>): Record<string, string> {

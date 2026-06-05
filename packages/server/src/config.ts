@@ -53,7 +53,10 @@ export function loadServerConfig(options: LoadServerConfigOptions = {}): ServerC
         } else if (arg.startsWith('--config=')) {
             argConfig = arg.slice('--config='.length);
         } else if (arg === '--allowed-origin') {
-            argAllowedOrigins.push(argv[++i]);
+            const value = argv[++i];
+            if (value !== undefined) {
+                argAllowedOrigins.push(value);
+            }
         } else if (arg.startsWith('--allowed-origin=')) {
             argAllowedOrigins.push(arg.slice('--allowed-origin='.length));
         } else if (arg === '--unsafe-dev-no-auth') {

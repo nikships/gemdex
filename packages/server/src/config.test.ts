@@ -166,6 +166,14 @@ test('CLI args parse allowed origins and unsafe dev mode', () => {
     ]);
 });
 
+test('--allowed-origin as the final arg with no value does not crash', () => {
+    const cfg = loadServerConfig({
+        env: { GEMDEX_SERVER_TOKEN: 'secret' },
+        argv: ['--allowed-origin'],
+    });
+    assert.deepEqual(cfg.allowedOrigins, []);
+});
+
 test('invalid unsafe dev mode boolean throws a clear error', () => {
     assert.throws(
         () => loadServerConfig({ env: { GEMDEX_SERVER_UNSAFE_DEV_NO_AUTH: 'maybe' }, argv: [] }),
