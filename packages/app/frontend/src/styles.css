@@ -181,7 +181,8 @@ body {
   backdrop-filter: blur(3px);
 }
 
-.settings-card {
+.settings-card,
+.confirm-card {
   width: min(720px, 100%);
   max-height: calc(100vh - 48px);
   overflow-y: auto;
@@ -190,6 +191,27 @@ body {
   border-radius: 18px;
   background: var(--panel);
   box-shadow: 0 24px 64px rgba(63, 48, 38, 0.24);
+}
+
+.confirm-card {
+  width: min(420px, 100%);
+}
+
+.confirm-card h2 {
+  margin: 0;
+}
+
+.confirm-card p {
+  margin: 10px 0 0;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 22px;
 }
 
 .settings-head,
@@ -517,16 +539,32 @@ button:disabled {
 }
 
 .memory-item {
-  padding: 11px 13px;
   border-radius: 10px;
-  cursor: pointer;
   margin-bottom: 5px;
   border: 1px solid transparent;
   transition: background 0.12s, border-color 0.12s;
 }
 
-.memory-item:hover {
+.memory-row {
+  width: 100%;
+  display: block;
+  padding: 11px 13px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  box-shadow: none;
+}
+
+.memory-row:hover {
   background: var(--paper-2);
+}
+
+.memory-row:focus-visible,
+.similar-row:focus-visible {
+  outline: 2px solid var(--rust);
+  outline-offset: 2px;
 }
 
 .memory-item.active {
@@ -535,7 +573,7 @@ button:disabled {
 }
 
 /* Rows with an image thumbnail lay the thumb beside the text block. */
-.memory-item.has-thumb {
+.memory-row.has-thumb {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -915,10 +953,18 @@ button.ghost.danger-text {
   justify-content: flex-end;
 }
 
+.attach-progress,
 .attach-error {
   margin: 0;
-  color: var(--danger);
   font-size: 12px;
+}
+
+.attach-progress {
+  color: var(--muted);
+}
+
+.attach-error {
+  color: var(--danger);
 }
 
 /* ── Find-similar panel ───────────────────────────────────────────────── */
@@ -949,15 +995,24 @@ button.ghost.danger-text {
 }
 
 .similar-item {
-  padding: 8px 10px;
   border-radius: 8px;
-  cursor: pointer;
   border: 1px solid transparent;
 }
 
-.similar-item:hover {
+.similar-row {
+  width: 100%;
+  display: block;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  box-shadow: none;
+}
+
+.similar-row:hover {
   background: var(--paper-2);
-  border-color: var(--border);
 }
 
 .similar-item-title {

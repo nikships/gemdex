@@ -43,6 +43,7 @@ const els = {
   recoveryMessage: document.querySelector("#recovery-message"),
   recoverySettings: document.querySelector("#recovery-settings"),
   recoveryLocal: document.querySelector("#recovery-local"),
+  recoveryRetry: document.querySelector("#recovery-retry"),
   placeholder: document.querySelector("#placeholder"),
   editor: document.querySelector("#editor"),
   title: document.querySelector("#title-input"),
@@ -58,6 +59,7 @@ const els = {
   attachBtn: document.querySelector("#attach-btn"),
   attachInput: document.querySelector("#attach-input"),
   attachList: document.querySelector("#attachment-list"),
+  attachProgress: document.querySelector("#attach-progress"),
   attachError: document.querySelector("#attach-error"),
   dropzone: document.querySelector("#dropzone"),
   dropzoneHint: document.querySelector("#dropzone-hint"),
@@ -83,6 +85,11 @@ const els = {
   remoteUrl: document.querySelector("#remote-url"),
   remoteToken: document.querySelector("#remote-token"),
   remoteSave: document.querySelector("#remote-save"),
+  confirmModal: document.querySelector("#confirm-modal"),
+  confirmTitle: document.querySelector("#confirm-title"),
+  confirmMessage: document.querySelector("#confirm-message"),
+  confirmCancel: document.querySelector("#confirm-cancel"),
+  confirmOk: document.querySelector("#confirm-ok"),
 };
 
 let apiBase = "";
@@ -105,6 +112,55 @@ let editorAttachments = [];
 let loadedAttachmentSig = "";
 let listThumbnailRenderId = 0;
 const listThumbnailObjectUrls = new Set();
+let settingsOpener = null;
+let confirmOpener = null;
+let confirmResolver = null;
+
+const focusableSelector = [
+  "a[href]",
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "[tabindex]:not([tabindex='-1'])",
+].join(",");
+
+function focusableWithin(root) {
+  return Array.from(root.querySelectorAll(focusableSelector))
+    .filter((el) => !el.hidden && !el.closest("[hidden]"));
+}
+
+function focusFirstIn(root, fallback = root) {
+  (focusableWithin(root)[0] ?? fallback).focus();
+}
+
+function trapFocus(event, root) {
+  if (event.key !== "Tab") return;
+  const focusable = focusableWithin(root);
+  if (focusable.length === 0) {
+    event.preventDefault();
+    root.focus();
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (!root.contains(document.activeElement)) {
+    event.preventDefault();
+    if (event.shiftKey) {
+      last.focus();
+    } else {
+      first.focus();
+    }
+    return;
+  }
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
 
 async function resolveApiBase() {
   // Prefer the base URL handed to us by the native shell.
@@ -247,16 +303,19 @@ function renderList() {
     const li = document.createElement("li");
     li.className = "memory-item" + (m.id === selectedId ? " active" : "");
     li.dataset.id = m.id;
-    li.innerHTML = `
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "memory-row";
+    button.innerHTML = `
       <div class="item-body">
         <div class="item-title"></div>
         <div class="item-preview"></div>
         <div class="item-date"></div>
       </div>
     `;
-    li.querySelector(".item-title").textContent = m.title || "Untitled memory";
-    li.querySelector(".item-preview").textContent = m.preview ?? "";
-    const dateEl = li.querySelector(".item-date");
+    button.querySelector(".item-title").textContent = m.title || "Untitled memory";
+    button.querySelector(".item-preview").textContent = m.preview ?? "";
+    const dateEl = button.querySelector(".item-date");
     dateEl.textContent = fmtDate(m.updatedAt);
     const attachments = m.attachments ?? [];
     if (attachments.length > 0) {
@@ -279,6 +338,7 @@ function renderList() {
         }
         thumb.remove();
         li.classList.remove("has-thumb");
+        button.classList.remove("has-thumb");
       };
       if (apiToken) {
         fetchAttachmentObjectUrl(m.id, image.id).then((url) => {
@@ -292,14 +352,17 @@ function renderList() {
         }).catch(() => {
           thumb.remove();
           li.classList.remove("has-thumb");
+          button.classList.remove("has-thumb");
         });
       } else {
         thumb.src = attachmentUrl(m.id, image.id);
       }
       li.classList.add("has-thumb");
-      li.insertBefore(thumb, li.firstChild);
+      button.classList.add("has-thumb");
+      button.insertBefore(thumb, button.firstChild);
     }
-    li.addEventListener("click", () => openMemory(m.id));
+    button.addEventListener("click", () => openMemory(m.id));
+    li.appendChild(button);
     els.list.appendChild(li);
   }
 }
@@ -386,6 +449,11 @@ function clearAttachError() {
 function showAttachError(message) {
   els.attachError.textContent = message;
   els.attachError.hidden = false;
+}
+
+function setAttachProgress(message = "") {
+  els.attachProgress.textContent = message;
+  els.attachProgress.hidden = message.length === 0;
 }
 
 /** Validate + add picked/dropped files to the editor set (client pre-check). */
@@ -569,20 +637,46 @@ async function buildAttachmentsPayload(isUpdate) {
     // On update, an explicit empty array clears media; on create, send nothing.
     return isUpdate ? [] : undefined;
   }
-  const payload = [];
-  for (const item of editorAttachments) {
+  let completed = 0;
+  const total = editorAttachments.length;
+  setAttachProgress(`Preparing ${total} ${total === 1 ? "attachment" : "attachments"}…`);
+  const payload = await mapWithConcurrency(editorAttachments, 2, async (item) => {
     const caption = (item.caption || "").trim() || undefined;
+    let entry;
     if (item.source === "new") {
-      payload.push({ mimeType: item.mimeType, data: await fileToBase64(item.file), ...(caption && { caption }) });
+      entry = { mimeType: item.mimeType, data: await fileToBase64(item.file), ...(caption && { caption }) };
     } else {
-      payload.push({
+      entry = {
         mimeType: item.mimeType,
         data: await fetchAttachmentBase64(selectedId, item.id),
         ...(caption && { caption }),
-      });
+      };
     }
-  }
+    completed += 1;
+    setAttachProgress(`Prepared ${completed} of ${total} ${total === 1 ? "attachment" : "attachments"}…`);
+    return entry;
+  });
   return payload;
+}
+
+async function mapWithConcurrency(items, limit, mapper) {
+  const results = new Array(items.length);
+  let next = 0;
+  let failed = false;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length && !failed) {
+      const index = next;
+      next += 1;
+      try {
+        results[index] = await mapper(items[index], index);
+      } catch (err) {
+        failed = true;
+        throw err;
+      }
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 async function saveCurrent(event) {
@@ -630,6 +724,7 @@ async function saveCurrent(event) {
     setStatus(`Error: ${err.message}`, true);
   } finally {
     els.saveBtn.disabled = false;
+    setAttachProgress();
   }
 }
 
@@ -654,6 +749,9 @@ async function findSimilar(item) {
     for (const r of results) {
       const li = document.createElement("li");
       li.className = "similar-item";
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "similar-row";
       const titleEl = document.createElement("div");
       titleEl.className = "similar-item-title";
       titleEl.textContent = r.title || "Untitled memory";
@@ -661,11 +759,12 @@ async function findSimilar(item) {
       scoreEl.className = "similar-item-score";
       scoreEl.textContent = typeof r.score === "number" ? r.score.toFixed(3) : "";
       titleEl.appendChild(scoreEl);
-      li.appendChild(titleEl);
-      li.addEventListener("click", () => {
+      button.appendChild(titleEl);
+      button.addEventListener("click", () => {
         hideSimilar();
         openMemory(r.id);
       });
+      li.appendChild(button);
       els.similarList.appendChild(li);
     }
   } catch (err) {
@@ -721,9 +820,47 @@ function hideSimilar() {
   els.similarError.innerHTML = "";
 }
 
+function confirmAction({
+  title = "Confirm action",
+  message,
+  confirmLabel = "Continue",
+  destructive = false,
+}) {
+  if (confirmResolver) {
+    confirmResolver(false);
+    confirmResolver = null;
+  }
+  confirmOpener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  els.confirmTitle.textContent = title;
+  els.confirmMessage.textContent = message;
+  els.confirmOk.textContent = confirmLabel;
+  els.confirmOk.classList.toggle("danger", destructive);
+  els.confirmOk.classList.toggle("primary", !destructive);
+  els.confirmModal.hidden = false;
+  requestAnimationFrame(() => focusFirstIn(els.confirmModal.querySelector(".confirm-card")));
+  return new Promise((resolve) => {
+    confirmResolver = resolve;
+  });
+}
+
+function closeConfirm(accepted = false) {
+  if (!confirmResolver) return;
+  const resolve = confirmResolver;
+  confirmResolver = null;
+  els.confirmModal.hidden = true;
+  resolve(accepted);
+  if (confirmOpener?.isConnected) confirmOpener.focus();
+  confirmOpener = null;
+}
+
 async function deleteCurrent() {
   if (!selectedId) return;
-  if (!confirm("Delete this memory? This cannot be undone.")) return;
+  if (!(await confirmAction({
+    title: "Delete memory",
+    message: "Delete this memory? This cannot be undone.",
+    confirmLabel: "Delete",
+    destructive: true,
+  }))) return;
   try {
     await api(`/memories/${encodeURIComponent(selectedId)}`, { method: "DELETE" });
     selectedId = null;
@@ -841,6 +978,9 @@ function renderBackendBadge() {
 
 function clearRecovery() {
   els.recoveryPanel.hidden = true;
+  els.recoverySettings.hidden = false;
+  els.recoveryLocal.hidden = false;
+  els.recoveryRetry.hidden = true;
 }
 
 function showRemoteRecovery(error) {
@@ -849,7 +989,9 @@ function showRemoteRecovery(error) {
   const remoteName = activeRemoteName() || "remote storage";
   els.recoveryTitle.textContent = `${remoteName} is unreachable`;
   els.recoveryMessage.textContent = `${error.message} Open Storage settings to test or edit the remote, or switch to local storage if it is configured.`;
+  els.recoverySettings.hidden = false;
   els.recoveryLocal.hidden = !settingsState?.localConfigured;
+  els.recoveryRetry.hidden = true;
   els.recoveryPanel.hidden = false;
   els.placeholder.hidden = true;
   els.editor.hidden = true;
@@ -857,6 +999,18 @@ function showRemoteRecovery(error) {
   selectedId = null;
   renderList();
   return true;
+}
+
+function showSidecarRecovery() {
+  els.recoveryTitle.textContent = "Memory store did not start";
+  els.recoveryMessage.textContent = "The desktop shell could not reach the local memory sidecar. Retry the connection; if it still fails, restart Gemdex and check the sidecar logs.";
+  els.recoverySettings.hidden = true;
+  els.recoveryLocal.hidden = true;
+  els.recoveryRetry.hidden = false;
+  els.recoveryPanel.hidden = false;
+  els.placeholder.hidden = true;
+  els.editor.hidden = true;
+  hideSimilar();
 }
 
 function selectedRemoteName() {
@@ -921,7 +1075,9 @@ async function refreshSettings() {
 async function openSettings() {
   showSettingsError();
   els.remoteStatus.textContent = "Loading storage settings…";
+  settingsOpener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   els.settingsModal.hidden = false;
+  requestAnimationFrame(() => focusFirstIn(els.settingsModal.querySelector(".settings-card")));
   try {
     await Promise.all([refreshSettings(), refreshConfigState()]);
     renderSettings();
@@ -939,6 +1095,8 @@ function closeSettings() {
   els.settingsModal.hidden = true;
   showSettingsError();
   els.remoteToken.value = "";
+  if (settingsOpener?.isConnected) settingsOpener.focus();
+  settingsOpener = null;
 }
 
 async function applyMode(mode, name) {
@@ -946,7 +1104,11 @@ async function applyMode(mode, name) {
   const currentBackend = activeBackend();
   if (
     shouldConfirmBackendSwitch(currentBackend, mode, name)
-    && !confirm(backendSwitchConfirmation(currentBackend, mode, name))
+    && !(await confirmAction({
+      title: "Switch storage backend",
+      message: backendSwitchConfirmation(currentBackend, mode, name),
+      confirmLabel: "Switch",
+    }))
   ) {
     return;
   }
@@ -1017,7 +1179,11 @@ async function testSelectedRemote() {
 
 async function importLocalToSelectedRemote() {
   const name = selectedRemoteName();
-  if (!name || !confirm(`Import local memories to ${name}? Existing ids will be updated.`)) return;
+  if (!name || !(await confirmAction({
+    title: "Import local memories",
+    message: `Import local memories to ${name}? Existing ids will be updated.`,
+    confirmLabel: "Import",
+  }))) return;
   showSettingsError();
   els.remoteImport.disabled = true;
   els.remoteStatus.textContent = `Importing local memories to ${name}…`;
@@ -1043,7 +1209,12 @@ async function importLocalToSelectedRemote() {
 
 async function removeSelectedRemote() {
   const name = selectedRemoteName();
-  if (!name || !confirm(`Remove the ${name} remote configuration?`)) return;
+  if (!name || !(await confirmAction({
+    title: "Remove remote",
+    message: `Remove the ${name} remote configuration?`,
+    confirmLabel: "Remove",
+    destructive: true,
+  }))) return;
   showSettingsError();
   try {
     settingsState = await api(`/settings/remotes/${encodeURIComponent(name)}`, {
@@ -1061,9 +1232,31 @@ function wireEvents() {
   els.setupSettingsBtn.addEventListener("click", openSetupRemote);
   els.recoverySettings.addEventListener("click", openSettings);
   els.recoveryLocal.addEventListener("click", () => applyMode("local"));
+  els.recoveryRetry.addEventListener("click", initAfterEvents);
   els.settingsClose.addEventListener("click", closeSettings);
   els.settingsModal.addEventListener("click", (event) => {
     if (event.target === els.settingsModal) closeSettings();
+  });
+  els.settingsModal.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeSettings();
+    } else {
+      trapFocus(event, els.settingsModal.querySelector(".settings-card"));
+    }
+  });
+  els.confirmCancel.addEventListener("click", () => closeConfirm(false));
+  els.confirmOk.addEventListener("click", () => closeConfirm(true));
+  els.confirmModal.addEventListener("click", (event) => {
+    if (event.target === els.confirmModal) closeConfirm(false);
+  });
+  els.confirmModal.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeConfirm(false);
+    } else {
+      trapFocus(event, els.confirmModal.querySelector(".confirm-card"));
+    }
   });
   els.modeLocal.addEventListener("click", () => applyMode("local"));
   els.modeRemote.addEventListener("click", () => applyMode("remote", selectedRemoteName()));
@@ -1168,15 +1361,48 @@ async function loadMemories() {
 async function init() {
   wireEvents();
   els.setupForm.addEventListener("submit", submitApiKey);
+  await initAfterEvents();
+}
+
+async function initAfterEvents() {
   renderBackendBadge();
   apiBase = await resolveApiBase();
   setStatus("waiting for memory store…");
   const healthy = await waitForHealth();
   if (!healthy) {
+    showSetup(false);
+    showSidecarRecovery();
     setStatus("Could not reach the memory store sidecar.", true);
     return;
   }
   if (!(await syncConfigGate())) setStatus("API key required");
 }
 
-init();
+if (!import.meta.vitest) {
+  init();
+}
+
+export const __private = {
+  els,
+  renderList,
+  syncConfigGate,
+  showRemoteRecovery,
+  showSidecarRecovery,
+  openSettings,
+  closeSettings,
+  confirmAction,
+  closeConfirm,
+  buildAttachmentsPayload,
+  findSimilar,
+  openMemory,
+  setTestState(state = {}) {
+    if ("apiBase" in state) apiBase = state.apiBase;
+    if ("apiToken" in state) apiToken = state.apiToken;
+    if ("memories" in state) memories = state.memories;
+    if ("selectedId" in state) selectedId = state.selectedId;
+    if ("settingsState" in state) settingsState = state.settingsState;
+    if ("configState" in state) configState = state.configState;
+    if ("editorAttachments" in state) editorAttachments = state.editorAttachments;
+    if ("loadedAttachmentSig" in state) loadedAttachmentSig = state.loadedAttachmentSig;
+  },
+};
