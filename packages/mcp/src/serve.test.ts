@@ -4,8 +4,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AddressInfo } from "node:net";
+import { createServer as httpServer } from "node:http";
 import { LanceDBVectorDatabase, LocalMemoryBackend, Embedding, EmbeddingVector, FileBlobStore } from "gemdex-core";
-import type { EmbeddingContent } from "gemdex-core";
+import type { EmbeddingContent, MemoryBackend } from "gemdex-core";
+import { createMemoryApiHandler } from "./http-api.js";
 import { createServer } from "./serve.js";
 
 const DIM = 16;
@@ -93,6 +95,51 @@ test("GET /config reports configured when a store is present", async () => {
     assert.deepEqual(await res.json(), { configured: true });
 });
 
+test("shared memory API handler mounts data routes without desktop /config", async () => {
+    const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), "gemdex-shared-api-db-"));
+    const blobDir = fs.mkdtempSync(path.join(os.tmpdir(), "gemdex-shared-api-blob-"));
+    const db = new LanceDBVectorDatabase({ uri: dbDir });
+    const store = new LocalMemoryBackend({
+        embedding: new FakeEmbedding(),
+        vectorDatabase: db,
+        blobStore: new FileBlobStore(blobDir),
+    });
+    const srv = httpServer(createMemoryApiHandler({
+        store,
+        corsHeaders: { 'Access-Control-Allow-Origin': 'https://server.example.test' },
+    }));
+    await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
+    const addr = srv.address() as AddressInfo;
+    const srvBase = `http://127.0.0.1:${addr.port}`;
+    try {
+        const configRes = await fetch(`${srvBase}/config`);
+        assert.equal(configRes.status, 404);
+
+        const preflightRes = await fetch(`${srvBase}/memories`, { method: "OPTIONS" });
+        assert.equal(preflightRes.status, 204);
+        assert.equal(preflightRes.headers.get("access-control-allow-origin"), "https://server.example.test");
+        assert.ok((preflightRes.headers.get("access-control-allow-methods") ?? "").includes("POST"));
+        assert.ok((preflightRes.headers.get("access-control-allow-headers") ?? "").includes("X-Gemdex-Token"));
+
+        const createRes = await fetch(`${srvBase}/memories`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ content: "shared handler memory" }),
+        });
+        assert.equal(createRes.status, 201);
+        assert.equal(createRes.headers.get("access-control-allow-origin"), "https://server.example.test");
+
+        const listRes = await fetch(`${srvBase}/memories`);
+        assert.equal(listRes.status, 200);
+        const { memories } = await json(listRes);
+        assert.equal(memories.length, 1);
+    } finally {
+        await new Promise<void>((resolve) => srv.close(() => resolve()));
+        fs.rmSync(dbDir, { recursive: true, force: true });
+        fs.rmSync(blobDir, { recursive: true, force: true });
+    }
+});
+
 test("data routes answer 503 needsKey when no store is configured", async () => {
     const bare = createServer({ config: {} as any, store: null });
     await new Promise<void>((resolve) => bare.listen(0, "127.0.0.1", resolve));
@@ -174,6 +221,16 @@ test("export then import round-trips memories", async () => {
     assert.ok(result.imported >= 1);
 });
 
+test("import rejects missing records array", async () => {
+    const res = await fetch(`${base}/import`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+    });
+    assert.equal(res.status, 400);
+    assert.deepEqual(await res.json(), { error: "Invalid payload: 'records' must be an array" });
+});
+
 test("create requires non-empty content", async () => {
     const res = await fetch(`${base}/memories`, {
         method: "POST",
@@ -181,6 +238,16 @@ test("create requires non-empty content", async () => {
         body: JSON.stringify({ content: "   " }),
     });
     assert.equal(res.status, 400);
+});
+
+test("invalid JSON body returns 400", async () => {
+    const res = await fetch(`${base}/memories`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{",
+    });
+    assert.equal(res.status, 400);
+    assert.deepEqual(await res.json(), { error: "Invalid JSON body" });
 });
 
 test("get on unknown id returns 404", async () => {
@@ -252,6 +319,7 @@ test("multimodal: create with an attachment, then fetch its raw bytes", async ()
         const blobRes = await fetch(`${mmBase}/memories/${memory.id}/attachments/${attId}`);
         assert.equal(blobRes.status, 200);
         assert.equal(blobRes.headers.get("content-type"), "image/png");
+        assert.equal(blobRes.headers.get("x-content-type-options"), "nosniff");
         const buf = Buffer.from(await blobRes.arrayBuffer());
         assert.equal(buf.toString(), "PNGBYTES");
 
@@ -272,6 +340,42 @@ test("multimodal: create with an attachment, then fetch its raw bytes", async ()
         await new Promise<void>((resolve) => mmServer.close(() => resolve()));
         fs.rmSync(mmDbDir, { recursive: true, force: true });
         fs.rmSync(mmBlobDir, { recursive: true, force: true });
+    }
+});
+
+test("attachment bytes force download for unsupported mime metadata", async () => {
+    const unexpectedStoreCall = async (): Promise<never> => {
+        throw new Error("Unexpected store call");
+    };
+    const store: MemoryBackend = {
+        save: unexpectedStoreCall,
+        recall: unexpectedStoreCall,
+        update: unexpectedStoreCall,
+        updateAttachmentCaptions: unexpectedStoreCall,
+        get: unexpectedStoreCall,
+        list: unexpectedStoreCall,
+        delete: unexpectedStoreCall,
+        exportAll: unexpectedStoreCall,
+        importRecords: unexpectedStoreCall,
+        readAttachment: async () => ({
+            data: Buffer.from("<html></html>"),
+            mimeType: "text/html",
+            byteLength: Buffer.byteLength("<html></html>"),
+        }),
+    };
+    const srv = httpServer(createMemoryApiHandler({ store }));
+    await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
+    const addr = srv.address() as AddressInfo;
+    const srvBase = `http://127.0.0.1:${addr.port}`;
+    try {
+        const res = await fetch(`${srvBase}/memories/memory-id/attachments/attachment-id`);
+        assert.equal(res.status, 200);
+        assert.equal(res.headers.get("content-type"), "application/octet-stream");
+        assert.equal(res.headers.get("content-disposition"), "attachment");
+        assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+        assert.equal(Buffer.from(await res.arrayBuffer()).toString(), "<html></html>");
+    } finally {
+        await new Promise<void>((resolve) => srv.close(() => resolve()));
     }
 });
 
