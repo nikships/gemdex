@@ -153,6 +153,17 @@ function bytesFromDatabase(value: Buffer | Uint8Array | string | null): Buffer {
     return Buffer.from(value, 'base64');
 }
 
+/**
+ * Build a comma-separated list of positional placeholders ($1, $2, ...) for an
+ * `IN (...)` clause. We expand to scalar placeholders rather than `= ANY($1)`
+ * with an array param: the array form is unsupported by the pg-mem engine used
+ * in tests (it silently matches nothing), while expanded placeholders behave
+ * identically on real Postgres and pg-mem.
+ */
+function inPlaceholders(count: number, start = 1): string {
+    return Array.from({ length: count }, (_, index) => `$${start + index}`).join(', ');
+}
+
 async function loadAttachments(db: Queryable, memoryId: string): Promise<MemoryAttachment[]> {
     const result = await db.query<AttachmentRow>(
         `SELECT id, kind, mime_type, byte_length, caption
@@ -222,7 +233,7 @@ export class PostgresMemoryBackend implements MemoryBackend {
              LIMIT $2`,
             [`%${trimmed}%`, max],
         );
-        const memories = await Promise.all(result.rows.map((row) => this.rowToMemory(row)));
+        const memories = await this.rowsToMemories(result.rows);
         return memories.map((memory) => ({ ...memory, score: 1 }));
     }
 
@@ -283,7 +294,7 @@ export class PostgresMemoryBackend implements MemoryBackend {
              FROM gemdex_memory_documents
              ORDER BY updated_at DESC, id ASC`,
         );
-        const memories = await Promise.all(result.rows.map((row) => this.rowToMemory(row)));
+        const memories = await this.rowsToMemories(result.rows);
         return memories.map((memory) => ({
             id: memory.id,
             title: memory.title,
@@ -303,8 +314,9 @@ export class PostgresMemoryBackend implements MemoryBackend {
                 [id],
             );
             await client.query('DELETE FROM gemdex_memory_documents WHERE id = $1', [id]);
-            for (const oldBlob of oldBlobs.rows) {
-                await client.query('DELETE FROM gemdex_attachment_blobs WHERE id = $1', [oldBlob.blob_ref_id]);
+            if (oldBlobs.rows.length > 0) {
+                const blobIds = oldBlobs.rows.map((oldBlob) => oldBlob.blob_ref_id);
+                await client.query(`DELETE FROM gemdex_attachment_blobs WHERE id IN (${inPlaceholders(blobIds.length)})`, blobIds);
             }
             await client.query('COMMIT');
         } catch (error) {
@@ -410,8 +422,9 @@ export class PostgresMemoryBackend implements MemoryBackend {
                 [id],
             );
             await client.query('DELETE FROM gemdex_memory_documents WHERE id = $1', [id]);
-            for (const oldBlob of oldBlobs.rows) {
-                await client.query('DELETE FROM gemdex_attachment_blobs WHERE id = $1', [oldBlob.blob_ref_id]);
+            if (oldBlobs.rows.length > 0) {
+                const blobIds = oldBlobs.rows.map((oldBlob) => oldBlob.blob_ref_id);
+                await client.query(`DELETE FROM gemdex_attachment_blobs WHERE id IN (${inPlaceholders(blobIds.length)})`, blobIds);
             }
             await client.query(
                 `INSERT INTO gemdex_memory_documents (id, title, content, created_at, updated_at)
@@ -506,6 +519,44 @@ export class PostgresMemoryBackend implements MemoryBackend {
             createdAt: timestampToMs(row.created_at),
             updatedAt: timestampToMs(row.updated_at),
         };
+    }
+
+    /**
+     * Batch-load attachments for many documents in a single query, then map
+     * each row to a Memory. Avoids the N+1 query pattern that arises when
+     * list()/recall() call rowToMemory() (one attachment query per row) in a
+     * loop.
+     */
+    private async rowsToMemories(rows: DocumentRow[]): Promise<Memory[]> {
+        if (rows.length === 0) return [];
+        const ids = rows.map((row) => row.id);
+        const attachmentResult = await this.pool.query<AttachmentRow & { memory_id: string }>(
+            `SELECT memory_id, id, kind, mime_type, byte_length, caption
+             FROM gemdex_memory_attachments
+             WHERE memory_id IN (${inPlaceholders(ids.length)})
+             ORDER BY memory_id, ordinal ASC`,
+            ids,
+        );
+        const attachmentsByMemoryId = new Map<string, MemoryAttachment[]>();
+        for (const row of attachmentResult.rows) {
+            const list = attachmentsByMemoryId.get(row.memory_id) ?? [];
+            list.push({
+                id: row.id,
+                kind: row.kind,
+                mimeType: row.mime_type,
+                byteLength: Number(row.byte_length),
+                ...(row.caption ? { caption: row.caption } : {}),
+            });
+            attachmentsByMemoryId.set(row.memory_id, list);
+        }
+        return rows.map((row) => ({
+            id: row.id,
+            title: row.title,
+            content: row.content,
+            attachments: attachmentsByMemoryId.get(row.id) ?? [],
+            createdAt: timestampToMs(row.created_at),
+            updatedAt: timestampToMs(row.updated_at),
+        }));
     }
 
     private async exportAttachmentsRecord(id: string): Promise<{ attachments?: MemoryExportRecord['attachments'] }> {

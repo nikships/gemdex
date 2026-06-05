@@ -116,3 +116,37 @@ test('schema stores chunks separately while recall returns full parent memories'
         assert.equal(results[0].content, longContent);
     });
 });
+
+test('list and recall batch-load attachments and group them by their own memory', async () => {
+    await withMigratedBackend(async (backend) => {
+        const a = await backend.save({
+            content: 'alpha shared-token apple',
+            title: 'Alpha',
+            attachments: [{ mimeType: 'image/png', data: Buffer.from('img-a').toString('base64'), caption: 'cap-a' }],
+        });
+        const b = await backend.save({ content: 'beta shared-token banana', title: 'Beta' });
+        const c = await backend.save({
+            content: 'gamma shared-token cherry',
+            title: 'Gamma',
+            attachments: [
+                { mimeType: 'image/png', data: Buffer.from('img-c0').toString('base64'), caption: 'cap-c0' },
+                { mimeType: 'image/png', data: Buffer.from('img-c1').toString('base64'), caption: 'cap-c1' },
+            ],
+        });
+
+        const listed = await backend.list();
+        const listedById = new Map(listed.map((m) => [m.id, m]));
+        assert.equal(listed.length, 3);
+        assert.equal(listedById.get(a.id)?.attachments.length, 1);
+        assert.equal(listedById.get(a.id)?.attachments[0].caption, 'cap-a');
+        assert.equal(listedById.get(b.id)?.attachments.length, 0);
+        assert.deepEqual(listedById.get(c.id)?.attachments.map((x) => x.caption), ['cap-c0', 'cap-c1']);
+
+        const recalled = await backend.recall('shared-token', 10);
+        const recalledById = new Map(recalled.map((m) => [m.id, m]));
+        assert.equal(recalled.length, 3);
+        assert.equal(recalledById.get(a.id)?.attachments.length, 1);
+        assert.equal(recalledById.get(b.id)?.attachments.length, 0);
+        assert.equal(recalledById.get(c.id)?.attachments.length, 2);
+    });
+});
