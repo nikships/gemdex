@@ -864,6 +864,38 @@ button.ghost.danger-text {
   font-size: 12px;
 }
 
+.similar-error {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid #e3b8ab;
+  border-radius: 10px;
+  background: #fff7f3;
+}
+
+.similar-error-summary,
+.similar-error-detail {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.similar-error-summary {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.similar-error-detail {
+  margin-top: 5px;
+  color: var(--danger);
+}
+
+.similar-error-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
 /* Scrollbar — tinted to match paper */
 ::-webkit-scrollbar {
   width: 10px;
