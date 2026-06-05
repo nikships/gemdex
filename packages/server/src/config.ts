@@ -54,25 +54,25 @@ function resolveBlobStore(env: Record<string, string | undefined>, fileConfig: R
     const fileBlobStore = fileConfig['blobStore'] && typeof fileConfig['blobStore'] === 'object'
         ? fileConfig['blobStore'] as Record<string, unknown>
         : {};
-    const kindRaw = env['BLOB_STORE'] ?? optionalString(fileBlobStore['kind']) ?? 'file';
+    const kindRaw = optionalString(env['BLOB_STORE']) ?? optionalString(fileBlobStore['kind']) ?? 'file';
     const kind = kindRaw.toLowerCase();
 
     if (kind === 'file') {
-        const directory = env['BLOB_DIR'] ?? optionalString(fileBlobStore['directory']);
+        const directory = optionalString(env['BLOB_DIR']) ?? optionalString(fileBlobStore['directory']);
         return { kind: 'file', ...(directory && { directory }) };
     }
 
     if (kind === 's3') {
-        const bucket = env['S3_BUCKET'] ?? optionalString(fileBlobStore['bucket']);
+        const bucket = optionalString(env['S3_BUCKET']) ?? optionalString(fileBlobStore['bucket']);
         if (!bucket) {
             throw new Error('BLOB_STORE=s3 requires S3_BUCKET (or blobStore.bucket in the config file).');
         }
-        const endpoint = env['S3_ENDPOINT'] ?? optionalString(fileBlobStore['endpoint']);
-        const region = env['S3_REGION'] ?? optionalString(fileBlobStore['region']) ?? 'auto';
-        const prefix = env['S3_PREFIX'] ?? optionalString(fileBlobStore['prefix']);
-        const accessKeyId = env['S3_ACCESS_KEY_ID'] ?? env['AWS_ACCESS_KEY_ID'] ?? optionalString(fileBlobStore['accessKeyId']);
-        const secretAccessKey = env['S3_SECRET_ACCESS_KEY'] ?? env['AWS_SECRET_ACCESS_KEY'] ?? optionalString(fileBlobStore['secretAccessKey']);
-        const forcePathStyle = parseBoolean(env['S3_FORCE_PATH_STYLE'] ?? fileBlobStore['forcePathStyle'], 'S3_FORCE_PATH_STYLE');
+        const endpoint = optionalString(env['S3_ENDPOINT']) ?? optionalString(fileBlobStore['endpoint']);
+        const region = optionalString(env['S3_REGION']) ?? optionalString(fileBlobStore['region']) ?? 'auto';
+        const prefix = optionalString(env['S3_PREFIX']) ?? optionalString(fileBlobStore['prefix']);
+        const accessKeyId = optionalString(env['S3_ACCESS_KEY_ID']) ?? optionalString(env['AWS_ACCESS_KEY_ID']) ?? optionalString(fileBlobStore['accessKeyId']);
+        const secretAccessKey = optionalString(env['S3_SECRET_ACCESS_KEY']) ?? optionalString(env['AWS_SECRET_ACCESS_KEY']) ?? optionalString(fileBlobStore['secretAccessKey']);
+        const forcePathStyle = parseBoolean(optionalString(env['S3_FORCE_PATH_STYLE']) ?? fileBlobStore['forcePathStyle'], 'S3_FORCE_PATH_STYLE');
         return {
             kind: 's3',
             bucket,
