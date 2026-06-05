@@ -4,7 +4,13 @@ import { MemoryBackend, RemoteMemoryBackend, envManager } from "gemdex-core";
 import { buildCorsHeaders, handleMemoryApiRequest, readBody, sendJson } from "gemdex-core";
 import { ClientConfigStore, StoredRemote, tokenEnvVarForRemote } from "./cli-config.js";
 import { createConfig, GemdexConfig } from "./config.js";
+import { errorMessage } from "./errors.js";
 import { createMemoryBackend } from "./memory.js";
+
+/** Read a string field from a parsed JSON body, trimmed; '' when absent or non-string. */
+function trimmedString(value: unknown): string {
+    return typeof value === 'string' ? value.trim() : '';
+}
 
 /**
  * Mutable server context. The sidecar boots even when no GEMINI_API_KEY is
@@ -145,7 +151,7 @@ async function testRemoteConnection(
         return {
             reachable: false,
             authenticated: false,
-            detail: error instanceof Error ? error.message : String(error),
+            detail: errorMessage(error),
         };
     }
 
@@ -156,7 +162,7 @@ async function testRemoteConnection(
         return {
             reachable: true,
             authenticated: false,
-            detail: error instanceof Error ? error.message : String(error),
+            detail: errorMessage(error),
         };
     }
 }
@@ -317,7 +323,7 @@ export function createServer(ctx: ServeContext): http.Server {
 
             if (method === 'POST' && pathname === '/config') {
                 const body = await readBody(req);
-                const apiKey = typeof body?.apiKey === 'string' ? body.apiKey.trim() : '';
+                const apiKey = trimmedString(body?.apiKey);
                 if (apiKey.length === 0) {
                     sendJson(res, 400, { error: "'apiKey' is required" }, corsHeaders);
                     return;
@@ -325,8 +331,8 @@ export function createServer(ctx: ServeContext): http.Server {
                 try {
                     configureApiKey(ctx, apiKey);
                     sendJson(res, 200, { configured: ctx.store !== null }, corsHeaders);
-                } catch (error: any) {
-                    sendJson(res, 500, { error: error?.message ?? 'Failed to configure API key' }, corsHeaders);
+                } catch (error) {
+                    sendJson(res, 500, { error: errorMessage(error) }, corsHeaders);
                 }
                 return;
             }
@@ -346,9 +352,9 @@ export function createServer(ctx: ServeContext): http.Server {
 
             if (method === 'POST' && pathname === '/settings/remotes') {
                 const body = await readBody(req);
-                const name = typeof body?.name === 'string' ? body.name.trim() : '';
-                const remoteUrl = typeof body?.url === 'string' ? body.url.trim() : '';
-                const token = typeof body?.token === 'string' ? body.token.trim() : '';
+                const name = trimmedString(body?.name);
+                const remoteUrl = trimmedString(body?.url);
+                const token = trimmedString(body?.token);
                 if (!name || !remoteUrl) {
                     sendJson(res, 400, { error: "'name' and 'url' are required" }, corsHeaders);
                     return;
@@ -374,9 +380,7 @@ export function createServer(ctx: ServeContext): http.Server {
                     }
                     sendJson(res, 200, settingsSummary(ctx), corsHeaders);
                 } catch (error) {
-                    sendJson(res, 400, {
-                        error: error instanceof Error ? error.message : String(error),
-                    }, corsHeaders);
+                    sendJson(res, 400, { error: errorMessage(error) }, corsHeaders);
                 }
                 return;
             }
@@ -400,23 +404,21 @@ export function createServer(ctx: ServeContext): http.Server {
                     }
                     sendJson(res, 200, settingsSummary(ctx), corsHeaders);
                 } catch (error) {
-                    sendJson(res, 400, {
-                        error: error instanceof Error ? error.message : String(error),
-                    }, corsHeaders);
+                    sendJson(res, 400, { error: errorMessage(error) }, corsHeaders);
                 }
                 return;
             }
 
             if (method === 'POST' && pathname === '/settings/mode') {
                 const body = await readBody(req);
-                const mode = typeof body?.mode === 'string' ? body.mode.trim().toLowerCase() : '';
+                const mode = trimmedString(body?.mode).toLowerCase();
                 try {
                     if (mode === 'local') {
                         clientConfigStore(ctx).activateLocal();
                         ctx.config = localConfig(ctx);
                         ctx.store = buildStore(ctx.config, ctx.createBackend);
                     } else if (mode === 'remote') {
-                        const name = typeof body?.name === 'string' ? body.name.trim() : '';
+                        const name = trimmedString(body?.name);
                         if (!name) throw new Error("'name' is required for remote mode.");
                         const nextConfig = remoteConfig(ctx, name);
                         clientConfigStore(ctx).activateRemote(name);
@@ -427,18 +429,14 @@ export function createServer(ctx: ServeContext): http.Server {
                     }
                     sendJson(res, 200, settingsSummary(ctx), corsHeaders);
                 } catch (error) {
-                    sendJson(res, 400, {
-                        error: error instanceof Error ? error.message : String(error),
-                    }, corsHeaders);
+                    sendJson(res, 400, { error: errorMessage(error) }, corsHeaders);
                 }
                 return;
             }
 
             if (method === 'POST' && pathname === '/settings/test') {
                 const body = await readBody(req);
-                const name = typeof body?.name === 'string'
-                    ? body.name.trim()
-                    : ctx.config.remoteName ?? '';
+                const name = typeof body?.name === 'string' ? body.name.trim() : ctx.config.remoteName ?? '';
                 if (!name) {
                     sendJson(res, 400, { error: "'name' is required" }, corsHeaders);
                     return;
@@ -446,18 +444,14 @@ export function createServer(ctx: ServeContext): http.Server {
                 try {
                     sendJson(res, 200, await testRemoteConnection(ctx, name), corsHeaders);
                 } catch (error) {
-                    sendJson(res, 400, {
-                        error: error instanceof Error ? error.message : String(error),
-                    }, corsHeaders);
+                    sendJson(res, 400, { error: errorMessage(error) }, corsHeaders);
                 }
                 return;
             }
 
             if (method === 'POST' && pathname === '/settings/import-local') {
                 const body = await readBody(req);
-                const name = typeof body?.name === 'string'
-                    ? body.name.trim()
-                    : ctx.config.remoteName ?? '';
+                const name = typeof body?.name === 'string' ? body.name.trim() : ctx.config.remoteName ?? '';
                 if (!name) {
                     sendJson(res, 400, { error: "'name' is required" }, corsHeaders);
                     return;
@@ -465,9 +459,7 @@ export function createServer(ctx: ServeContext): http.Server {
                 try {
                     sendJson(res, 200, await migrateLocalToRemote(ctx, name), corsHeaders);
                 } catch (error) {
-                    sendJson(res, 400, {
-                        error: error instanceof Error ? error.message : String(error),
-                    }, corsHeaders);
+                    sendJson(res, 400, { error: errorMessage(error) }, corsHeaders);
                 }
                 return;
             }

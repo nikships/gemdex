@@ -209,11 +209,9 @@ export class LanceDBVectorDatabase implements VectorDatabase {
     }
 
     async insertHybrid(collectionName: string, documents: VectorDocument[]): Promise<void> {
-        if (documents.length === 0) return;
-        const db = await this.connection();
-        const table = await db.openTable(collectionName);
-        const rows = documents.map(doc => this.documentToRow(doc));
-        await table.add(rows);
+        // Storage is identical for dense and hybrid collections; the FTS index
+        // is built lazily on first hybrid search, so inserts share one path.
+        await this.insert(collectionName, documents);
     }
 
     async search(collectionName: string, queryVector: number[], options?: SearchOptions): Promise<VectorSearchResult[]> {
@@ -339,7 +337,7 @@ export class LanceDBVectorDatabase implements VectorDatabase {
         return sorted.map(({ row, score }) => {
             const d = denseSub.get(row.id);
             const f = ftsSub.get(row.id);
-            const subScores: HybridSubScores | undefined = (d || f) ? {
+            const subScores: HybridSubScores | undefined = (d ?? f) ? {
                 ...(d && { denseRank: d.rank, ...(d.distance !== undefined && { denseDistance: d.distance }) }),
                 ...(f && { ftsRank: f.rank, ...(f.score !== undefined && { ftsScore: f.score }) }),
             } : undefined;
@@ -379,8 +377,7 @@ export class LanceDBVectorDatabase implements VectorDatabase {
         if (typeof limit === 'number') {
             q = q.limit(limit);
         }
-        const rows = (await q.toArray()) as Record<string, any>[];
-        return rows;
+        return (await q.toArray()) as Record<string, any>[];
     }
 
     async getCollectionDescription(collectionName: string): Promise<string> {

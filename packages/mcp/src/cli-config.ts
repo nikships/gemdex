@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { errorMessage } from './errors.js';
 
 export interface StoredRemote {
     url: string;
@@ -88,8 +89,7 @@ export class ClientConfigStore {
         try {
             return parseConfig(JSON.parse(fs.readFileSync(this.configPath, 'utf8')));
         } catch (error) {
-            const detail = error instanceof Error ? error.message : String(error);
-            throw new Error(`Unable to read ${this.configPath}: ${detail}`);
+            throw new Error(`Unable to read ${this.configPath}: ${errorMessage(error)}`);
         }
     }
 

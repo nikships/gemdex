@@ -24,7 +24,7 @@ export const KIND_CAPS = { image: 6, audio: 1, video: 1, pdf: 1 };
 export const MAX_BYTES_PER_ATTACHMENT = 20 * 1024 * 1024;
 
 export function kindFromMime(mimeType) {
-  return MIME_TO_KIND[(mimeType || "").toLowerCase()];
+  return MIME_TO_KIND[(mimeType ?? "").toLowerCase()];
 }
 
 export function humanSize(bytes) {
@@ -56,7 +56,7 @@ export function attachmentSignature(items) {
     items.map((a) => ({
       source: a.source,
       id: entryId(a),
-      caption: a.caption || "",
+      caption: a.caption ?? "",
     })),
   );
 }

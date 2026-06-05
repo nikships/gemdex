@@ -33,7 +33,7 @@ export class EnvManager {
                     }
                 }
             }
-        } catch (error) {
+        } catch {
             // Ignore file read errors
         }
 

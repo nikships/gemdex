@@ -227,11 +227,7 @@ export async function startServer(
 ): Promise<http.Server> {
     let resolvedStore = store ?? null;
     if (!resolvedStore && (config.databaseUrl || dependencies.pool)) {
-        try {
-            resolvedStore = await createConfiguredStore(config, dependencies);
-        } catch (error) {
-            throw error;
-        }
+        resolvedStore = await createConfiguredStore(config, dependencies);
     }
 
     return new Promise((resolve) => {
