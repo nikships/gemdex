@@ -26,6 +26,7 @@ GEMDEX_SERVER_DATABASE_URL=postgres://user:pass@localhost:5432/gemdex \
 
 # Start with durable Postgres storage (startup applies pending migrations first)
 GEMDEX_SERVER_DATABASE_URL=postgres://user:pass@localhost:5432/gemdex \
+  GEMINI_API_KEY=your-google-ai-key \
   gemdex-server
 
 # Bind to all interfaces for container or network exposure
@@ -45,6 +46,10 @@ GEMDEX_SERVER_TOKEN=change-me-to-a-long-random-secret \
 | `GEMDEX_SERVER_ALLOWED_ORIGINS` | (none) | Comma-separated browser origins allowed by CORS. No wildcard default. |
 | `GEMDEX_SERVER_UNSAFE_DEV_NO_AUTH` | `false` | Set `true` only for unsafe local development without auth. |
 | `GEMDEX_SERVER_DATABASE_URL` / `DATABASE_URL` | (none) | Postgres connection string. When set, startup applies migrations and serves durable memory routes. |
+| `GEMINI_API_KEY`       | (none)      | Server-owned Google AI key used for all remote embedding work. Clients do not need this key. |
+| `EMBEDDING_MODEL`      | `gemini-embedding-2` | Gemini embedding model. |
+| `EMBEDDING_DIMENSION`  | model default | Optional positive output dimension override. |
+| `GEMINI_BASE_URL`      | Google default | Optional custom Gemini API base URL. |
 | `BLOB_STORE`           | `file`      | Attachment blob store driver: `file` or `s3`.                  |
 | `BLOB_DIR`             | `~/.gemdex/blobs` | Directory for `BLOB_STORE=file`.                         |
 | `S3_BUCKET`            | (none)      | Bucket for `BLOB_STORE=s3`. Required for S3 mode.              |
@@ -88,6 +93,8 @@ You can pass a JSON config file via `--config <path>` or `GEMDEX_SERVER_CONFIG`:
   "token": "your-bearer-token",
   "allowedOrigins": ["https://app.example.com"],
   "databaseUrl": "postgres://user:pass@localhost:5432/gemdex",
+  "geminiApiKey": "your-google-ai-key",
+  "embeddingModel": "gemini-embedding-2",
   "blobStore": {
     "kind": "file",
     "directory": "/var/lib/gemdex/blobs"
@@ -96,6 +103,32 @@ You can pass a JSON config file via `--config <path>` or `GEMDEX_SERVER_CONFIG`:
 ```
 
 Explicit environment variables always override file values.
+
+## Server-Owned Embeddings
+
+Remote clients send text and inline base64 attachments to Gemdex Server. The
+server performs all embedding work using its own `GEMINI_API_KEY`; client
+machines do not need or receive that key. Keep it in your deployment secret
+store rather than committing it to a config file.
+
+The server can start without `GEMINI_API_KEY` so health checks and existing
+memory management remain available. Save, recall, update, and import operations
+that need embeddings return an actionable error until the key is configured.
+
+To smoke-test the real Gemini path after starting Postgres with pgvector and
+Gemdex Server:
+
+```sh
+curl -fsS http://127.0.0.1:8765/v1/memories \
+  -H "Authorization: Bearer $GEMDEX_SERVER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"content":"Gemini server-side embedding smoke test"}'
+
+curl -fsS http://127.0.0.1:8765/v1/recall \
+  -H "Authorization: Bearer $GEMDEX_SERVER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"server-side embedding"}'
+```
 
 ## Security Defaults
 

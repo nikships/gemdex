@@ -36,6 +36,11 @@ Environment variables:
   GEMDEX_SERVER_DATABASE_URL / DATABASE_URL
                         Postgres connection string. Startup runs migrations
                         before serving and exits on migration failure.
+  GEMINI_API_KEY        Server-owned Google AI key for embedding operations.
+                        Remote clients do not need this key.
+  EMBEDDING_MODEL       Gemini model (default: gemini-embedding-2).
+  EMBEDDING_DIMENSION   Optional positive output dimension override.
+  GEMINI_BASE_URL       Optional custom Gemini API base URL.
   BLOB_STORE            Attachment store: file or s3 (default: file).
   BLOB_DIR              Directory for BLOB_STORE=file.
   S3_BUCKET             Bucket for BLOB_STORE=s3.

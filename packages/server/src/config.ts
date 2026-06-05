@@ -31,6 +31,14 @@ export interface ServerConfig {
     allowedOrigins: string[];
     /** Optional Postgres connection string for the remote memory backend. */
     databaseUrl?: string;
+    /** Server-owned Gemini API key. Remote clients never need this value. */
+    geminiApiKey?: string;
+    /** Gemini embedding model used for server-side save/recall/update work. */
+    embeddingModel: string;
+    /** Optional custom Gemini API base URL. */
+    geminiBaseUrl?: string;
+    /** Optional embedding output dimensionality override. */
+    embeddingDimension?: number;
     /** Attachment blob storage backend for self-hosted deployments. */
     blobStore: BlobStoreConfig;
 }
@@ -54,6 +62,15 @@ function parseBoolean(value: unknown, name: string): boolean | undefined {
     if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
     if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
     throw new Error(`Invalid ${name} '${value}': must be true or false.`);
+}
+
+function parsePositiveInteger(value: unknown, name: string): number | undefined {
+    if (value === undefined || value === '') return undefined;
+    const parsed = Number(value);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+        throw new Error(`Invalid ${name} '${String(value)}': must be a positive integer.`);
+    }
+    return parsed;
 }
 
 function resolveBlobStore(env: Record<string, string | undefined>, fileConfig: Record<string, unknown>): BlobStoreConfig {
@@ -221,6 +238,20 @@ export function loadServerConfig(options: LoadServerConfigOptions = {}): ServerC
         env['DATABASE_URL'] ??
         argDatabaseUrl ??
         (typeof fileConfig['databaseUrl'] === 'string' ? fileConfig['databaseUrl'] : undefined);
+    const geminiApiKey =
+        normalizeNonEmpty(env['GEMINI_API_KEY']) ??
+        (typeof fileConfig['geminiApiKey'] === 'string' ? normalizeNonEmpty(fileConfig['geminiApiKey']) : undefined);
+    const embeddingModel =
+        normalizeNonEmpty(env['EMBEDDING_MODEL']) ??
+        (typeof fileConfig['embeddingModel'] === 'string' ? normalizeNonEmpty(fileConfig['embeddingModel']) : undefined) ??
+        'gemini-embedding-2';
+    const geminiBaseUrl =
+        normalizeNonEmpty(env['GEMINI_BASE_URL']) ??
+        (typeof fileConfig['geminiBaseUrl'] === 'string' ? normalizeNonEmpty(fileConfig['geminiBaseUrl']) : undefined);
+    const embeddingDimension = parsePositiveInteger(
+        env['EMBEDDING_DIMENSION'] ?? fileConfig['embeddingDimension'],
+        'EMBEDDING_DIMENSION',
+    );
 
     return {
         host,
@@ -229,6 +260,10 @@ export function loadServerConfig(options: LoadServerConfigOptions = {}): ServerC
         allowedOrigins,
         ...(token !== undefined && { token }),
         ...(databaseUrl !== undefined && { databaseUrl }),
+        ...(geminiApiKey !== undefined && { geminiApiKey }),
+        embeddingModel,
+        ...(geminiBaseUrl !== undefined && { geminiBaseUrl }),
+        ...(embeddingDimension !== undefined && { embeddingDimension }),
         blobStore: resolveBlobStore(env, fileConfig),
     };
 }

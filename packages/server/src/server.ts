@@ -2,6 +2,7 @@ import * as http from 'http';
 import { timingSafeEqual } from 'node:crypto';
 import { createRequire } from 'node:module';
 import {
+    Embedding,
     handleMemoryApiRequest,
     sendJson,
     ServerVersionInfo,
@@ -11,7 +12,13 @@ import {
 import type { MemoryBackend } from 'gemdex-core';
 import type { ServerConfig } from './config.js';
 import { createBlobStore } from './blob-store.js';
-import { createPostgresPool, migrateDatabase, PostgresMemoryBackend } from './postgres.js';
+import { createServerEmbedding } from './embedding.js';
+import {
+    createPostgresPool,
+    DatabasePool,
+    migrateDatabase,
+    PostgresMemoryBackend,
+} from './postgres.js';
 
 // Read the version from package.json so it never drifts from the published
 // version. createRequire works in ESM and resolves relative to this module
@@ -41,6 +48,12 @@ export interface CreateServerOptions {
     unsafeDevNoAuth?: boolean;
     /** Browser origins allowed to read data-route responses. Empty means browser cross-origin access is denied. */
     allowedOrigins?: string[];
+}
+
+export interface ConfiguredStoreDependencies {
+    pool?: DatabasePool;
+    embedding?: Embedding;
+    usePgVectorQueries?: boolean;
 }
 
 const ALLOW_METHODS = 'GET, POST, PUT, PATCH, DELETE, OPTIONS';
@@ -171,23 +184,47 @@ export function createServer({ store = null, token, unsafeDevNoAuth = false, all
 }
 
 /**
+ * Build the durable backend from server-owned infrastructure and embedding
+ * configuration. Dependencies are injectable so route tests never call Gemini
+ * or require a real Postgres service.
+ */
+export async function createConfiguredStore(
+    config: ServerConfig,
+    dependencies: ConfiguredStoreDependencies = {},
+): Promise<MemoryBackend | null> {
+    if (!config.databaseUrl && !dependencies.pool) return null;
+    const pool = dependencies.pool ?? createPostgresPool(config.databaseUrl!);
+    const ownsPool = dependencies.pool === undefined;
+    try {
+        await migrateDatabase(pool);
+    } catch (error) {
+        if (ownsPool) await pool.end().catch(() => undefined);
+        throw error;
+    }
+    return new PostgresMemoryBackend({
+        pool,
+        blobStore: createBlobStore(config.blobStore),
+        blobStorageProvider: config.blobStore.kind,
+        embedding: dependencies.embedding ?? createServerEmbedding(config),
+        usePgVectorQueries: dependencies.usePgVectorQueries,
+    });
+}
+
+/**
  * Start the server and log the bound address.
  */
-export async function startServer(config: ServerConfig, store?: MemoryBackend | null): Promise<http.Server> {
+export async function startServer(
+    config: ServerConfig,
+    store?: MemoryBackend | null,
+    dependencies: ConfiguredStoreDependencies = {},
+): Promise<http.Server> {
     let resolvedStore = store ?? null;
-    if (!resolvedStore && config.databaseUrl) {
-        const pool = createPostgresPool(config.databaseUrl);
+    if (!resolvedStore && (config.databaseUrl || dependencies.pool)) {
         try {
-            await migrateDatabase(pool);
+            resolvedStore = await createConfiguredStore(config, dependencies);
         } catch (error) {
-            await pool.end().catch(() => undefined);
             throw error;
         }
-        resolvedStore = new PostgresMemoryBackend({
-            pool,
-            blobStore: createBlobStore(config.blobStore),
-            blobStorageProvider: config.blobStore.kind,
-        });
     }
 
     return new Promise((resolve) => {
