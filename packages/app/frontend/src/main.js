@@ -144,6 +144,15 @@ function trapFocus(event, root) {
   }
   const first = focusable[0];
   const last = focusable[focusable.length - 1];
+  if (!root.contains(document.activeElement)) {
+    event.preventDefault();
+    if (event.shiftKey) {
+      last.focus();
+    } else {
+      first.focus();
+    }
+    return;
+  }
   if (event.shiftKey && document.activeElement === first) {
     event.preventDefault();
     last.focus();
@@ -653,11 +662,17 @@ async function buildAttachmentsPayload(isUpdate) {
 async function mapWithConcurrency(items, limit, mapper) {
   const results = new Array(items.length);
   let next = 0;
+  let failed = false;
   const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (next < items.length) {
+    while (next < items.length && !failed) {
       const index = next;
       next += 1;
-      results[index] = await mapper(items[index], index);
+      try {
+        results[index] = await mapper(items[index], index);
+      } catch (err) {
+        failed = true;
+        throw err;
+      }
     }
   });
   await Promise.all(workers);
