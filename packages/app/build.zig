@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const PlatformOption = enum {
     auto,
@@ -203,8 +204,9 @@ fn isZeroNativePath(b: *std.Build, path: []const u8) bool {
 }
 
 fn globalNpmRoot(b: *std.Build) ?[]const u8 {
+    const npm_exe = if (builtin.os.tag == .windows) "npm.cmd" else "npm";
     const result = std.process.run(b.allocator, b.graph.io, .{
-        .argv = &.{ "npm", "root", "-g" },
+        .argv = &.{ npm_exe, "root", "-g" },
         .stdout_limit = .limited(4096),
         .stderr_limit = .limited(4096),
     }) catch return null;
@@ -240,7 +242,7 @@ fn failZeroNativePath(reason: []const u8, bad_path: ?[]const u8) noreturn {
         \\[gemdex] Expected the framework root to contain `src/root.zig`.
         \\
     , .{});
-    @panic("unable to resolve zero-native path");
+    std.process.exit(1);
 }
 
 fn localModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, path: []const u8) *std.Build.Module {
