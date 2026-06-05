@@ -7,6 +7,7 @@ import {
     chunkMemory,
     DEFAULT_ATTACHMENT_LIMITS,
     deriveTitle,
+    Embedding,
     Memory,
     MemoryAttachment,
     MemoryAttachmentInput,
@@ -37,6 +38,9 @@ export interface PostgresMemoryBackendOptions {
     pool: DatabasePool;
     blobStore?: BlobStore;
     blobStorageProvider?: string;
+    embedding?: Embedding;
+    /** pg-mem cannot parse pgvector's <=> operator; tests opt into the fallback. */
+    usePgVectorQueries?: boolean;
 }
 
 interface DocumentRow extends QueryResultRow {
@@ -72,6 +76,18 @@ interface PreparedAttachment {
     byteLength: number;
     data: Buffer;
     caption?: string;
+}
+
+interface RecallChunkRow extends QueryResultRow {
+    id: string;
+    memory_id: string;
+    content?: string;
+    embedding_vector?: string | number[] | null;
+}
+
+interface RankedChunk {
+    id: string;
+    memoryId: string;
 }
 
 export class MigrationError extends Error {
@@ -157,6 +173,49 @@ function bytesFromDatabase(value: Buffer | Uint8Array | string | null): Buffer {
     return Buffer.from(value, 'base64');
 }
 
+function vectorLiteral(vector: number[]): string {
+    return `[${vector.join(',')}]`;
+}
+
+function parseVector(value: string | number[] | null | undefined): number[] | null {
+    if (Array.isArray(value)) return value.map(Number);
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    if (!trimmed.startsWith('[') || !trimmed.endsWith(']')) return null;
+    return trimmed.slice(1, -1).split(',').map(Number);
+}
+
+function cosineSimilarity(left: number[], right: number[]): number {
+    if (left.length !== right.length || left.length === 0) return -1;
+    let dot = 0;
+    let leftNorm = 0;
+    let rightNorm = 0;
+    for (let i = 0; i < left.length; i++) {
+        dot += left[i] * right[i];
+        leftNorm += left[i] * left[i];
+        rightNorm += right[i] * right[i];
+    }
+    if (leftNorm === 0 || rightNorm === 0) return -1;
+    return dot / (Math.sqrt(leftNorm) * Math.sqrt(rightNorm));
+}
+
+function lexicalScore(content: string, query: string): number {
+    const terms = query.toLowerCase().match(/[a-z0-9]+/g) ?? [];
+    if (terms.length === 0) return 0;
+    const haystack = content.toLowerCase();
+    return terms.reduce((score, term) => score + (haystack.includes(term) ? 1 : 0), 0) / terms.length;
+}
+
+function fuseRanks(branches: RankedChunk[][], k = 100): Map<string, number> {
+    const scores = new Map<string, number>();
+    for (const branch of branches) {
+        branch.forEach((chunk, index) => {
+            scores.set(chunk.id, (scores.get(chunk.id) ?? 0) + 1 / (k + index + 1));
+        });
+    }
+    return scores;
+}
+
 /**
  * Build a comma-separated list of positional placeholders ($1, $2, ...) for an
  * `IN (...)` clause. We expand to scalar placeholders rather than `= ANY($1)`
@@ -204,11 +263,15 @@ export class PostgresMemoryBackend implements MemoryBackend {
     private pool: DatabasePool;
     private blobStore?: BlobStore;
     private blobStorageProvider: string;
+    private embedding?: Embedding;
+    private usePgVectorQueries: boolean;
 
     constructor(options: PostgresMemoryBackendOptions) {
         this.pool = options.pool;
         this.blobStore = options.blobStore;
         this.blobStorageProvider = options.blobStorageProvider ?? 'external';
+        this.embedding = options.embedding;
+        this.usePgVectorQueries = options.usePgVectorQueries ?? true;
     }
 
     async close(): Promise<void> {
@@ -226,23 +289,67 @@ export class PostgresMemoryBackend implements MemoryBackend {
         limit?: number,
         queryAttachments?: MemoryAttachmentInput[],
     ): Promise<MemoryRecallResult[]> {
-        if ((queryAttachments?.length ?? 0) > 0) {
-            throw new Error('Postgres recall-by-media requires the pgvector/BM25 recall backend from GEM-11.');
-        }
         const trimmed = (query ?? '').trim();
-        if (trimmed.length === 0) return [];
+        const attachments = queryAttachments ?? [];
+        if (trimmed.length === 0 && attachments.length === 0) return [];
         const max = Math.max(1, Math.min(limit ?? 10, 50));
-        const result = await this.pool.query<DocumentRow>(
-            `SELECT DISTINCT d.id, d.title, d.content, d.created_at, d.updated_at
-             FROM gemdex_memory_documents d
-             JOIN gemdex_memory_chunks c ON c.memory_id = d.id
-             WHERE c.content ILIKE $1 OR d.title ILIKE $1
-             ORDER BY d.id ASC
-             LIMIT $2`,
-            [`%${trimmed}%`, max],
+        const chunkLimit = Math.max(max * 4, 20);
+        const branches: RankedChunk[][] = [];
+
+        if (trimmed.length > 0) {
+            if (this.embedding) {
+                const vector = await this.embedding.embed(trimmed);
+                branches.push(await this.denseRank(vector.vector, chunkLimit));
+            }
+            branches.push(await this.fullTextRank(trimmed, chunkLimit));
+        }
+
+        if (attachments.length > 0) {
+            if (!this.embedding) {
+                throw new Error('Recall-by-media requires a configured server embedding provider.');
+            }
+            if (!this.embedding.isMultimodal()) {
+                throw new Error('Recall-by-media requires a multimodal server embedding provider.');
+            }
+            const validated = await validateAttachments(attachments, DEFAULT_ATTACHMENT_LIMITS);
+            const vectors = await this.embedding.embedContentBatch(validated.map((attachment) => ({
+                inlineData: {
+                    mimeType: attachment.mimeType,
+                    data: attachment.bytes.toString('base64'),
+                },
+            })));
+            for (const vector of vectors) {
+                branches.push(await this.denseRank(vector.vector, chunkLimit));
+            }
+        }
+
+        const fused = fuseRanks(branches);
+        const parentScores = new Map<string, number>();
+        for (const branch of branches) {
+            for (const chunk of branch) {
+                const score = fused.get(chunk.id) ?? 0;
+                if (score > (parentScores.get(chunk.memoryId) ?? 0)) {
+                    parentScores.set(chunk.memoryId, score);
+                }
+            }
+        }
+        const rankedParents = Array.from(parentScores.entries())
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, max);
+        if (rankedParents.length === 0) return [];
+        const ids = rankedParents.map(([id]) => id);
+        const rows = await this.pool.query<DocumentRow>(
+            `SELECT id, title, content, created_at, updated_at
+             FROM gemdex_memory_documents
+             WHERE id IN (${inPlaceholders(ids.length)})`,
+            ids,
         );
-        const memories = await this.rowsToMemories(result.rows);
-        return memories.map((memory) => ({ ...memory, score: 1 }));
+        const memories = await this.rowsToMemories(rows.rows);
+        const byId = new Map(memories.map((memory) => [memory.id, memory]));
+        return rankedParents.flatMap(([id, score]) => {
+            const memory = byId.get(id);
+            return memory ? [{ ...memory, score }] : [];
+        });
     }
 
     async update(id: string, input: UpdateMemoryInput): Promise<Memory> {
@@ -422,6 +529,17 @@ export class PostgresMemoryBackend implements MemoryBackend {
         }));
         const title = resolveTitle(explicitTitle, text, prepared);
         const chunks = text.trim().length > 0 ? chunkMemory(text) : [];
+        const textEmbeddings = this.embedding && chunks.length > 0
+            ? await this.embedding.embedBatch(chunks)
+            : [];
+        const attachmentEmbeddings = this.embedding && prepared.length > 0
+            ? await this.embedding.embedContentBatch(prepared.map((attachment) => ({
+                inlineData: {
+                    mimeType: attachment.mimeType,
+                    data: attachment.data.toString('base64'),
+                },
+            })))
+            : [];
         const client = await this.pool.connect();
         const externalRefs = new Map<string, string>();
 
@@ -455,9 +573,18 @@ export class PostgresMemoryBackend implements MemoryBackend {
             for (let i = 0; i < chunks.length; i++) {
                 await client.query(
                     `INSERT INTO gemdex_memory_chunks
-                        (id, memory_id, chunk_index, chunk_kind, content, start_offset, end_offset, created_at, updated_at)
-                     VALUES ($1, $2, $3, 'text', $4, NULL, NULL, $5, $6)`,
-                    [randomUUID(), id, i, chunks[i], toDate(createdAt), toDate(updatedAt)],
+                        (id, memory_id, chunk_index, chunk_kind, content, start_offset, end_offset,
+                         embedding_vector, created_at, updated_at)
+                     VALUES ($1, $2, $3, 'text', $4, NULL, NULL, $5, $6, $7)`,
+                    [
+                        randomUUID(),
+                        id,
+                        i,
+                        chunks[i],
+                        textEmbeddings[i] ? vectorLiteral(textEmbeddings[i].vector) : null,
+                        toDate(createdAt),
+                        toDate(updatedAt),
+                    ],
                 );
             }
 
@@ -496,7 +623,7 @@ export class PostgresMemoryBackend implements MemoryBackend {
                     ],
                 );
             }
-            await this.rebuildAttachmentChunks(client, id);
+            await this.rebuildAttachmentChunks(client, id, attachmentEmbeddings.map((item) => item.vector));
 
             await client.query('COMMIT');
             const memory = await this.get(id);
@@ -510,7 +637,22 @@ export class PostgresMemoryBackend implements MemoryBackend {
         }
     }
 
-    private async rebuildAttachmentChunks(db: Queryable, id: string): Promise<void> {
+    private async rebuildAttachmentChunks(
+        db: Queryable,
+        id: string,
+        embeddings?: number[][],
+    ): Promise<void> {
+        const priorEmbeddings = embeddings === undefined
+            ? await db.query<{ attachment_id: string; embedding_vector: string | number[] | null }>(
+                `SELECT attachment_id, embedding_vector
+                 FROM gemdex_memory_chunks
+                 WHERE memory_id = $1 AND chunk_kind = 'attachment'`,
+                [id],
+            )
+            : null;
+        const priorByAttachment = new Map(
+            priorEmbeddings?.rows.map((row) => [row.attachment_id, row.embedding_vector]) ?? [],
+        );
         await db.query('DELETE FROM gemdex_memory_chunks WHERE memory_id = $1 AND chunk_kind = $2', [id, 'attachment']);
         const result = await db.query<AttachmentRow>(
             `SELECT id, kind, mime_type, byte_length, caption
@@ -531,11 +673,81 @@ export class PostgresMemoryBackend implements MemoryBackend {
             const text = attachment.caption?.trim() || title || `${attachment.kind} attachment`;
             await db.query(
                 `INSERT INTO gemdex_memory_chunks
-                    (id, memory_id, attachment_id, chunk_index, chunk_kind, content, created_at, updated_at)
-                 VALUES ($1, $2, $3, $4, 'attachment', $5, $6, $7)`,
-                [randomUUID(), id, attachment.id, i, text, createdAt, updatedAt],
+                    (id, memory_id, attachment_id, chunk_index, chunk_kind, content,
+                     embedding_vector, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, 'attachment', $5, $6, $7, $8)`,
+                [
+                    randomUUID(),
+                    id,
+                    attachment.id,
+                    i,
+                    text,
+                    embeddings?.[i] ? vectorLiteral(embeddings[i]) : priorByAttachment.get(attachment.id) ?? null,
+                    createdAt,
+                    updatedAt,
+                ],
             );
         }
+    }
+
+    private async denseRank(vector: number[], limit: number): Promise<RankedChunk[]> {
+        if (this.usePgVectorQueries) {
+            const result = await this.pool.query<RecallChunkRow>(
+                `SELECT id, memory_id
+                 FROM gemdex_memory_chunks
+                 WHERE embedding_vector IS NOT NULL
+                   AND (embedding_vector <=> $1::vector) < 1
+                 ORDER BY embedding_vector <=> $1::vector
+                 LIMIT $2`,
+                [vectorLiteral(vector), limit],
+            );
+            return result.rows.map((row) => ({ id: row.id, memoryId: row.memory_id }));
+        }
+        const result = await this.pool.query<RecallChunkRow>(
+            `SELECT id, memory_id, embedding_vector
+             FROM gemdex_memory_chunks
+             WHERE embedding_vector IS NOT NULL`,
+        );
+        return result.rows
+            .map((row) => ({
+                id: row.id,
+                memoryId: row.memory_id,
+                score: cosineSimilarity(parseVector(row.embedding_vector) ?? [], vector),
+            }))
+            .filter((row) => row.score > 0)
+            .sort((a, b) => b.score - a.score)
+            .slice(0, limit)
+            .map(({ id, memoryId }) => ({ id, memoryId }));
+    }
+
+    private async fullTextRank(query: string, limit: number): Promise<RankedChunk[]> {
+        if (this.usePgVectorQueries) {
+            const result = await this.pool.query<RecallChunkRow>(
+                `SELECT id, memory_id
+                 FROM gemdex_memory_chunks
+                 WHERE to_tsvector('english', content) @@ plainto_tsquery('english', $1)
+                 ORDER BY ts_rank_cd(
+                    to_tsvector('english', content),
+                    plainto_tsquery('english', $1)
+                 ) DESC, id ASC
+                 LIMIT $2`,
+                [query, limit],
+            );
+            return result.rows.map((row) => ({ id: row.id, memoryId: row.memory_id }));
+        }
+        const result = await this.pool.query<RecallChunkRow>(
+            'SELECT id, memory_id, content FROM gemdex_memory_chunks',
+        );
+        return result.rows
+            .map((row) => ({
+                id: row.id,
+                memoryId: row.memory_id,
+                score: lexicalScore(row.content ?? '', query),
+            }))
+            .filter((row) => row.score > 0)
+            .sort((a, b) => b.score - a.score)
+            .slice(0, limit)
+            .map(({ id, memoryId }) => ({ id, memoryId }));
     }
 
     private async rowToMemory(row: DocumentRow): Promise<Memory> {

@@ -87,4 +87,14 @@ CREATE INDEX IF NOT EXISTS gemdex_memory_attachments_memory_idx
     ON gemdex_memory_attachments (memory_id, ordinal);
 `,
     },
+    {
+        version: '002',
+        name: 'pgvector_recall',
+        sql: `
+CREATE EXTENSION IF NOT EXISTS vector;
+
+ALTER TABLE gemdex_memory_chunks
+    ADD COLUMN IF NOT EXISTS embedding_vector vector;
+`,
+    },
 ];

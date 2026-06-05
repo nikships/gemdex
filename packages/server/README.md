@@ -6,9 +6,10 @@ This package provides the `gemdex-server` CLI and the HTTP service that backs
 remote Gemdex clients (MCP, desktop app, CLI). It exposes the Gemdex v1 HTTP API
 under `/v1/*`.
 
-> pgvector/BM25 ranking arrives in a later ticket. GEM-10 adds
-> durable Postgres storage, schema migrations, and CRUD/import/export persistence.
-> Recall currently uses a minimal text match until the dedicated recall backend lands.
+Postgres recall combines pgvector cosine search with PostgreSQL full-text ranking
+and fuses those branches with reciprocal rank fusion (RRF). Media queries add
+one dense branch per attachment. Chunk matches always resolve back to the full
+parent memory and deduplicate before results are returned.
 
 ## Quick Start
 
@@ -206,13 +207,14 @@ embeddings and later hybrid retrieval decide relevance. Timestamps are persisted
 as metadata for display, export/import, and auditing; recall must not use them as
 ranking signals.
 
-The initial migration creates:
+The migrations create:
 
 - `gemdex_schema_migrations` — migration bookkeeping with checksums.
 - `gemdex_memory_documents` — parent memory documents returned to clients.
 - `gemdex_memory_chunks` — retrieval units for parent-document chunking. Chunk
   rows reference their parent document, and API responses resolve back to the
-  full parent memory rather than exposing fragments.
+  full parent memory rather than exposing fragments. The pgvector migration
+  adds each chunk's embedding vector for dense retrieval.
 - `gemdex_memory_attachments` — stable per-memory attachment metadata (`id`,
   modality, MIME type, byte length, optional caption, and blob reference).
 - `gemdex_attachment_blobs` — blob-reference records. With `BLOB_STORE=file` or
