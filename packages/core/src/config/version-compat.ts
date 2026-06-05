@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { RemoteCompatibilityError } from './errors';
 
 /**
@@ -16,11 +18,18 @@ export interface ServerVersionInfo {
 /**
  * What THIS client supports.
  *
- * CLIENT_VERSION is kept in sync with the gemdex-core package.json version
- * rather than importing it at runtime (avoids a dynamic require through dist
- * paths in test environments). Update this constant on every package release.
+ * CLIENT_VERSION is read from gemdex-core's own package.json at module load so
+ * it can never drift from the published version. `__dirname` resolves to the
+ * `config/` directory under both the compiled `dist/` layout and ts-jest's
+ * `src/` layout, so `../../package.json` reaches the package root in both.
  */
-export const CLIENT_VERSION = '0.3.9';
+function readClientVersion(): string {
+    const packageJsonPath = join(__dirname, '../../package.json');
+    const { version } = JSON.parse(readFileSync(packageJsonPath, 'utf8')) as { version: string };
+    return version;
+}
+
+export const CLIENT_VERSION = readClientVersion();
 export const SUPPORTED_API_VERSION = 'v1';
 export const SUPPORTED_PROTOCOL_VERSION = 1;
 
@@ -69,7 +78,7 @@ export interface CompatibilityCheckOptions {
  *
  * Throws `RemoteCompatibilityError` when incompatible. Error messages follow
  * the doc's example style and name both what is installed and what is required:
- *   "Gemdex client 0.3.9 requires Gemdex Server API v1 protocolVersion 1;
+ *   "Gemdex client <version> requires Gemdex Server API v1 protocolVersion 1;
  *    server returned API v1 protocolVersion 2."
  *
  * Checks (in order):

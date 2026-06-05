@@ -19,17 +19,30 @@ parent memory and deduplicate before results are returned.
 
 ### Docker Compose (recommended)
 
+One command generates the secrets, prompts for your Gemini key, brings up the
+stack, waits for health, and prints the bearer token plus the client command:
+
 ```sh
 cd packages/server
+npm run init
+```
+
+`npm run init` verifies Docker is running, writes `.env` (`0600`), and refuses
+to overwrite an existing one — so it is safe to re-run on a live host. The
+published port binds to `127.0.0.1` by default; put it on a private network or a
+TLS reverse proxy before exposing the service to another machine.
+
+<details>
+<summary>Manual equivalent</summary>
+
+```sh
 cp .env.example .env
 
 # Edit .env and replace all three placeholder secrets, then:
 docker compose up -d --build
 curl --fail http://127.0.0.1:8765/v1/health
 ```
-
-The published port binds to `127.0.0.1` by default. Put a TLS reverse proxy in
-front of it before exposing the service to another machine. Data routes always
+</details> Data routes always
 require the bearer token from `GEMDEX_SERVER_TOKEN`; the compose file explicitly
 sets `GEMDEX_SERVER_UNSAFE_DEV_NO_AUTH=false`.
 

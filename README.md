@@ -266,6 +266,24 @@ Run Gemdex Server with Postgres/pgvector and file or S3-compatible attachment
 storage, then connect MCP, CLI, and desktop clients to the same global memory
 pool. Embedding runs on the server, so remote clients do not need a Gemini key.
 
+It's two commands. On the server host:
+
+```bash
+git clone https://github.com/anand-92/gemdex.git
+cd gemdex/packages/server && npm run init   # generates secrets, starts Docker, prints the token
+```
+
+On each client (paste the token when prompted; add `--import-local` to bring
+your existing local memories along):
+
+```bash
+npx -y gemdex-mcp@latest init-remote myserver https://memory.example.com
+```
+
+`init-remote` verifies the server, switches the client to remote mode, and
+prints the agent command. You can also run a **local and a remote pool side by
+side** — see the operations guide.
+
 Start with the [`BYOI operations guide`](docs/BYOI_OPERATIONS.md). The
 [`remote mode contract`](docs/BYOI_REMOTE_MODE.md) defines the v1 API, auth,
 attachment handling, compatibility checks, ranking invariants, and non-goals.

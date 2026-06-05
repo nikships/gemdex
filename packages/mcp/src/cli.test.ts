@@ -157,6 +157,88 @@ test('status reports remote health and authenticated API reachability', async ()
     });
 });
 
+function versionResponse(overrides: Record<string, unknown> = {}): Response {
+    return new Response(
+        JSON.stringify({
+            name: 'gemdex-server',
+            apiVersion: 'v1',
+            serverVersion: '0.1.0',
+            minClientVersion: '0.3.0',
+            protocolVersion: 1,
+            capabilities: {},
+            ...overrides,
+        }),
+        { status: 200 },
+    );
+}
+
+test('init-remote stores the remote, verifies, activates, and prints the agent command', async () => {
+    await withCli(async (run, store) => {
+        const remote = new FakeBackend();
+        const fetchImpl = (async (input: Parameters<typeof fetch>[0]) => {
+            assert.match(String(input), /\/v1\/version$/);
+            return versionResponse();
+        }) as typeof fetch;
+
+        const result = await run(
+            ['init-remote', 'macmini', 'https://mac-mini.example.ts.net/'],
+            { remote, fetch: fetchImpl },
+        );
+
+        assert.equal(result.code, 0);
+        assert.match(result.stdout, /Added remote "macmini"/);
+        assert.match(result.stdout, /Server reachable and version-compatible\./);
+        assert.match(result.stdout, /Authenticated successfully\./);
+        assert.match(result.stdout, /Gemdex mode is now remote: macmini\./);
+        assert.match(result.stdout, /claude mcp add gemdex/);
+        assert.doesNotMatch(`${result.stdout}${result.stderr}`, /secret-token/);
+
+        // Token stored out of config.json; mode flipped to remote.
+        assert.equal(store.getEnv('GEMDEX_MODE'), 'remote');
+        assert.equal(store.getEnv('GEMDEX_REMOTE_NAME'), 'macmini');
+        const configText = await fs.readFile(store.configPath, 'utf8');
+        assert.doesNotMatch(configText, /secret-token/);
+    });
+});
+
+test('init-remote with --import-local copies local memories and can skip activation', async () => {
+    await withCli(async (run, store) => {
+        const local = new FakeBackend();
+        local.records.set('one', record('one'));
+        local.records.set('two', record('two'));
+        const remote = new FakeBackend();
+        const fetchImpl = (async () => versionResponse()) as typeof fetch;
+
+        const result = await run(
+            ['init-remote', 'macmini', 'https://mac-mini.example.ts.net', '--import-local', '--no-activate'],
+            { local, remote, fetch: fetchImpl },
+        );
+
+        assert.equal(result.code, 0);
+        assert.match(result.stdout, /Imported local memories — Created: 2, Updated: 0, Skipped: 0\./);
+        assert.equal(remote.records.get('one')?.id, 'one');
+        assert.equal(remote.records.get('two')?.id, 'two');
+        // --no-activate leaves the machine in local mode.
+        assert.notEqual(store.getEnv('GEMDEX_MODE'), 'remote');
+    });
+});
+
+test('init-remote fails fast on an incompatible server protocol version', async () => {
+    await withCli(async (run, store) => {
+        const fetchImpl = (async () => versionResponse({ protocolVersion: 2 })) as typeof fetch;
+
+        const result = await run(
+            ['init-remote', 'macmini', 'https://mac-mini.example.ts.net'],
+            { fetch: fetchImpl },
+        );
+
+        assert.equal(result.code, 1);
+        assert.match(result.stderr, /protocolVersion/);
+        // Never switched into remote mode on failure.
+        assert.notEqual(store.getEnv('GEMDEX_MODE'), 'remote');
+    });
+});
+
 test('migration preserves ids and reports created, updated, and skipped records', async () => {
     await withCli(async (run, store) => {
         store.add('prod', 'https://memory.example.com', 'TOKEN');

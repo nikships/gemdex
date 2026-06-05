@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import {
     EnvGetter,
     GemdexMode,
@@ -7,6 +8,12 @@ import {
     resolveMode,
     resolveRemoteConnection,
 } from "gemdex-core";
+
+// Read the version from this package's package.json so it never drifts from the
+// published version. createRequire resolves relative to this module
+// (dist/config.js → ../package.json, and src/config.ts under tsx).
+const require = createRequire(import.meta.url);
+const { version: PACKAGE_VERSION } = require("../package.json") as { version: string };
 
 export interface GemdexConfig {
     name: string;
@@ -32,7 +39,7 @@ export function createConfig(getEnv: EnvGetter = defaultEnvGetter): GemdexConfig
     const remoteConfig = mode === 'remote' ? loadRemoteConfig(getEnv) : null;
     return {
         name: getEnv('MCP_SERVER_NAME') || "Gemdex Memory MCP",
-        version: getEnv('MCP_SERVER_VERSION') || "0.3.0",
+        version: getEnv('MCP_SERVER_VERSION') || PACKAGE_VERSION,
         embeddingModel: getEmbeddingModel(getEnv),
         geminiApiKey: getEnv('GEMINI_API_KEY'),
         geminiBaseUrl: getEnv('GEMINI_BASE_URL'),
@@ -68,6 +75,12 @@ Usage:
   npx gemdex serve [--port N]      Start the localhost HTTP sidecar that backs
                                    the desktop manager app. --port 0 picks a
                                    free port.
+  npx gemdex init-remote <name> <url> [--import-local]
+                                   One-shot client setup for a BYOI server:
+                                   store the remote + token, verify it's
+                                   reachable/authenticated/compatible, switch to
+                                   remote mode, and (optionally) import the local
+                                   memories. The easiest way to connect a client.
   npx gemdex remote add <name> <url>
                                    Add a named remote and securely prompt for
                                    its bearer token.

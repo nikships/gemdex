@@ -24,11 +24,32 @@ a trusted private network.
 
 ## End-to-End Quickstart
 
+The fast path is two commands: `npm run init` on the server host, then
+`gemdex init-remote` on each client. The manual equivalents are documented after
+each, so you can see exactly what the helpers do.
+
 ### 1. Start the Server
 
 ```sh
 git clone https://github.com/anand-92/gemdex.git
 cd gemdex/packages/server
+npm run init
+```
+
+`npm run init` checks Docker is running, generates the bearer token and Postgres
+password, writes `.env` (mode `0600`), prompts for your `GEMINI_API_KEY` (or
+reads it from the environment), builds and starts the Compose stack, waits for
+health, and prints the **bearer token** plus the client command to run next. The
+first start creates Postgres, enables pgvector, applies all schema migrations,
+and creates the file-backed attachment volume.
+
+It refuses to overwrite an existing `.env`, so re-running on a live deployment is
+safe.
+
+<details>
+<summary>Manual equivalent (no helper)</summary>
+
+```sh
 cp .env.example .env
 
 # Generate URL-safe secrets. Put the first value in GEMDEX_SERVER_TOKEN and the
@@ -43,12 +64,12 @@ curl --fail http://127.0.0.1:8765/v1/health
 curl --fail http://127.0.0.1:8765/v1/version
 ```
 
-Expected health output is `{"ok":true}`. The first start creates Postgres,
-enables pgvector, applies all schema migrations, and creates the file-backed
-attachment volume.
+Expected health output is `{"ok":true}`.
+</details>
 
 For same-machine testing, use `http://127.0.0.1:8765` as the remote URL. Before
-connecting another machine, configure TLS and use an `https://` URL.
+connecting another machine, put the server on a private network or configure TLS
+and use an `https://` URL.
 
 ### 2. Put TLS in Front
 
@@ -68,7 +89,27 @@ been deliberately redesigned and isolated.
 
 ### 3. Configure the MCP Client
 
-On the client machine, store the remote and token:
+On each client machine, one command stores the remote, verifies the server, and
+switches to remote mode:
+
+```sh
+npx -y gemdex-mcp@latest init-remote production https://memory.example.com
+# paste the bearer token from step 1 when prompted
+```
+
+`init-remote` adds the named remote, checks the server is reachable and
+version-compatible, confirms the token authenticates, switches Gemdex into
+remote mode, and prints the agent command to run. Add `--import-local` to also
+copy this machine's existing local memories into the server in the same step.
+For automation, pipe the token with `--token-stdin`; to manage the secret
+externally, use `--token-env MY_TOKEN_VAR`.
+
+Named remote metadata is stored in `~/.gemdex/config.json`; its token is stored
+separately in `~/.gemdex/.env` with user-only permissions and is never printed.
+Remote clients do not need `GEMINI_API_KEY`: embedding runs on your server.
+
+<details>
+<summary>Manual equivalent (individual commands)</summary>
 
 ```sh
 read -rsp "Gemdex bearer token: " GEMDEX_TOKEN; echo
@@ -81,10 +122,8 @@ npx -y gemdex-mcp@latest status
 unset GEMDEX_TOKEN
 ```
 
-`status` should report both `Reachable: yes` and `Authenticated: yes`. Named
-remote metadata is stored in `~/.gemdex/config.json`; its token is stored
-separately in `~/.gemdex/.env` with user-only permissions. Remote clients do
-not need `GEMINI_API_KEY`: embedding runs on your server.
+`status` should report both `Reachable: yes` and `Authenticated: yes`.
+</details>
 
 Add the MCP process to the client. For Claude Code:
 
@@ -110,6 +149,38 @@ Recall the BYOI smoke-test phrase from memory.
 
 That verifies MCP stdio, bearer authentication, server-owned Gemini embedding,
 Postgres/pgvector storage, and remote recall.
+
+## Running Local and Remote Side by Side
+
+Mode is resolved per process from `GEMDEX_MODE`, so one machine can run two
+independent memory pools at once: the embedded local store **and** a remote
+server. They never merge — each MCP server queries only its own backend.
+
+Register two MCP servers with explicit env (process env overrides the
+`~/.gemdex` config, so this does not disturb the CLI's selected mode). For
+Claude Code:
+
+```sh
+# Pool 1 — embedded local store on this machine (needs a Gemini key)
+claude mcp add gemdex-local \
+  -e GEMDEX_MODE=local \
+  -e GEMINI_API_KEY=your-google-ai-key \
+  -- npx -y gemdex-mcp@latest
+
+# Pool 2 — the remote BYOI server (no Gemini key on the client)
+claude mcp add gemdex-remote \
+  -e GEMDEX_MODE=remote \
+  -e GEMDEX_REMOTE_URL=https://memory.example.com \
+  -e GEMDEX_REMOTE_TOKEN=your-server-token \
+  -- npx -y gemdex-mcp@latest
+```
+
+The agent then sees both tool sets, namespaced by server (`gemdex-local` and
+`gemdex-remote`). Tell it which pool is which — for example, remote for shared
+cross-machine knowledge and local for machine-private scratch. Do not use
+`gemdex mode local|remote` for this: that flag stores one shared mode in
+`~/.gemdex` and is one-at-a-time by design; pass `GEMDEX_MODE` per server
+instead.
 
 ## Security and Custody
 

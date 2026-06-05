@@ -26,11 +26,18 @@ import {
 const require = createRequire(import.meta.url);
 const { version: SERVER_VERSION } = require('../package.json') as { version: string };
 
+// The oldest gemdex client this server will accept. This is a deliberate
+// compatibility floor, NOT the server's own version: it changes only when a
+// release intentionally drops support for older clients, so it stays a literal
+// rather than tracking package.json (which would reject every older-but-still-
+// compatible client on each version bump).
+const MIN_CLIENT_VERSION = '0.3.0';
+
 const VERSION_INFO: ServerVersionInfo = {
     name: 'gemdex-server',
     apiVersion: SUPPORTED_API_VERSION,
     serverVersion: SERVER_VERSION,
-    minClientVersion: '0.3.0',
+    minClientVersion: MIN_CLIENT_VERSION,
     protocolVersion: SUPPORTED_PROTOCOL_VERSION,
     capabilities: {
         attachments: true,

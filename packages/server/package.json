@@ -9,6 +9,7 @@
         "gemdex-server": "dist/index.js"
     },
     "scripts": {
+        "init": "bash scripts/init.sh",
         "build": "pnpm clean && tsc --build --force",
         "clean": "rimraf dist",
         "lint": "eslint src --ext .ts",

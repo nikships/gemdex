@@ -28,6 +28,19 @@ claude mcp add gemdex \
 
 ### Configure remotes with the CLI
 
+The easiest path is `init-remote` — it adds the remote, prompts for the token
+(without echoing it), verifies the server is reachable, authenticated, and
+version-compatible, switches to remote mode, and prints the agent command:
+
+```bash
+npx gemdex init-remote production https://memory.example.com
+
+# Also copy this machine's local memories into the server in the same step:
+npx gemdex init-remote production https://memory.example.com --import-local
+```
+
+Or run the individual steps:
+
 ```bash
 # Prompts for the bearer token without echoing it.
 npx gemdex remote add production https://memory.example.com
@@ -47,6 +60,25 @@ Named remotes live in `~/.gemdex/config.json`. Bearer tokens are stored
 separately in `~/.gemdex/.env` with user-only file permissions and are never
 printed. For automation, use `--token-stdin`; to manage the secret externally,
 use `--token-env MY_TOKEN_VAR`.
+
+### Local and remote at the same time
+
+Mode is per process via `GEMDEX_MODE`, so you can register two MCP servers — one
+local, one remote — as two independent memory pools that never merge:
+
+```bash
+claude mcp add gemdex-local \
+  -e GEMDEX_MODE=local -e GEMINI_API_KEY=your-key \
+  -- npx -y gemdex-mcp@latest
+
+claude mcp add gemdex-remote \
+  -e GEMDEX_MODE=remote \
+  -e GEMDEX_REMOTE_URL=https://memory.example.com \
+  -e GEMDEX_REMOTE_TOKEN=your-server-token \
+  -- npx -y gemdex-mcp@latest
+```
+
+Pass `GEMDEX_MODE` per server (not `gemdex mode …`, which sets one shared mode).
 
 ## Install for any MCP client
 
