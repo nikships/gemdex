@@ -26,7 +26,7 @@ export class GeminiEmbedding extends Embedding {
 
     constructor(config: GeminiEmbeddingConfig) {
         super();
-        this.config = { ...config, model: config.model || DEFAULT_MODEL };
+        this.config = { ...config, model: config.model ?? DEFAULT_MODEL };
         this.client = new GoogleGenAI({
             apiKey: config.apiKey,
             ...(config.baseURL && { httpOptions: { baseUrl: config.baseURL } }),
@@ -85,7 +85,7 @@ export class GeminiEmbedding extends Embedding {
             ],
         }));
 
-        const dim = this.config.outputDimensionality || this.dimension;
+        const dim = this.config.outputDimensionality ?? this.dimension;
         const response = await this.client.models.embedContent({
             model,
             contents: requestContents,
@@ -157,7 +157,7 @@ export class GeminiEmbedding extends Embedding {
 
     getSupportedDimensions(): number[] {
         const modelInfo = GeminiEmbedding.getSupportedModels()[this.config.model!];
-        return modelInfo?.supportedDimensions || [this.dimension];
+        return modelInfo?.supportedDimensions ?? [this.dimension];
     }
 
     isDimensionSupported(dimension: number): boolean {

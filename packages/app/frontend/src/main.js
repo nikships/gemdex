@@ -115,20 +115,23 @@ async function resolveApiBase() {
   return "";
 }
 
+// Per-launch auth token header for every request. The sidecar requires it on
+// all data routes to prevent any other page the user visits from making
+// cross-origin requests to the memory store. Empty in dev / standalone mode.
+function authHeaders() {
+  return apiToken ? { "X-Gemdex-Token": apiToken } : {};
+}
+
 async function api(path, options = {}) {
-  // Include the per-launch auth token on every request when we have one.
-  // The sidecar requires it on all data routes to prevent any other page
-  // the user visits from making cross-origin requests to the memory store.
-  const authHeader = apiToken ? { "X-Gemdex-Token": apiToken } : {};
   const res = await fetch(`${apiBase}${path}`, {
-    headers: { "Content-Type": "application/json", ...authHeader, ...(options.headers || {}) },
+    headers: { "Content-Type": "application/json", ...authHeaders(), ...(options.headers ?? {}) },
     ...options,
   });
   if (!res.ok) {
     let message = `HTTP ${res.status}`;
     try {
       const body = await res.json();
-      if (body && body.error) message = body.error;
+      if (body?.error) message = body.error;
     } catch (_) {
       /* ignore */
     }
@@ -142,7 +145,7 @@ async function waitForHealth(timeoutMs = 15000) {
   while (Date.now() - start < timeoutMs) {
     try {
       const body = await api("/health");
-      if (body && body.ok) return true;
+      if (body?.ok) return true;
     } catch (_) {
       /* retry */
     }
@@ -170,19 +173,18 @@ function fileToBase64(blob) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
-      const result = reader.result || "";
+      const result = reader.result ?? "";
       const comma = result.indexOf(",");
       resolve(comma >= 0 ? result.slice(comma + 1) : result);
     };
-    reader.onerror = () => reject(reader.error || new Error("Failed to read file"));
+    reader.onerror = () => reject(reader.error ?? new Error("Failed to read file"));
     reader.readAsDataURL(blob);
   });
 }
 
 /** Fetch an existing attachment's bytes and base64-encode them. */
 async function fetchAttachmentBase64(memoryId, attachmentId) {
-  const headers = apiToken ? { "X-Gemdex-Token": apiToken } : {};
-  const res = await fetch(attachmentUrl(memoryId, attachmentId), { headers });
+  const res = await fetch(attachmentUrl(memoryId, attachmentId), { headers: authHeaders() });
   if (!res.ok) throw new Error(`Could not read attachment ${attachmentId}`);
   // FileReader.readAsDataURL is native + async, so multi-MB blobs don't block
   // the UI thread (a manual String.fromCharCode loop would).
@@ -197,8 +199,7 @@ async function fetchAttachmentBase64(memoryId, attachmentId) {
  * The caller is responsible for revoking the returned URL when done.
  */
 async function fetchAttachmentObjectUrl(memoryId, attachmentId) {
-  const headers = apiToken ? { "X-Gemdex-Token": apiToken } : {};
-  const res = await fetch(attachmentUrl(memoryId, attachmentId), { headers });
+  const res = await fetch(attachmentUrl(memoryId, attachmentId), { headers: authHeaders() });
   if (!res.ok) throw new Error(`Could not read attachment ${attachmentId}`);
   return URL.createObjectURL(await res.blob());
 }
@@ -217,7 +218,7 @@ function releaseNewObjectUrls() {
 function renderList() {
   const filter = els.filter.value.trim().toLowerCase();
   const visible = memories.filter(
-    (m) => !filter || (m.title || "").toLowerCase().includes(filter),
+    (m) => !filter || (m.title ?? "").toLowerCase().includes(filter),
   );
   els.list.innerHTML = "";
   els.empty.hidden = memories.length !== 0;
@@ -234,10 +235,10 @@ function renderList() {
       </div>
     `;
     li.querySelector(".item-title").textContent = m.title || "Untitled memory";
-    li.querySelector(".item-preview").textContent = m.preview || "";
+    li.querySelector(".item-preview").textContent = m.preview ?? "";
     const dateEl = li.querySelector(".item-date");
     dateEl.textContent = fmtDate(m.updatedAt);
-    const attachments = m.attachments || [];
+    const attachments = m.attachments ?? [];
     if (attachments.length > 0) {
       const chip = document.createElement("span");
       chip.className = "item-chip";
@@ -266,7 +267,7 @@ function renderList() {
 
 async function refreshList() {
   const body = await api("/memories");
-  memories = body.memories || [];
+  memories = body.memories ?? [];
   renderList();
 }
 
@@ -293,8 +294,8 @@ async function openMemory(id) {
     const body = await api(`/memories/${encodeURIComponent(id)}`);
     const m = body.memory;
     selectedId = m.id;
-    els.title.value = m.title || "";
-    els.content.value = m.content || "";
+    els.title.value = m.title ?? "";
+    els.content.value = m.content ?? "";
     els.meta.textContent = `Created ${fmtDate(m.createdAt)} · Updated ${fmtDate(m.updatedAt)}`;
     els.deleteBtn.hidden = false;
     // When a token is configured the browser cannot add custom headers to media
@@ -302,17 +303,17 @@ async function openMemory(id) {
     // request and create a blob: object URL for rendering. Without a token we
     // use the sidecar URL directly (dev / standalone mode).
     const existing = await Promise.all(
-      (m.attachments || []).map(async (a) => {
+      (m.attachments ?? []).map(async (a) => {
         const mediaUrl = apiToken
           ? await fetchAttachmentObjectUrl(m.id, a.id)
           : attachmentUrl(m.id, a.id);
         return {
           source: "existing",
           id: a.id,
-          kind: a.kind || kindFromMime(a.mimeType),
+          kind: a.kind ?? kindFromMime(a.mimeType),
           mimeType: a.mimeType,
           byteLength: a.byteLength,
-          caption: a.caption || "",
+          caption: a.caption ?? "",
           url: mediaUrl,
           // Track whether this is a blob URL we own so we revoke it correctly.
           _blobUrl: apiToken ? mediaUrl : null,
@@ -352,7 +353,7 @@ function showAttachError(message) {
 function addFiles(fileList) {
   clearAttachError();
   const counts = { image: 0, audio: 0, video: 0, pdf: 0 };
-  for (const a of editorAttachments) counts[a.kind] = (counts[a.kind] || 0) + 1;
+  for (const a of editorAttachments) counts[a.kind] = (counts[a.kind] ?? 0) + 1;
 
   for (const file of Array.from(fileList)) {
     const kind = kindFromMime(file.type);
@@ -364,11 +365,11 @@ function addFiles(fileList) {
       showAttachError(`${file.name} is ${humanSize(file.size)}; the limit is ${humanSize(MAX_BYTES_PER_ATTACHMENT)}.`);
       continue;
     }
-    if ((counts[kind] || 0) + 1 > KIND_CAPS[kind]) {
+    if ((counts[kind] ?? 0) + 1 > KIND_CAPS[kind]) {
       showAttachError(`Too many ${kind} attachments (max ${KIND_CAPS[kind]}).`);
       continue;
     }
-    counts[kind] = (counts[kind] || 0) + 1;
+    counts[kind] = (counts[kind] ?? 0) + 1;
     editorAttachments.push({
       source: "new",
       file,
@@ -606,7 +607,7 @@ async function findSimilar(item) {
       method: "POST",
       body: JSON.stringify({ attachments: [{ mimeType: item.mimeType, data }], limit: 10 }),
     });
-    const results = (body.results || []).filter((r) => r.id !== selectedId);
+    const results = (body.results ?? []).filter((r) => r.id !== selectedId);
     els.similarTitle.textContent = "Similar memories";
     els.similarEmpty.hidden = results.length > 0;
     for (const r of results) {
@@ -655,7 +656,7 @@ async function deleteCurrent() {
 async function exportAll() {
   try {
     const body = await api("/export");
-    const records = body.records || [];
+    const records = body.records ?? [];
     const jsonl = records.map((r) => JSON.stringify(r)).join("\n");
     const blob = new Blob([jsonl], { type: "application/x-ndjson" });
     const url = URL.createObjectURL(blob);
@@ -720,7 +721,7 @@ function renderSettings() {
   els.modeLocal.classList.toggle("active", settingsState.mode === "local");
   els.modeRemote.classList.toggle("active", settingsState.mode === "remote");
   els.remoteSelect.innerHTML = "";
-  for (const remote of settingsState.remotes || []) {
+  for (const remote of settingsState.remotes ?? []) {
     const option = document.createElement("option");
     option.value = remote.name;
     option.textContent = remoteOptionLabel(remote);
@@ -735,7 +736,7 @@ function renderSettings() {
 }
 
 function updateRemoteControls() {
-  const remotes = settingsState?.remotes || [];
+  const remotes = settingsState?.remotes ?? [];
   const hasRemote = remotes.length > 0;
   const selected = remotes.find((remote) => remote.name === selectedRemoteName());
   const usable = Boolean(selected?.hasToken);
@@ -748,7 +749,7 @@ function updateRemoteControls() {
 }
 
 function populateRemoteForm() {
-  const selected = (settingsState?.remotes || []).find(
+  const selected = (settingsState?.remotes ?? []).find(
     (remote) => remote.name === selectedRemoteName(),
   );
   if (!selected) return;
@@ -789,14 +790,7 @@ async function applyMode(mode, name) {
       body: JSON.stringify({ mode, ...(name && { name }) }),
     });
     renderSettings();
-    const config = await api("/config");
-    if (config.configured) {
-      showSetup(false);
-      await loadMemories();
-    } else {
-      setStatus("API key required");
-      showSetup(true);
-    }
+    if (!(await syncConfigGate())) setStatus("API key required");
   } catch (err) {
     showSettingsError(err.message);
   }
@@ -889,15 +883,7 @@ async function removeSelectedRemote() {
       method: "DELETE",
     });
     renderSettings();
-    if (settingsState.mode === "local") {
-      const config = await api("/config");
-      if (config.configured) {
-        showSetup(false);
-        await loadMemories();
-      } else {
-        showSetup(true);
-      }
-    }
+    if (settingsState.mode === "local") await syncConfigGate();
   } catch (err) {
     showSettingsError(err.message);
   }
@@ -955,8 +941,20 @@ function showSetup(show) {
   if (show) els.apiKeyInput.focus();
 }
 
-async function getConfiguration() {
-  return api("/config");
+/**
+ * Reconcile the UI with the sidecar's current config: load memories when an API
+ * key is configured, otherwise reveal the setup screen. Returns whether the
+ * store is configured so callers can add their own not-configured messaging.
+ */
+async function syncConfigGate() {
+  const config = await api("/config");
+  if (config.configured) {
+    showSetup(false);
+    await loadMemories();
+    return true;
+  }
+  showSetup(true);
+  return false;
 }
 
 async function submitApiKey(event) {
@@ -970,7 +968,7 @@ async function submitApiKey(event) {
       method: "POST",
       body: JSON.stringify({ apiKey }),
     });
-    if (!body || !body.configured) throw new Error("Key was not accepted.");
+    if (!body?.configured) throw new Error("Key was not accepted.");
     els.apiKeyInput.value = "";
     showSetup(false);
     await loadMemories();
@@ -1001,14 +999,7 @@ async function init() {
     setStatus("Could not reach the memory store sidecar.", true);
     return;
   }
-  const config = await getConfiguration();
-  if (config.configured) {
-    showSetup(false);
-    await loadMemories();
-  } else {
-    setStatus("API key required");
-    showSetup(true);
-  }
+  if (!(await syncConfigGate())) setStatus("API key required");
 }
 
 init();

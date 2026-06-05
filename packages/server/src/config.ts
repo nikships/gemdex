@@ -52,6 +52,11 @@ function optionalString(value: unknown): string | undefined {
     return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
+/** Read a string-typed field from the parsed JSON config, preserving empty strings. */
+function fileString(value: unknown): string | undefined {
+    return typeof value === 'string' ? value : undefined;
+}
+
 function parseBoolean(value: unknown, name: string): boolean | undefined {
     if (value === undefined || value === '') return undefined;
     if (typeof value === 'boolean') return value;
@@ -196,7 +201,7 @@ export function loadServerConfig(options: LoadServerConfigOptions = {}): ServerC
     const host =
         env['GEMDEX_SERVER_HOST'] ??
         argHost ??
-        (typeof fileConfig['host'] === 'string' ? fileConfig['host'] : undefined) ??
+        fileString(fileConfig['host']) ??
         '127.0.0.1';
 
     // Resolve port raw string: env > CLI arg > file > default.
@@ -217,7 +222,7 @@ export function loadServerConfig(options: LoadServerConfigOptions = {}): ServerC
     // Resolve token: env > file. Required unless unsafe dev mode is explicit.
     const token =
         normalizeNonEmpty(env['GEMDEX_SERVER_TOKEN']) ??
-        (typeof fileConfig['token'] === 'string' ? normalizeNonEmpty(fileConfig['token']) : undefined);
+        normalizeNonEmpty(fileString(fileConfig['token']));
 
     const unsafeDevNoAuth =
         parseBoolean(env['GEMDEX_SERVER_UNSAFE_DEV_NO_AUTH'], 'GEMDEX_SERVER_UNSAFE_DEV_NO_AUTH') ??
@@ -240,17 +245,17 @@ export function loadServerConfig(options: LoadServerConfigOptions = {}): ServerC
         env['GEMDEX_SERVER_DATABASE_URL'] ??
         env['DATABASE_URL'] ??
         argDatabaseUrl ??
-        (typeof fileConfig['databaseUrl'] === 'string' ? fileConfig['databaseUrl'] : undefined);
+        fileString(fileConfig['databaseUrl']);
     const geminiApiKey =
         normalizeNonEmpty(env['GEMINI_API_KEY']) ??
-        (typeof fileConfig['geminiApiKey'] === 'string' ? normalizeNonEmpty(fileConfig['geminiApiKey']) : undefined);
+        normalizeNonEmpty(fileString(fileConfig['geminiApiKey']));
     const embeddingModel =
         normalizeNonEmpty(env['EMBEDDING_MODEL']) ??
-        (typeof fileConfig['embeddingModel'] === 'string' ? normalizeNonEmpty(fileConfig['embeddingModel']) : undefined) ??
+        normalizeNonEmpty(fileString(fileConfig['embeddingModel'])) ??
         'gemini-embedding-2';
     const geminiBaseUrl =
         normalizeNonEmpty(env['GEMINI_BASE_URL']) ??
-        (typeof fileConfig['geminiBaseUrl'] === 'string' ? normalizeNonEmpty(fileConfig['geminiBaseUrl']) : undefined);
+        normalizeNonEmpty(fileString(fileConfig['geminiBaseUrl']));
     const embeddingDimension = parsePositiveInteger(
         env['EMBEDDING_DIMENSION'] ?? fileConfig['embeddingDimension'],
         'EMBEDDING_DIMENSION',

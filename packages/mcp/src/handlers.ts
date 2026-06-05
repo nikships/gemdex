@@ -1,10 +1,32 @@
 import { MemoryBackend } from "gemdex-core";
 import { resolveAttachmentInputs } from "./attachment-path.js";
+import { errorMessage } from "./errors.js";
 
 type ToolResult = { content: Array<{ type: "text"; text: string }>; isError?: boolean };
 
 function textResult(text: string, isError = false): ToolResult {
     return { content: [{ type: "text", text }], ...(isError && { isError: true }) };
+}
+
+/**
+ * Validate the optional `attachments` argument shared by all three tools.
+ * Returns the array (or undefined when absent), or an error ToolResult to
+ * surface to the agent when it is present but not an array.
+ */
+type ParsedAttachments = { attachments?: any[] } | { error: ToolResult };
+
+function parseAttachments(value: unknown): ParsedAttachments {
+    if (value === undefined) return {};
+    if (!Array.isArray(value)) {
+        return { error: textResult("Error: 'attachments' must be an array.", true) };
+    }
+    return { attachments: value };
+}
+
+/** Render one fused-search branch, e.g. `dense=#3 (d=0.1234)` or `bm25=—`. */
+function formatScoreBranch(label: string, rank: number | undefined, detail: string): string {
+    if (rank === undefined) return `${label}=—`;
+    return `${label}=#${rank}${detail}`;
 }
 
 /**
@@ -19,12 +41,10 @@ function formatSubScoresLine(fusedScore: number, subScores?: {
 }): string {
     const fused = `fused=${fusedScore.toFixed(4)}`;
     if (!subScores) return `Scores: ${fused}`;
-    const dense = subScores.denseRank !== undefined
-        ? `dense=#${subScores.denseRank}${subScores.denseDistance !== undefined ? ` (d=${subScores.denseDistance.toFixed(4)})` : ''}`
-        : 'dense=—';
-    const bm25 = subScores.ftsRank !== undefined
-        ? `bm25=#${subScores.ftsRank}${subScores.ftsScore !== undefined ? ` (s=${subScores.ftsScore.toFixed(2)})` : ''}`
-        : 'bm25=—';
+    const denseDetail = subScores.denseDistance !== undefined ? ` (d=${subScores.denseDistance.toFixed(4)})` : '';
+    const ftsDetail = subScores.ftsScore !== undefined ? ` (s=${subScores.ftsScore.toFixed(2)})` : '';
+    const dense = formatScoreBranch('dense', subScores.denseRank, denseDetail);
+    const bm25 = formatScoreBranch('bm25', subScores.ftsRank, ftsDetail);
     return `Scores: ${fused} · ${dense} · ${bm25}`;
 }
 
@@ -46,13 +66,9 @@ export class MemoryToolHandlers {
     async handleSaveMemory(args: any): Promise<ToolResult> {
         const content = typeof args?.content === 'string' ? args.content : '';
         const title = typeof args?.title === 'string' ? args.title : undefined;
-        let attachments: any[] | undefined;
-        if (args?.attachments !== undefined) {
-            if (!Array.isArray(args.attachments)) {
-                return textResult("Error: 'attachments' must be an array.", true);
-            }
-            attachments = args.attachments;
-        }
+        const parsed = parseAttachments(args?.attachments);
+        if ('error' in parsed) return parsed.error;
+        const attachments = parsed.attachments;
         const hasAttachments = (attachments?.length ?? 0) > 0;
         if (content.trim().length === 0 && !hasAttachments) {
             return textResult("Error: provide 'content' or at least one attachment.", true);
@@ -61,21 +77,17 @@ export class MemoryToolHandlers {
             const resolved = attachments && await resolveAttachmentInputs(attachments);
             const memory = await this.store.save({ content, title, ...(resolved && { attachments: resolved }) });
             return textResult(formatMemoryResult('Saved', memory));
-        } catch (error: any) {
-            return textResult(`Failed to save memory: ${error?.message ?? String(error)}`, true);
+        } catch (error) {
+            return textResult(`Failed to save memory: ${errorMessage(error)}`, true);
         }
     }
 
     async handleRecall(args: any): Promise<ToolResult> {
         const query = typeof args?.query === 'string' ? args.query : '';
         const limit = typeof args?.limit === 'number' && args.limit > 0 ? Math.min(args.limit, 50) : 10;
-        let attachments: any[] | undefined;
-        if (args?.attachments !== undefined) {
-            if (!Array.isArray(args.attachments)) {
-                return textResult("Error: 'attachments' must be an array.", true);
-            }
-            attachments = args.attachments;
-        }
+        const parsed = parseAttachments(args?.attachments);
+        if ('error' in parsed) return parsed.error;
+        const attachments = parsed.attachments;
         const hasAttachments = (attachments?.length ?? 0) > 0;
         if (query.trim().length === 0 && !hasAttachments) {
             return textResult("Error: provide 'query' or at least one attachment.", true);
@@ -99,8 +111,8 @@ export class MemoryToolHandlers {
             });
             const header = `Recalled ${results.length} ${results.length === 1 ? 'memory' : 'memories'} for ${label}:\n`;
             return textResult(header + '\n' + blocks.join('\n\n---\n\n'));
-        } catch (error: any) {
-            return textResult(`Failed to recall memories: ${error?.message ?? String(error)}`, true);
+        } catch (error) {
+            return textResult(`Failed to recall memories: ${errorMessage(error)}`, true);
         }
     }
 
@@ -111,13 +123,9 @@ export class MemoryToolHandlers {
         }
         const hasContent = typeof args?.content === 'string';
         const title = typeof args?.title === 'string' ? args.title : undefined;
-        let attachments: any[] | undefined;
-        if (args?.attachments !== undefined) {
-            if (!Array.isArray(args.attachments)) {
-                return textResult("Error: 'attachments' must be an array.", true);
-            }
-            attachments = args.attachments;
-        }
+        const parsed = parseAttachments(args?.attachments);
+        if ('error' in parsed) return parsed.error;
+        const attachments = parsed.attachments;
         if (!hasContent && title === undefined && attachments === undefined) {
             return textResult("Error: provide at least one of 'content', 'title', or 'attachments' to update.", true);
         }
@@ -129,8 +137,8 @@ export class MemoryToolHandlers {
             if (attachments !== undefined) input.attachments = await resolveAttachmentInputs(attachments);
             const memory = await this.store.update(id, input);
             return textResult(formatMemoryResult('Updated', memory));
-        } catch (error: any) {
-            return textResult(`Failed to update memory: ${error?.message ?? String(error)}`, true);
+        } catch (error) {
+            return textResult(`Failed to update memory: ${errorMessage(error)}`, true);
         }
     }
 }

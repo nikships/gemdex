@@ -110,9 +110,7 @@ export class MemoryStore {
     }
 
     private getIsHybrid(): boolean {
-        const isHybridEnv = envManager.get('HYBRID_MODE');
-        if (isHybridEnv === undefined || isHybridEnv === null) return true;
-        return isHybridEnv.toLowerCase() === 'true';
+        return (envManager.get('HYBRID_MODE') ?? 'true').toLowerCase() === 'true';
     }
 
     /** Ensure the single global collection exists (idempotent, deduped). */
@@ -519,11 +517,9 @@ export class MemoryStore {
             throw new Error(`Memory not found: ${id}`);
         }
 
-        const content = input.content !== undefined ? input.content : existing.fullContent;
-        const attachmentsInput = input.attachments !== undefined
-            ? input.attachments
-            : await this.attachmentsToInput(existing.attachments);
-        const title = input.title !== undefined ? input.title : existing.title;
+        const content = input.content ?? existing.fullContent;
+        const attachmentsInput = input.attachments ?? await this.attachmentsToInput(existing.attachments);
+        const title = input.title ?? existing.title;
 
         if ((content ?? '').trim().length === 0 && attachmentsInput.length === 0) {
             throw new Error('Cannot update a memory to empty content (provide content or at least one attachment)');

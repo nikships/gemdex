@@ -216,6 +216,19 @@ function fuseRanks(branches: RankedChunk[][], k = 100): Map<string, number> {
     return scores;
 }
 
+function toRankedChunks(rows: RecallChunkRow[]): RankedChunk[] {
+    return rows.map((row) => ({ id: row.id, memoryId: row.memory_id }));
+}
+
+/** Order in-memory scored chunks by descending score, keep positives, cap at limit. */
+function rankByScore(scored: Array<RankedChunk & { score: number }>, limit: number): RankedChunk[] {
+    return scored
+        .filter((chunk) => chunk.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, limit)
+        .map(({ id, memoryId }) => ({ id, memoryId }));
+}
+
 /**
  * Build a comma-separated list of positional placeholders ($1, $2, ...) for an
  * `IN (...)` clause. We expand to scalar placeholders rather than `= ANY($1)`
@@ -227,6 +240,16 @@ function inPlaceholders(count: number, start = 1): string {
     return Array.from({ length: count }, (_, index) => `$${start + index}`).join(', ');
 }
 
+function toMemoryAttachment(row: AttachmentRow): MemoryAttachment {
+    return {
+        id: row.id,
+        kind: row.kind,
+        mimeType: row.mime_type,
+        byteLength: Number(row.byte_length),
+        ...(row.caption ? { caption: row.caption } : {}),
+    };
+}
+
 async function loadAttachments(db: Queryable, memoryId: string): Promise<MemoryAttachment[]> {
     const result = await db.query<AttachmentRow>(
         `SELECT id, kind, mime_type, byte_length, caption
@@ -235,13 +258,7 @@ async function loadAttachments(db: Queryable, memoryId: string): Promise<MemoryA
          ORDER BY ordinal ASC`,
         [memoryId],
     );
-    return result.rows.map((row) => ({
-        id: row.id,
-        kind: row.kind,
-        mimeType: row.mime_type,
-        byteLength: Number(row.byte_length),
-        ...(row.caption ? { caption: row.caption } : {}),
-    }));
+    return result.rows.map(toMemoryAttachment);
 }
 
 function attachmentTitle(attachments: PreparedAttachment[]): string {
@@ -276,6 +293,24 @@ export class PostgresMemoryBackend implements MemoryBackend {
 
     async close(): Promise<void> {
         await this.pool.end();
+    }
+
+    /**
+     * Delete a memory document and the attachment blob rows it owned. The
+     * documents/attachments cascade handles attachment + chunk rows, but blob
+     * rows are RESTRICT-protected, so they must be removed explicitly once no
+     * attachment references them.
+     */
+    private async deleteDocumentAndBlobs(client: DatabaseClient, id: string): Promise<void> {
+        const oldBlobs = await client.query<{ blob_ref_id: string }>(
+            'SELECT blob_ref_id FROM gemdex_memory_attachments WHERE memory_id = $1',
+            [id],
+        );
+        await client.query('DELETE FROM gemdex_memory_documents WHERE id = $1', [id]);
+        if (oldBlobs.rows.length > 0) {
+            const blobIds = oldBlobs.rows.map((oldBlob) => oldBlob.blob_ref_id);
+            await client.query(`DELETE FROM gemdex_attachment_blobs WHERE id IN (${inPlaceholders(blobIds.length)})`, blobIds);
+        }
     }
 
     async save(input: SaveMemoryInput): Promise<Memory> {
@@ -424,15 +459,7 @@ export class PostgresMemoryBackend implements MemoryBackend {
         const client = await this.pool.connect();
         try {
             await client.query('BEGIN');
-            const oldBlobs = await client.query<{ blob_ref_id: string }>(
-                'SELECT blob_ref_id FROM gemdex_memory_attachments WHERE memory_id = $1',
-                [id],
-            );
-            await client.query('DELETE FROM gemdex_memory_documents WHERE id = $1', [id]);
-            if (oldBlobs.rows.length > 0) {
-                const blobIds = oldBlobs.rows.map((oldBlob) => oldBlob.blob_ref_id);
-                await client.query(`DELETE FROM gemdex_attachment_blobs WHERE id IN (${inPlaceholders(blobIds.length)})`, blobIds);
-            }
+            await this.deleteDocumentAndBlobs(client, id);
             await client.query('COMMIT');
             await this.blobStore?.deleteParent(id);
         } catch (error) {
@@ -555,15 +582,7 @@ export class PostgresMemoryBackend implements MemoryBackend {
 
         try {
             await client.query('BEGIN');
-            const oldBlobs = await client.query<{ blob_ref_id: string }>(
-                'SELECT blob_ref_id FROM gemdex_memory_attachments WHERE memory_id = $1',
-                [id],
-            );
-            await client.query('DELETE FROM gemdex_memory_documents WHERE id = $1', [id]);
-            if (oldBlobs.rows.length > 0) {
-                const blobIds = oldBlobs.rows.map((oldBlob) => oldBlob.blob_ref_id);
-                await client.query(`DELETE FROM gemdex_attachment_blobs WHERE id IN (${inPlaceholders(blobIds.length)})`, blobIds);
-            }
+            await this.deleteDocumentAndBlobs(client, id);
             await client.query(
                 `INSERT INTO gemdex_memory_documents (id, title, content, created_at, updated_at)
                  VALUES ($1, $2, $3, $4, $5)`,
@@ -701,23 +720,21 @@ export class PostgresMemoryBackend implements MemoryBackend {
                  LIMIT $2`,
                 [vectorLiteral(vector), limit],
             );
-            return result.rows.map((row) => ({ id: row.id, memoryId: row.memory_id }));
+            return toRankedChunks(result.rows);
         }
         const result = await this.pool.query<RecallChunkRow>(
             `SELECT id, memory_id, embedding_vector
              FROM gemdex_memory_chunks
              WHERE embedding_vector IS NOT NULL`,
         );
-        return result.rows
-            .map((row) => ({
+        return rankByScore(
+            result.rows.map((row) => ({
                 id: row.id,
                 memoryId: row.memory_id,
                 score: cosineSimilarity(parseVector(row.embedding_vector) ?? [], vector),
-            }))
-            .filter((row) => row.score > 0)
-            .sort((a, b) => b.score - a.score)
-            .slice(0, limit)
-            .map(({ id, memoryId }) => ({ id, memoryId }));
+            })),
+            limit,
+        );
     }
 
     private async fullTextRank(query: string, limit: number): Promise<RankedChunk[]> {
@@ -733,21 +750,19 @@ export class PostgresMemoryBackend implements MemoryBackend {
                  LIMIT $2`,
                 [query, limit],
             );
-            return result.rows.map((row) => ({ id: row.id, memoryId: row.memory_id }));
+            return toRankedChunks(result.rows);
         }
         const result = await this.pool.query<RecallChunkRow>(
             'SELECT id, memory_id, content FROM gemdex_memory_chunks',
         );
-        return result.rows
-            .map((row) => ({
+        return rankByScore(
+            result.rows.map((row) => ({
                 id: row.id,
                 memoryId: row.memory_id,
                 score: lexicalScore(row.content ?? '', query),
-            }))
-            .filter((row) => row.score > 0)
-            .sort((a, b) => b.score - a.score)
-            .slice(0, limit)
-            .map(({ id, memoryId }) => ({ id, memoryId }));
+            })),
+            limit,
+        );
     }
 
     private async rowToMemory(row: DocumentRow): Promise<Memory> {
@@ -780,13 +795,7 @@ export class PostgresMemoryBackend implements MemoryBackend {
         const attachmentsByMemoryId = new Map<string, MemoryAttachment[]>();
         for (const row of attachmentResult.rows) {
             const list = attachmentsByMemoryId.get(row.memory_id) ?? [];
-            list.push({
-                id: row.id,
-                kind: row.kind,
-                mimeType: row.mime_type,
-                byteLength: Number(row.byte_length),
-                ...(row.caption ? { caption: row.caption } : {}),
-            });
+            list.push(toMemoryAttachment(row));
             attachmentsByMemoryId.set(row.memory_id, list);
         }
         return rows.map((row) => ({
@@ -799,27 +808,26 @@ export class PostgresMemoryBackend implements MemoryBackend {
         }));
     }
 
+    private async exportAttachmentRowToInput(row: AttachmentExportRow): Promise<StoredAttachmentInput> {
+        return {
+            id: row.id,
+            mimeType: row.mime_type,
+            data: (await this.readBlob(row)).toString('base64'),
+            ...(row.caption ? { caption: row.caption } : {}),
+        };
+    }
+
     private async exportAttachmentsRecord(id: string): Promise<{ attachments?: MemoryExportRecord['attachments'] }> {
         const rows = await this.exportAttachmentRows(id);
         if (rows.length === 0) return {};
         return {
-            attachments: await Promise.all(rows.map(async (row) => ({
-                id: row.id,
-                mimeType: row.mime_type,
-                data: (await this.readBlob(row)).toString('base64'),
-                ...(row.caption ? { caption: row.caption } : {}),
-            }))),
+            attachments: await Promise.all(rows.map((row) => this.exportAttachmentRowToInput(row))),
         };
     }
 
     private async exportAttachmentsAsInputs(id: string): Promise<StoredAttachmentInput[]> {
         const rows = await this.exportAttachmentRows(id);
-        return Promise.all(rows.map(async (row) => ({
-            id: row.id,
-            mimeType: row.mime_type,
-            data: (await this.readBlob(row)).toString('base64'),
-            ...(row.caption ? { caption: row.caption } : {}),
-        })));
+        return Promise.all(rows.map((row) => this.exportAttachmentRowToInput(row)));
     }
 
     private async exportAttachmentRows(id: string): Promise<AttachmentExportRow[]> {

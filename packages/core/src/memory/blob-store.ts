@@ -27,6 +27,12 @@ export interface BlobStore {
     deleteParent(parentId: string): Promise<void>;
 }
 
+// Internal ids (UUIDs, numeric indices) are already filesystem-safe; this is a
+// defensive guard so a hand-crafted ref can never escape the store root.
+function safeSegment(value: string): string {
+    return value.replace(/[^A-Za-z0-9._-]/g, '_');
+}
+
 /**
  * Filesystem-backed BlobStore. Layout: `<root>/<parentId>/<attachmentId>`,
  * with `<root>` defaulting to `~/.gemdex/blobs` (a sibling of the LanceDB
@@ -52,12 +58,6 @@ export class FileBlobStore implements BlobStore {
         this.ensured = true;
     }
 
-    // Internal ids (UUIDs, numeric indices) are already filesystem-safe; this
-    // is a defensive guard so a hand-crafted ref can never escape the root.
-    private static safeSegment(value: string): string {
-        return value.replace(/[^A-Za-z0-9._-]/g, '_');
-    }
-
     private resolveRef(blobRef: string): string {
         const resolved = path.resolve(this.root, blobRef);
         const rootResolved = path.resolve(this.root);
@@ -69,9 +69,7 @@ export class FileBlobStore implements BlobStore {
 
     async put(parentId: string, attachmentId: string, data: Buffer): Promise<string> {
         await this.ensureRoot();
-        const dirSegment = FileBlobStore.safeSegment(parentId);
-        const fileSegment = FileBlobStore.safeSegment(attachmentId);
-        const blobRef = path.posix.join(dirSegment, fileSegment);
+        const blobRef = path.posix.join(safeSegment(parentId), safeSegment(attachmentId));
         const absPath = this.resolveRef(blobRef);
         await fs.mkdir(path.dirname(absPath), { recursive: true });
         await fs.writeFile(absPath, data);
@@ -92,7 +90,7 @@ export class FileBlobStore implements BlobStore {
     }
 
     async deleteParent(parentId: string): Promise<void> {
-        const segment = FileBlobStore.safeSegment(parentId);
+        const segment = safeSegment(parentId);
         // `safeSegment` permits '.' and '..' (only allowed chars), so guard
         // explicitly: a '.'/'..' parentId would otherwise resolve to the store
         // root or its parent and recursively delete unrelated data.
@@ -156,10 +154,6 @@ export class S3BlobStore implements BlobStore {
         return (prefix ?? '').replace(/^\/+|\/+$/g, '');
     }
 
-    private static safeSegment(value: string): string {
-        return value.replace(/[^A-Za-z0-9._-]/g, '_');
-    }
-
     private toKey(blobRef: string): string {
         const normalized = blobRef.split('/').filter((segment) => segment && segment !== '.' && segment !== '..').join('/');
         if (!normalized) {
@@ -169,7 +163,7 @@ export class S3BlobStore implements BlobStore {
     }
 
     private parentPrefix(parentId: string): string {
-        const segment = S3BlobStore.safeSegment(parentId);
+        const segment = safeSegment(parentId);
         if (segment === '.' || segment === '..') {
             throw new Error(`Refusing to delete unsafe blob prefix: ${parentId}`);
         }
@@ -177,9 +171,7 @@ export class S3BlobStore implements BlobStore {
     }
 
     async put(parentId: string, attachmentId: string, data: Buffer): Promise<string> {
-        const dirSegment = S3BlobStore.safeSegment(parentId);
-        const fileSegment = S3BlobStore.safeSegment(attachmentId);
-        const blobRef = path.posix.join(dirSegment, fileSegment);
+        const blobRef = path.posix.join(safeSegment(parentId), safeSegment(attachmentId));
         await this.client.send(new PutObjectCommand({
             Bucket: this.bucket,
             Key: this.toKey(blobRef),

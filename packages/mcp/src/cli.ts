@@ -6,6 +6,7 @@ import {
 } from 'gemdex-core';
 import { ClientConfigStore, StoredRemote, tokenEnvVarForRemote } from './cli-config.js';
 import { createConfig } from './config.js';
+import { errorMessage } from './errors.js';
 import { createMemoryBackend } from './memory.js';
 
 interface CliIo {
@@ -139,7 +140,7 @@ async function remoteStatus(
         return {
             reachable: false,
             authenticated: false,
-            detail: error instanceof Error ? error.message : String(error),
+            detail: errorMessage(error),
         };
     }
 
@@ -147,8 +148,7 @@ async function remoteStatus(
         await createRemoteBackend(remote, token).list();
         return { reachable: true, authenticated: true };
     } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        return { reachable: true, authenticated: false, detail: `${name}: ${detail}` };
+        return { reachable: true, authenticated: false, detail: `${name}: ${errorMessage(error)}` };
     }
 }
 
@@ -178,8 +178,7 @@ async function migrateLocalToRemote(
             }
         } catch (error) {
             result.skipped += 1;
-            const detail = error instanceof Error ? error.message : String(error);
-            io.stderr(`Skipped ${record.id}: ${detail}\n`);
+            io.stderr(`Skipped ${record.id}: ${errorMessage(error)}\n`);
         }
     }
     return result;
@@ -195,8 +194,7 @@ async function verifyServerCompatibility(url: string, fetchImpl: typeof fetch): 
     try {
         response = await fetchImpl(`${url}/v1/version`, { signal: AbortSignal.timeout(5_000) });
     } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        throw new Error(`Could not reach ${url}/v1/version: ${detail}`);
+        throw new Error(`Could not reach ${url}/v1/version: ${errorMessage(error)}`);
     }
     if (!response.ok) {
         throw new Error(`${url}/v1/version returned HTTP ${response.status}.`);
@@ -222,12 +220,8 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
     });
 
     const [command, subcommand] = args;
-    const isCliCommand = command === 'remote' ||
-        command === 'mode' ||
-        command === 'status' ||
-        command === 'init-remote' ||
-        command === 'import-local-to-remote';
-    if (!isCliCommand) return null;
+    const CLI_COMMANDS = ['remote', 'mode', 'status', 'init-remote', 'import-local-to-remote'];
+    if (!CLI_COMMANDS.includes(command)) return null;
 
     try {
         if (command === 'remote' && subcommand === 'add') {
@@ -343,8 +337,7 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
             try {
                 await remote.list();
             } catch (error) {
-                const detail = error instanceof Error ? error.message : String(error);
-                throw new Error(`Authentication check failed: ${detail}`);
+                throw new Error(`Authentication check failed: ${errorMessage(error)}`);
             }
             io.stdout('Authenticated successfully.\n');
 
@@ -389,7 +382,7 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
         io.stderr(usage());
         return 1;
     } catch (error) {
-        io.stderr(`Error: ${error instanceof Error ? error.message : String(error)}\n`);
+        io.stderr(`Error: ${errorMessage(error)}\n`);
         return 1;
     }
 }
