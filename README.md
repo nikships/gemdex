@@ -260,6 +260,13 @@ npx gemdex serve --port 0   # localhost HTTP/JSON manager API; --port 0 = auto-p
 
 The sidecar binds `127.0.0.1` only — it's a single-user local app.
 
+## BYOI remote mode design
+
+Gemdex is local-first today. The planned bring-your-own-infra remote mode is
+defined in [`docs/BYOI_REMOTE_MODE.md`](docs/BYOI_REMOTE_MODE.md), including the
+v1 HTTP API contract, auth model, attachment handling, version compatibility,
+ranking invariants, and non-goals.
+
 ## Use as a library
 
 Skip the MCP server and embed the memory store directly:
