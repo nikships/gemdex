@@ -2,6 +2,34 @@ export function remoteOptionLabel(remote) {
   return `${remote.name} · ${remote.url}${remote.hasToken ? "" : " · token missing"}`;
 }
 
+export function backendLabel(backend) {
+  if (!backend) return "the current backend";
+  if (backend.mode === "remote") {
+    return backend.activeRemote?.name
+      ? `remote backend “${backend.activeRemote.name}”`
+      : "remote backend";
+  }
+  return backend.needsKey ? "local backend (needs API key)" : "local backend";
+}
+
+export function targetBackendLabel(mode, name = "") {
+  if (mode === "remote") {
+    return name ? `remote backend “${name}”` : "remote backend";
+  }
+  return "local backend";
+}
+
+export function shouldConfirmBackendSwitch(currentBackend, mode, name = "") {
+  if (!currentBackend) return false;
+  if (currentBackend.mode !== mode) return true;
+  if (mode !== "remote") return false;
+  return (currentBackend.activeRemote?.name ?? "") !== name;
+}
+
+export function backendSwitchConfirmation(currentBackend, mode, name = "") {
+  return `Switch from ${backendLabel(currentBackend)} to ${targetBackendLabel(mode, name)}?`;
+}
+
 export function connectionStatus(name, result) {
   if (result.reachable && result.authenticated) {
     return {

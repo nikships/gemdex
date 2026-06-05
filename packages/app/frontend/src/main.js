@@ -9,9 +9,11 @@ import {
   kindFromMime,
 } from "./attachments.js";
 import {
+  backendSwitchConfirmation,
   connectionStatus,
   migrationStatus,
   remoteOptionLabel,
+  shouldConfirmBackendSwitch,
 } from "./settings.js";
 
 /**
@@ -911,6 +913,13 @@ function closeSettings() {
 
 async function applyMode(mode, name) {
   showSettingsError();
+  const currentBackend = activeBackend();
+  if (
+    shouldConfirmBackendSwitch(currentBackend, mode, name)
+    && !confirm(backendSwitchConfirmation(currentBackend, mode, name))
+  ) {
+    return;
+  }
   try {
     settingsState = await api("/settings/mode", {
       method: "POST",
