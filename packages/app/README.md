@@ -5,6 +5,13 @@ memory layer, built on [zero-native](https://www.npmjs.com/package/zero-native)
 (a Zig desktop shell + web UI). It opens straight into your memory layer to
 browse, create, edit, delete, export, and import memories.
 
+The Storage settings panel can switch the sidecar between the embedded local
+backend and a named BYOI Gemdex Server. Remote bearer tokens are accepted by
+the UI only for the configuration request, persisted by the sidecar under
+`~/.gemdex/.env`, and never returned to frontend JavaScript. The same panel can
+test remote health/authentication and import local memories to the remote while
+preserving ids.
+
 There is **no free-text search box** — recall is an agent/MCP capability. This
 app is a fast local manager. (It does offer recall-*by-example*: a "Find
 similar" action on any attachment, which runs media recall against the sidecar.)

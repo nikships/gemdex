@@ -6,8 +6,21 @@ import * as path from "node:path";
 import type { AddressInfo } from "node:net";
 import { createServer as httpServer } from "node:http";
 import { LanceDBVectorDatabase, LocalMemoryBackend, Embedding, EmbeddingVector, FileBlobStore } from "gemdex-core";
-import type { EmbeddingContent, MemoryBackend } from "gemdex-core";
+import type {
+    AttachmentBytes,
+    AttachmentCaptionUpdate,
+    EmbeddingContent,
+    Memory,
+    MemoryAttachmentInput,
+    MemoryBackend,
+    MemoryExportRecord,
+    MemoryRecallResult,
+    MemorySummary,
+    SaveMemoryInput,
+    UpdateMemoryInput,
+} from "gemdex-core";
 import { createMemoryApiHandler } from "gemdex-core";
+import { ClientConfigStore } from "./cli-config.js";
 import { createServer } from "./serve.js";
 
 const DIM = 16;
@@ -59,6 +72,95 @@ class FakeMultimodalEmbedding extends Embedding {
     }
 }
 
+class SettingsBackend implements MemoryBackend {
+    readonly records = new Map<string, MemoryExportRecord>();
+
+    constructor(records: MemoryExportRecord[] = []) {
+        for (const record of records) this.records.set(record.id, record);
+    }
+
+    async save(input: SaveMemoryInput): Promise<Memory> {
+        const now = Date.now();
+        const record: MemoryExportRecord = {
+            id: `created-${this.records.size + 1}`,
+            title: input.title ?? 'Untitled',
+            content: input.content ?? '',
+            createdAt: now,
+            updatedAt: now,
+        };
+        this.records.set(record.id, record);
+        return { ...record, attachments: [] };
+    }
+
+    async recall(
+        _query?: string,
+        _limit?: number,
+        _queryAttachments?: MemoryAttachmentInput[],
+    ): Promise<MemoryRecallResult[]> {
+        return [];
+    }
+
+    async update(id: string, input: UpdateMemoryInput): Promise<Memory> {
+        const current = this.records.get(id);
+        if (!current) throw new Error('Memory not found');
+        const updated = {
+            ...current,
+            ...(input.title !== undefined && { title: input.title }),
+            ...(input.content !== undefined && { content: input.content }),
+            updatedAt: Date.now(),
+        };
+        this.records.set(id, updated);
+        return { ...updated, attachments: [] };
+    }
+
+    async updateAttachmentCaptions(_id: string, _captions: AttachmentCaptionUpdate[]): Promise<Memory> {
+        throw new Error('not implemented');
+    }
+
+    async get(id: string): Promise<Memory | null> {
+        const record = this.records.get(id);
+        return record ? { ...record, attachments: [] } : null;
+    }
+
+    async list(): Promise<MemorySummary[]> {
+        return [...this.records.values()].map((record) => ({
+            id: record.id,
+            title: record.title,
+            preview: record.content,
+            createdAt: record.createdAt,
+            updatedAt: record.updatedAt,
+            attachments: [],
+        }));
+    }
+
+    async delete(id: string): Promise<void> {
+        this.records.delete(id);
+    }
+
+    async exportAll(): Promise<MemoryExportRecord[]> {
+        return [...this.records.values()];
+    }
+
+    async importRecords(records: MemoryExportRecord[]): Promise<{ imported: number }> {
+        for (const record of records) this.records.set(record.id, record);
+        return { imported: records.length };
+    }
+
+    async readAttachment(_memoryId: string, _attachmentId: string): Promise<AttachmentBytes | null> {
+        return null;
+    }
+}
+
+function exportRecord(id: string, content = id): MemoryExportRecord {
+    return {
+        id,
+        title: id,
+        content,
+        createdAt: 1,
+        updatedAt: 2,
+    };
+}
+
 let tmpDir: string;
 let server: ReturnType<typeof createServer>;
 let base: string;
@@ -92,7 +194,10 @@ test("GET /health returns ok", async () => {
 test("GET /config reports configured when a store is present", async () => {
     const res = await fetch(`${base}/config`);
     assert.equal(res.status, 200);
-    assert.deepEqual(await res.json(), { configured: true });
+    assert.deepEqual(await res.json(), {
+        configured: true,
+        needsKey: false,
+    });
 });
 
 test("shared memory API handler mounts data routes without desktop /config", async () => {
@@ -147,7 +252,10 @@ test("data routes answer 503 needsKey when no store is configured", async () => 
     const bareBase = `http://127.0.0.1:${addr.port}`;
     try {
         const cfg = await fetch(`${bareBase}/config`);
-        assert.deepEqual(await cfg.json(), { configured: false });
+        assert.deepEqual(await cfg.json(), {
+            configured: false,
+            needsKey: false,
+        });
 
         const res = await fetch(`${bareBase}/memories`);
         assert.equal(res.status, 503);
@@ -155,6 +263,138 @@ test("data routes answer 503 needsKey when no store is configured", async () => 
         assert.equal(body.needsKey, true);
     } finally {
         await new Promise<void>((resolve) => bare.close(() => resolve()));
+    }
+});
+
+test("desktop settings configure, test, switch, migrate, and remove remotes without returning tokens", async () => {
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "gemdex-desktop-settings-"));
+    const configStore = new ClientConfigStore({ rootDir });
+    const local = new SettingsBackend([
+        exportRecord('new-id', 'local new'),
+        exportRecord('existing-id', 'local update'),
+    ]);
+    const remote = new SettingsBackend([exportRecord('existing-id', 'remote old')]);
+    const token = "d".repeat(64);
+    const srv = createServer({
+        config: {
+            name: 'test',
+            version: '1',
+            embeddingModel: 'fake',
+            geminiApiKey: 'local-key',
+            mode: 'local',
+        },
+        store: local,
+        token,
+        clientConfigStore: configStore,
+        createBackend: (config) => config.mode === 'remote' ? remote : local,
+        fetch: (async (input) => {
+            const url = String(input);
+            if (url.endsWith('/v1/health')) {
+                return new Response(JSON.stringify({ ok: true }), {
+                    status: 200,
+                    headers: { 'Content-Type': 'application/json' },
+                });
+            }
+            if (url.endsWith('/v1/memories')) {
+                return new Response(JSON.stringify({ memories: [] }), {
+                    status: 200,
+                    headers: { 'Content-Type': 'application/json' },
+                });
+            }
+            return new Response(JSON.stringify({ error: 'not found' }), { status: 404 });
+        }) as typeof fetch,
+    });
+    await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
+    const addr = srv.address() as AddressInfo;
+    const settingsBase = `http://127.0.0.1:${addr.port}`;
+    const headers = {
+        "Content-Type": "application/json",
+        "X-Gemdex-Token": token,
+    };
+    try {
+        const initial = await fetch(`${settingsBase}/settings`, { headers });
+        assert.equal(initial.status, 200);
+        assert.deepEqual(await initial.json(), {
+            mode: 'local',
+            configured: true,
+            localConfigured: true,
+            remotes: [],
+        });
+
+        const add = await fetch(`${settingsBase}/settings/remotes`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+                name: 'prod',
+                url: 'https://memory.example.com/',
+                token: 'long-lived-secret',
+            }),
+        });
+        assert.equal(add.status, 200);
+        const addText = await add.text();
+        assert.doesNotMatch(addText, /long-lived-secret/);
+        assert.match(fs.readFileSync(configStore.envPath, 'utf8'), /long-lived-secret/);
+
+        const testResponse = await fetch(`${settingsBase}/settings/test`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ name: 'prod' }),
+        });
+        assert.deepEqual(await testResponse.json(), {
+            reachable: true,
+            authenticated: true,
+        });
+
+        const switchResponse = await fetch(`${settingsBase}/settings/mode`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ mode: 'remote', name: 'prod' }),
+        });
+        assert.equal(switchResponse.status, 200);
+        assert.equal((await switchResponse.json() as any).activeRemote, 'prod');
+
+        const remoteList = await fetch(`${settingsBase}/memories`, { headers });
+        assert.equal(remoteList.status, 200);
+        assert.equal((await remoteList.json() as any).memories.length, 1);
+
+        const migration = await fetch(`${settingsBase}/settings/import-local`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ name: 'prod' }),
+        });
+        assert.deepEqual(await migration.json(), {
+            created: 1,
+            updated: 1,
+            skipped: 0,
+        });
+        assert.equal(remote.records.get('new-id')?.id, 'new-id');
+
+        const localMode = await fetch(`${settingsBase}/settings/mode`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ mode: 'local' }),
+        });
+        assert.equal((await localMode.json() as any).mode, 'local');
+
+        const remove = await fetch(`${settingsBase}/settings/remotes/prod`, {
+            method: 'DELETE',
+            headers,
+        });
+        assert.equal(remove.status, 200);
+        assert.deepEqual((await remove.json() as any).remotes, []);
+        assert.doesNotMatch(fs.readFileSync(configStore.envPath, 'utf8'), /long-lived-secret/);
+
+        configStore.add('broken', 'https://broken.example.com', 'MISSING_REMOTE_TOKEN');
+        const brokenSwitch = await fetch(`${settingsBase}/settings/mode`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ mode: 'remote', name: 'broken' }),
+        });
+        assert.equal(brokenSwitch.status, 400);
+        assert.equal(configStore.getEnv('GEMDEX_MODE'), 'local');
+    } finally {
+        await new Promise<void>((resolve) => srv.close(() => resolve()));
+        fs.rmSync(rootDir, { recursive: true, force: true });
     }
 });
 

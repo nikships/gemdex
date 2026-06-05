@@ -15,6 +15,7 @@
         <form id="setup-form" class="setup-form">
           <input id="api-key-input" class="title-input" type="password" placeholder="GEMINI_API_KEY" autocomplete="off" spellcheck="false" />
           <button type="submit" id="api-key-save" class="primary">Save &amp; continue</button>
+          <button type="button" id="setup-settings-btn">Use a remote server</button>
         </form>
         <p id="setup-error" class="setup-error" hidden></p>
       </div>
@@ -30,6 +31,7 @@
           </div>
         </div>
         <div class="actions">
+          <button id="settings-btn">Storage</button>
           <button id="new-btn" class="primary">New memory</button>
           <button id="export-btn">Export</button>
           <button id="import-btn">Import</button>
@@ -87,6 +89,67 @@
           </div>
         </section>
       </main>
+    </div>
+
+    <div id="settings-modal" class="modal-backdrop" hidden>
+      <section class="settings-card" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <div class="settings-head">
+          <div>
+            <h2 id="settings-title">Storage settings</h2>
+            <p>Choose the embedded local store or a Gemdex Server you control.</p>
+          </div>
+          <button type="button" id="settings-close" class="ghost">Close</button>
+        </div>
+
+        <div class="mode-grid">
+          <button type="button" id="mode-local" class="mode-card">
+            <strong>Local</strong>
+            <span>Gemini + LanceDB on this machine</span>
+          </button>
+          <button type="button" id="mode-remote" class="mode-card">
+            <strong>Remote</strong>
+            <span>Connect through your BYOI Gemdex Server</span>
+          </button>
+        </div>
+
+        <section class="settings-section">
+          <div class="settings-row">
+            <label for="remote-select">Configured remote</label>
+            <select id="remote-select"></select>
+          </div>
+          <div class="settings-actions">
+            <button type="button" id="remote-use" class="primary">Use remote</button>
+            <button type="button" id="remote-test">Test connection</button>
+            <button type="button" id="remote-import">Import local memories</button>
+            <button type="button" id="remote-remove" class="danger">Remove</button>
+          </div>
+          <p id="remote-status" class="connection-status"></p>
+        </section>
+
+        <form id="remote-form" class="settings-section remote-form">
+          <h3>Add or update a remote</h3>
+          <div class="settings-fields">
+            <label>
+              Name
+              <input id="remote-name" type="text" placeholder="production" autocomplete="off" />
+            </label>
+            <label>
+              Server URL
+              <input id="remote-url" type="url" placeholder="https://memory.example.com" autocomplete="off" />
+            </label>
+            <label>
+              Bearer token
+              <input id="remote-token" type="password" placeholder="Required for new remotes" autocomplete="new-password" />
+            </label>
+          </div>
+          <div class="settings-actions">
+            <button type="submit" id="remote-save" class="primary">Save remote</button>
+          </div>
+          <p class="settings-note">The token is sent once to the localhost sidecar and stored in <code>~/.gemdex/.env</code>. It is never returned to this page.</p>
+        </form>
+
+        <p id="settings-error" class="setup-error" hidden></p>
+      </section>
     </div>
     <script type="module" src="/src/main.js"></script>
   </body>
