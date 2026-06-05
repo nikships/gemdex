@@ -25,24 +25,33 @@ export const SUPPORTED_API_VERSION = 'v1';
 export const SUPPORTED_PROTOCOL_VERSION = 1;
 
 /**
- * Parse a "x.y.z" semver string into a comparable numeric triple.
- * Returns [0, 0, 0] for any unparseable input so callers receive a defined result.
+ * Parse a strict "x.y.z" semver string (an optional leading "v" is tolerated)
+ * into a comparable numeric triple. Returns null for anything that is not three
+ * dot-separated integers, so callers can FAIL CLOSED rather than silently
+ * treating a malformed version as 0.0.0 (which would let an invalid
+ * minClientVersion bypass the compatibility gate).
  */
-function parseSemver(version: string): [number, number, number] {
-    const parts = version.split('.').map(Number);
-    const major = Number.isFinite(parts[0]) ? parts[0] : 0;
-    const minor = Number.isFinite(parts[1]) ? parts[1] : 0;
-    const patch = Number.isFinite(parts[2]) ? parts[2] : 0;
-    return [major, minor, patch];
+function parseSemver(version: string): [number, number, number] | null {
+    const match = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(version.trim());
+    if (match === null) {
+        return null;
+    }
+    return [Number(match[1]), Number(match[2]), Number(match[3])];
 }
 
 /**
  * Compare two semver strings.
- * Returns -1 if a < b, 0 if a === b, 1 if a > b.
+ * Returns -1 if a < b, 0 if a === b, 1 if a > b, or null if either input is not
+ * a valid "x.y.z" version.
  */
-function compareSemver(a: string, b: string): -1 | 0 | 1 {
-    const [aMaj, aMin, aPatch] = parseSemver(a);
-    const [bMaj, bMin, bPatch] = parseSemver(b);
+function compareSemver(a: string, b: string): -1 | 0 | 1 | null {
+    const aParsed = parseSemver(a);
+    const bParsed = parseSemver(b);
+    if (aParsed === null || bParsed === null) {
+        return null;
+    }
+    const [aMaj, aMin, aPatch] = aParsed;
+    const [bMaj, bMin, bPatch] = bParsed;
 
     if (aMaj !== bMaj) return aMaj < bMaj ? -1 : 1;
     if (aMin !== bMin) return aMin < bMin ? -1 : 1;
@@ -75,6 +84,13 @@ export function checkServerCompatibility(
     serverInfo: ServerVersionInfo,
     options: CompatibilityCheckOptions = {},
 ): void {
+    // serverInfo originates from an external HTTP response; validate its shape
+    // before reading fields so a malformed/empty payload yields a clear,
+    // catchable error instead of a generic TypeError.
+    if (serverInfo === null || typeof serverInfo !== 'object') {
+        throw new RemoteCompatibilityError('Server version information is missing or invalid.');
+    }
+
     const clientVersion = options.clientVersion ?? CLIENT_VERSION;
 
     if (serverInfo.apiVersion !== SUPPORTED_API_VERSION) {
@@ -93,7 +109,15 @@ export function checkServerCompatibility(
         );
     }
 
-    if (compareSemver(clientVersion, serverInfo.minClientVersion) < 0) {
+    const minClientComparison = compareSemver(clientVersion, serverInfo.minClientVersion);
+    if (minClientComparison === null) {
+        throw new RemoteCompatibilityError(
+            `Could not verify Gemdex client compatibility: invalid version string ` +
+                `(client "${clientVersion}", server minClientVersion "${serverInfo.minClientVersion}"). ` +
+                'Expected semantic versions in x.y.z form.',
+        );
+    }
+    if (minClientComparison < 0) {
         throw new RemoteCompatibilityError(
             `Gemdex client ${clientVersion} is below the minimum required by this server ` +
                 `(${serverInfo.minClientVersion}). ` +

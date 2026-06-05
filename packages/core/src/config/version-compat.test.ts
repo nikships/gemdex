@@ -136,4 +136,36 @@ describe('checkServerCompatibility', () => {
         const server = compatibleServer({ minClientVersion: '0.10.0' });
         expect(() => checkServerCompatibility(server, { clientVersion: '0.9.0' })).toThrow(RemoteCompatibilityError);
     });
+
+    it('tolerates a leading "v" on version strings', () => {
+        const server = compatibleServer({ minClientVersion: 'v0.1.0' });
+        expect(() => checkServerCompatibility(server, { clientVersion: 'v0.3.9' })).not.toThrow();
+    });
+
+    // -----------------------------------------------------------------------
+    // fail closed on malformed versions (do NOT treat as 0.0.0)
+    // -----------------------------------------------------------------------
+    it('throws when the server minClientVersion is not valid semver', () => {
+        const server = compatibleServer({ minClientVersion: 'not-a-version' });
+        expect(() => checkServerCompatibility(server)).toThrow(RemoteCompatibilityError);
+        expect(() => checkServerCompatibility(server)).toThrow('invalid version');
+    });
+
+    it('throws when the injected client version is not valid semver', () => {
+        const server = compatibleServer({ minClientVersion: '0.1.0' });
+        expect(() => checkServerCompatibility(server, { clientVersion: 'garbage' }))
+            .toThrow(RemoteCompatibilityError);
+    });
+
+    // -----------------------------------------------------------------------
+    // defensive validation of the external serverInfo payload
+    // -----------------------------------------------------------------------
+    it('throws a clear error when serverInfo is missing or not an object', () => {
+        expect(() => checkServerCompatibility(null as unknown as ServerVersionInfo))
+            .toThrow(RemoteCompatibilityError);
+        expect(() => checkServerCompatibility(undefined as unknown as ServerVersionInfo))
+            .toThrow(RemoteCompatibilityError);
+        expect(() => checkServerCompatibility('nope' as unknown as ServerVersionInfo))
+            .toThrow('missing or invalid');
+    });
 });

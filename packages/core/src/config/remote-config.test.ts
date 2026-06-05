@@ -35,6 +35,20 @@ describe('resolveMode', () => {
         expect(() => resolveMode(makeEnv({ GEMDEX_MODE: 'cloud' }))).toThrow(GemdexConfigError);
         expect(() => resolveMode(makeEnv({ GEMDEX_MODE: 'cloud' }))).toThrow('GEMDEX_MODE');
     });
+
+    it('resolves GEMDEX_MODE case-insensitively', () => {
+        expect(resolveMode(makeEnv({ GEMDEX_MODE: 'REMOTE' }))).toBe('remote');
+        expect(resolveMode(makeEnv({ GEMDEX_MODE: 'Remote' }))).toBe('remote');
+        expect(resolveMode(makeEnv({ GEMDEX_MODE: 'LOCAL' }))).toBe('local');
+    });
+
+    it('trims surrounding whitespace before resolving the mode', () => {
+        expect(resolveMode(makeEnv({ GEMDEX_MODE: '  remote  ' }))).toBe('remote');
+    });
+
+    it('preserves the original value in the error message for an unrecognized mode', () => {
+        expect(() => resolveMode(makeEnv({ GEMDEX_MODE: 'Cloud' }))).toThrow('Cloud');
+    });
 });
 
 // ---------------------------------------------------------------------------
@@ -68,6 +82,13 @@ describe('loadRemoteConfig', () => {
         );
         expect(config!.name).toBe('prod');
         expect(config!.tokenEnvVar).toBe('MY_CUSTOM_TOKEN');
+    });
+
+    it('strips trailing slashes from the remote URL', () => {
+        expect(loadRemoteConfig(makeEnv({ GEMDEX_REMOTE_URL: 'https://my.server.com/' }))!.url)
+            .toBe('https://my.server.com');
+        expect(loadRemoteConfig(makeEnv({ GEMDEX_REMOTE_URL: 'https://my.server.com/api//' }))!.url)
+            .toBe('https://my.server.com/api');
     });
 });
 
@@ -144,5 +165,13 @@ describe('resolveRemoteConnection', () => {
         });
         const conn = resolveRemoteConnection(env);
         expect(conn.token).toBe('custom-bearer');
+    });
+
+    it('returns a trailing-slash-normalized URL', () => {
+        const env = makeEnv({
+            GEMDEX_REMOTE_URL: 'https://my.server.com/',
+            GEMDEX_REMOTE_TOKEN: 'tok',
+        });
+        expect(resolveRemoteConnection(env).url).toBe('https://my.server.com');
     });
 });

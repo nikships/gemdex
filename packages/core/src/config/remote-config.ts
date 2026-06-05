@@ -57,18 +57,18 @@ const defaultEnvGetter: EnvGetter = (name: string) => envManager.get(name);
  * @param getEnv Injectable env getter; defaults to `envManager.get`.
  */
 export function resolveMode(getEnv: EnvGetter = defaultEnvGetter): GemdexMode {
-    const raw = getEnv('GEMDEX_MODE') ?? '';
-    const trimmed = raw.trim();
+    const raw = (getEnv('GEMDEX_MODE') ?? '').trim();
+    const normalized = raw.toLowerCase();
 
-    if (trimmed === '' || trimmed === 'local') {
+    if (normalized === '' || normalized === 'local') {
         return 'local';
     }
-    if (trimmed === 'remote') {
+    if (normalized === 'remote') {
         return 'remote';
     }
 
     throw new GemdexConfigError(
-        `Unrecognized GEMDEX_MODE value "${trimmed}". Expected "local" or "remote".`,
+        `Unrecognized GEMDEX_MODE value "${raw}". Expected "local" or "remote".`,
     );
 }
 
@@ -80,15 +80,19 @@ export function resolveMode(getEnv: EnvGetter = defaultEnvGetter): GemdexMode {
  * @param getEnv Injectable env getter; defaults to `envManager.get`.
  */
 export function loadRemoteConfig(getEnv: EnvGetter = defaultEnvGetter): RemoteConfig | null {
-    const url = getEnv('GEMDEX_REMOTE_URL') ?? '';
-    if (!url.trim()) {
+    const trimmedUrl = (getEnv('GEMDEX_REMOTE_URL') ?? '').trim();
+    if (!trimmedUrl) {
         return null;
     }
 
     const name = getEnv('GEMDEX_REMOTE_NAME') ?? 'gemdex-remote';
     const tokenEnvVar = getEnv('GEMDEX_REMOTE_TOKEN_ENV_VAR') ?? DEFAULT_TOKEN_ENV_VAR;
 
-    return { name, url: url.trim(), tokenEnvVar };
+    // Normalize away trailing slashes so later path joins (e.g. `${url}/v1/version`)
+    // never produce a double slash.
+    const url = trimmedUrl.replace(/\/+$/, '');
+
+    return { name, url, tokenEnvVar };
 }
 
 /**
