@@ -1,0 +1,11 @@
+.git
+.github
+.zig-cache
+node_modules
+**/node_modules
+**/dist
+**/coverage
+packages/app
+website
+website-design.zip
+*.log

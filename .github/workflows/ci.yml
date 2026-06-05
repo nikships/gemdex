@@ -102,3 +102,34 @@ jobs:
       - name: Build Linux shell
         working-directory: packages/app
         run: zig build -Dplatform=linux "-Dzero-native-path=${{ steps.zn.outputs.path }}"
+
+  docker:
+    name: Docker compose smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate compose configuration
+        working-directory: packages/server
+        run: docker compose --env-file .env.example config
+
+      - name: Build and start BYOI stack
+        working-directory: packages/server
+        run: docker compose --env-file .env.example up -d --build
+
+      - name: Wait for Gemdex health
+        run: |
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:8765/v1/health | grep -q '"ok":true'; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose --env-file packages/server/.env.example -f packages/server/docker-compose.yml logs
+          exit 1
+
+      - name: Stop BYOI stack
+        if: always()
+        working-directory: packages/server
+        run: docker compose --env-file .env.example down --volumes

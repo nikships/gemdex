@@ -13,6 +13,58 @@ parent memory and deduplicate before results are returned.
 
 ## Quick Start
 
+### Docker Compose (recommended)
+
+```sh
+cd packages/server
+cp .env.example .env
+
+# Edit .env and replace all three placeholder secrets, then:
+docker compose up -d --build
+curl --fail http://127.0.0.1:8765/v1/health
+```
+
+The published port binds to `127.0.0.1` by default. Put a TLS reverse proxy in
+front of it before exposing the service to another machine. Data routes always
+require the bearer token from `GEMDEX_SERVER_TOKEN`; the compose file explicitly
+sets `GEMDEX_SERVER_UNSAFE_DEV_NO_AUTH=false`.
+
+The stack stores:
+
+- Postgres documents, chunks, embeddings, and metadata in the
+  `gemdex-postgres` named volume.
+- File-backed attachment bytes in the `gemdex-blobs` named volume.
+
+To use S3, R2, or MinIO instead, follow the commented `BLOB_STORE=s3` block in
+`docker-compose.yml`; the local blob volume can then be removed.
+
+Back up both durable stores before upgrades:
+
+```sh
+# Database backup
+docker compose exec -T postgres pg_dump -U gemdex -d gemdex -Fc > gemdex.dump
+
+# File-blob backup (skip this when using S3)
+docker run --rm \
+  -v gemdex_gemdex-blobs:/data:ro \
+  -v "$PWD":/backup \
+  alpine tar -czf /backup/gemdex-blobs.tar.gz -C /data .
+```
+
+The compose file fixes the project name to `gemdex`, so its Docker volumes are
+`gemdex_gemdex-postgres` and `gemdex_gemdex-blobs`. Confirm the names with
+`docker volume ls` before backup or restore. Do not use `docker compose down -v`
+for a real deployment unless you intend to delete both data volumes.
+
+CI builds this Dockerfile and starts the complete compose stack on every pull
+request. To build only the image locally:
+
+```sh
+docker build -f packages/server/Dockerfile -t gemdex-server:local .
+```
+
+### npm
+
 ```sh
 # Install globally
 npm install -g gemdex-server
