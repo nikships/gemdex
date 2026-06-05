@@ -235,7 +235,34 @@ return the same wrapper.
 
 The list response is wrapped in an object and uses `MemorySummary`-compatible
 items: full content is replaced by `preview`, while attachment metadata and
-timestamps remain available for browse views.
+timestamps remain available for browse views. No `total` or pagination field is
+part of the v1 contract unless a later compatible extension adds pagination.
+
+`GET /v1/memories/:id` response:
+
+```json
+{
+  "memory": {
+    "id": "mem_...",
+    "title": "Deployment playbook",
+    "content": "Full parent memory content",
+    "attachments": [
+      {
+        "id": "att_...",
+        "kind": "image",
+        "mimeType": "image/png",
+        "caption": "Optional caption",
+        "byteLength": 12345
+      }
+    ],
+    "createdAt": 1812144000000,
+    "updatedAt": 1812144000000
+  }
+}
+```
+
+`PUT /v1/memories/:id` and `PATCH /v1/memories/:id` return the same
+`{ "memory": {} }` wrapper with the updated canonical memory record.
 
 `DELETE /v1/memories/:id` response:
 
