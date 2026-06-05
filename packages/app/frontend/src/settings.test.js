@@ -40,6 +40,10 @@ describe("backend switch labels", () => {
 });
 
 describe("shouldConfirmBackendSwitch", () => {
+  it("does not confirm when the current backend is unknown", () => {
+    expect(shouldConfirmBackendSwitch(null, "remote", "prod")).toBe(false);
+  });
+
   it("confirms switching from local to a selected remote", () => {
     expect(shouldConfirmBackendSwitch({ mode: "local" }, "remote", "prod")).toBe(true);
   });

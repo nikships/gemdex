@@ -20,7 +20,8 @@ export function targetBackendLabel(mode, name = "") {
 }
 
 export function shouldConfirmBackendSwitch(currentBackend, mode, name = "") {
-  if (!currentBackend || currentBackend.mode !== mode) return true;
+  if (!currentBackend) return false;
+  if (currentBackend.mode !== mode) return true;
   if (mode !== "remote") return false;
   return (currentBackend.activeRemote?.name ?? "") !== name;
 }
