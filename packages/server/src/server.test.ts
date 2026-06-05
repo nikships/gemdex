@@ -105,8 +105,9 @@ class FakeMemoryBackend implements MemoryBackend {
 async function withServer(
     store: MemoryBackend | null,
     fn: (base: string) => Promise<void>,
+    options: { token?: string; unsafeDevNoAuth?: boolean; allowedOrigins?: string[] } = { token: 'test-token' },
 ): Promise<void> {
-    const server = createServer({ store });
+    const server = createServer({ store, ...options });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const addr = server.address() as AddressInfo;
     const base = `http://127.0.0.1:${addr.port}`;
@@ -145,7 +146,7 @@ test('GET /v1/version returns correct shape', async () => {
 
 test('GET /v1/memories with no store returns 503', async () => {
     await withServer(null, async (base) => {
-        const res = await fetch(`${base}/v1/memories`);
+        const res = await fetch(`${base}/v1/memories`, { headers: { Authorization: 'Bearer test-token' } });
         assert.equal(res.status, 503);
         const body = await res.json() as { error: string };
         assert.equal(typeof body.error, 'string');
@@ -156,7 +157,7 @@ test('GET /v1/memories with no store returns 503', async () => {
 test('GET /v1/memories with a fake store returns 200 { memories: [] }', async () => {
     const store = new FakeMemoryBackend();
     await withServer(store, async (base) => {
-        const res = await fetch(`${base}/v1/memories`);
+        const res = await fetch(`${base}/v1/memories`, { headers: { Authorization: 'Bearer test-token' } });
         assert.equal(res.status, 200);
         const body = await res.json() as { memories: unknown[] };
         assert.deepEqual(body, { memories: [] });
@@ -168,7 +169,7 @@ test('POST /v1/memories with fake store creates a memory and lists it', async ()
     await withServer(store, async (base) => {
         const createRes = await fetch(`${base}/v1/memories`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-token' },
             body: JSON.stringify({ content: 'test memory content', title: 'Test' }),
         });
         assert.equal(createRes.status, 201);
@@ -176,7 +177,7 @@ test('POST /v1/memories with fake store creates a memory and lists it', async ()
         assert.ok(memory.id);
         assert.equal(memory.title, 'Test');
 
-        const listRes = await fetch(`${base}/v1/memories`);
+        const listRes = await fetch(`${base}/v1/memories`, { headers: { Authorization: 'Bearer test-token' } });
         assert.equal(listRes.status, 200);
         const { memories } = await listRes.json() as { memories: Array<{ id: string }> };
         assert.equal(memories.length, 1);
@@ -192,7 +193,7 @@ test('health and version routes work even when store is null', async () => {
         const version = await fetch(`${base}/v1/version`);
         assert.equal(version.status, 200);
 
-        const memories = await fetch(`${base}/v1/memories`);
+        const memories = await fetch(`${base}/v1/memories`, { headers: { Authorization: 'Bearer test-token' } });
         assert.equal(memories.status, 503);
     });
 });
@@ -202,4 +203,98 @@ test('unknown route returns 404', async () => {
         const res = await fetch(`${base}/unknown-path`);
         assert.equal(res.status, 404);
     });
+});
+
+
+test('data routes require a bearer token', async () => {
+    const store = new FakeMemoryBackend();
+    await withServer(store, async (base) => {
+        const missing = await fetch(`${base}/v1/memories`);
+        assert.equal(missing.status, 401);
+        assert.deepEqual(await missing.json(), { error: 'Unauthorized' });
+
+        const invalid = await fetch(`${base}/v1/memories`, {
+            headers: { Authorization: 'Bearer wrong-token' },
+        });
+        assert.equal(invalid.status, 401);
+
+        const malformed = await fetch(`${base}/v1/memories`, {
+            headers: { Authorization: 'Basic test-token' },
+        });
+        assert.equal(malformed.status, 401);
+    });
+});
+
+test('data routes accept the configured bearer token', async () => {
+    const store = new FakeMemoryBackend();
+    await withServer(store, async (base) => {
+        const res = await fetch(`${base}/v1/memories`, {
+            headers: { Authorization: 'Bearer test-token' },
+        });
+        assert.equal(res.status, 200);
+        assert.deepEqual(await res.json(), { memories: [] });
+    });
+});
+
+test('unsafe dev mode permits data routes without auth', async () => {
+    const store = new FakeMemoryBackend();
+    await withServer(store, async (base) => {
+        const res = await fetch(`${base}/v1/memories`);
+        assert.equal(res.status, 200);
+    }, { unsafeDevNoAuth: true });
+});
+
+test('CORS preflight allows a configured origin and Authorization header', async () => {
+    const store = new FakeMemoryBackend();
+    await withServer(store, async (base) => {
+        const res = await fetch(`${base}/v1/memories`, {
+            method: 'OPTIONS',
+            headers: {
+                Origin: 'https://app.example.test',
+                'Access-Control-Request-Method': 'POST',
+                'Access-Control-Request-Headers': 'authorization, content-type',
+            },
+        });
+        assert.equal(res.status, 204);
+        assert.equal(res.headers.get('access-control-allow-origin'), 'https://app.example.test');
+        assert.equal(res.headers.get('access-control-allow-headers'), 'Content-Type, Authorization');
+    }, { token: 'test-token', allowedOrigins: ['https://app.example.test'] });
+});
+
+test('CORS preflight rejects a disallowed origin', async () => {
+    const store = new FakeMemoryBackend();
+    await withServer(store, async (base) => {
+        const res = await fetch(`${base}/v1/memories`, {
+            method: 'OPTIONS',
+            headers: {
+                Origin: 'https://evil.example.test',
+                'Access-Control-Request-Method': 'GET',
+            },
+        });
+        assert.equal(res.status, 403);
+        assert.equal(res.headers.get('access-control-allow-origin'), null);
+    }, { token: 'test-token', allowedOrigins: ['https://app.example.test'] });
+});
+
+test('CORS actual requests include headers only for allowed origins', async () => {
+    const store = new FakeMemoryBackend();
+    await withServer(store, async (base) => {
+        const allowed = await fetch(`${base}/v1/memories`, {
+            headers: {
+                Origin: 'https://app.example.test',
+                Authorization: 'Bearer test-token',
+            },
+        });
+        assert.equal(allowed.status, 200);
+        assert.equal(allowed.headers.get('access-control-allow-origin'), 'https://app.example.test');
+
+        const disallowed = await fetch(`${base}/v1/memories`, {
+            headers: {
+                Origin: 'https://evil.example.test',
+                Authorization: 'Bearer test-token',
+            },
+        });
+        assert.equal(disallowed.status, 403);
+        assert.equal(disallowed.headers.get('access-control-allow-origin'), null);
+    }, { token: 'test-token', allowedOrigins: ['https://app.example.test'] });
 });

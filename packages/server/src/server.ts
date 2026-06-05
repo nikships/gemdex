@@ -1,7 +1,7 @@
 import * as http from 'http';
+import { timingSafeEqual } from 'node:crypto';
 import { createRequire } from 'node:module';
 import {
-    buildCorsHeaders,
     handleMemoryApiRequest,
     sendJson,
     ServerVersionInfo,
@@ -33,24 +33,70 @@ const VERSION_INFO: ServerVersionInfo = {
 
 export interface CreateServerOptions {
     store?: MemoryBackend | null;
+    /** Bearer token required for all data routes. */
+    token?: string;
+    /** Explicit local/dev escape hatch for starting without auth. Never enable for exposed deployments. */
+    unsafeDevNoAuth?: boolean;
+    /** Browser origins allowed to read data-route responses. Empty means browser cross-origin access is denied. */
+    allowedOrigins?: string[];
+}
+
+const ALLOW_METHODS = 'GET, POST, PUT, PATCH, DELETE, OPTIONS';
+const ALLOW_HEADERS = 'Content-Type, Authorization';
+
+function normalizeOrigins(origins: string[] | undefined): Set<string> {
+    return new Set((origins ?? []).map((origin) => origin.trim()).filter(Boolean));
+}
+
+function buildServerCorsHeaders(req: http.IncomingMessage, allowedOrigins: Set<string>): Record<string, string> {
+    const origin = req.headers.origin;
+    const headers: Record<string, string> = {
+        'Vary': 'Origin',
+        'Access-Control-Allow-Methods': ALLOW_METHODS,
+        'Access-Control-Allow-Headers': ALLOW_HEADERS,
+        'Access-Control-Allow-Credentials': 'false',
+    };
+    if (typeof origin === 'string' && allowedOrigins.has(origin)) {
+        headers['Access-Control-Allow-Origin'] = origin;
+    }
+    return headers;
+}
+
+function isCorsOriginAllowed(req: http.IncomingMessage, allowedOrigins: Set<string>): boolean {
+    const origin = req.headers.origin;
+    return typeof origin !== 'string' || allowedOrigins.has(origin);
+}
+
+function hasValidBearerToken(req: http.IncomingMessage, token: string | undefined): boolean {
+    if (!token) return false;
+    const header = req.headers.authorization;
+    if (typeof header !== 'string') return false;
+    const match = /^Bearer (.+)$/.exec(header);
+    if (!match) return false;
+    const supplied = Buffer.from(match[1], 'utf8');
+    const expected = Buffer.from(token, 'utf8');
+    return supplied.length === expected.length && timingSafeEqual(supplied, expected);
 }
 
 /**
  * Build the HTTP server. Health and version routes are always available.
  * Memory routes under /v1/* answer 503 until a store is injected.
  */
-export function createServer({ store = null }: CreateServerOptions): http.Server {
+export function createServer({ store = null, token, unsafeDevNoAuth = false, allowedOrigins = [] }: CreateServerOptions): http.Server {
+    const normalizedAllowedOrigins = normalizeOrigins(allowedOrigins);
     return http.createServer(async (req, res) => {
         const method = req.method ?? 'GET';
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
         const pathname = url.pathname.replace(/\/+$/, '') || '/';
-        const corsHeaders = buildCorsHeaders(undefined);
+        const corsHeaders = buildServerCorsHeaders(req, normalizedAllowedOrigins);
 
         if (method === 'OPTIONS') {
+            if (!isCorsOriginAllowed(req, normalizedAllowedOrigins)) {
+                sendJson(res, 403, { error: 'Origin not allowed' }, corsHeaders);
+                return;
+            }
             res.writeHead(204, {
-                'Allow': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
-                'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
-                'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Gemdex-Token',
+                'Allow': ALLOW_METHODS,
                 ...corsHeaders,
             });
             res.end();
@@ -70,8 +116,18 @@ export function createServer({ store = null }: CreateServerOptions): http.Server
                 return;
             }
 
-            // All /v1/* memory routes require a configured backend.
+            // All /v1/* memory routes require an allowed browser origin, auth,
+            // and a configured backend. Health/version above are intentionally
+            // unauthenticated and safe to expose.
             if (pathname.startsWith('/v1/')) {
+                if (!isCorsOriginAllowed(req, normalizedAllowedOrigins)) {
+                    sendJson(res, 403, { error: 'Origin not allowed' }, corsHeaders);
+                    return;
+                }
+                if (!unsafeDevNoAuth && !hasValidBearerToken(req, token)) {
+                    sendJson(res, 401, { error: 'Unauthorized' }, corsHeaders);
+                    return;
+                }
                 if (store === null) {
                     sendJson(res, 503, { error: 'No memory backend configured' }, corsHeaders);
                     return;
@@ -114,7 +170,12 @@ export function createServer({ store = null }: CreateServerOptions): http.Server
  */
 export function startServer(config: ServerConfig, store?: MemoryBackend | null): Promise<http.Server> {
     return new Promise((resolve) => {
-        const server = createServer({ store: store ?? null });
+        const server = createServer({
+            store: store ?? null,
+            token: config.token,
+            unsafeDevNoAuth: config.unsafeDevNoAuth,
+            allowedOrigins: config.allowedOrigins,
+        });
         server.listen(config.port, config.host, () => {
             const address = server.address();
             const boundPort = typeof address === 'object' && address ? address.port : config.port;
