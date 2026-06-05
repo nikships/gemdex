@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AddressInfo } from "node:net";
-import { LanceDBVectorDatabase, MemoryStore, Embedding, EmbeddingVector, FileBlobStore } from "gemdex-core";
+import { LanceDBVectorDatabase, LocalMemoryBackend, Embedding, EmbeddingVector, FileBlobStore } from "gemdex-core";
 import type { EmbeddingContent } from "gemdex-core";
 import { createServer } from "./serve.js";
 
@@ -68,7 +68,7 @@ async function json(res: Response): Promise<any> {
 before(async () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gemdex-serve-test-"));
     const db = new LanceDBVectorDatabase({ uri: tmpDir });
-    const store = new MemoryStore({ embedding: new FakeEmbedding(), vectorDatabase: db });
+    const store = new LocalMemoryBackend({ embedding: new FakeEmbedding(), vectorDatabase: db });
     // No token/allowedOrigin — backward-compat mode (existing tests unchanged).
     server = createServer({ config: {} as any, store });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -227,7 +227,7 @@ test("multimodal: create with an attachment, then fetch its raw bytes", async ()
     const mmDbDir = fs.mkdtempSync(path.join(os.tmpdir(), "gemdex-serve-mm-db-"));
     const mmBlobDir = fs.mkdtempSync(path.join(os.tmpdir(), "gemdex-serve-mm-blob-"));
     const db = new LanceDBVectorDatabase({ uri: mmDbDir });
-    const mmStore = new MemoryStore({
+    const mmStore = new LocalMemoryBackend({
         embedding: new FakeMultimodalEmbedding(),
         vectorDatabase: db,
         blobStore: new FileBlobStore(mmBlobDir),
@@ -279,7 +279,7 @@ test("PATCH /memories/:id/attachments updates a caption, 404 missing, 400 bad bo
     const mmDbDir = fs.mkdtempSync(path.join(os.tmpdir(), "gemdex-serve-cap-db-"));
     const mmBlobDir = fs.mkdtempSync(path.join(os.tmpdir(), "gemdex-serve-cap-blob-"));
     const db = new LanceDBVectorDatabase({ uri: mmDbDir });
-    const mmStore = new MemoryStore({
+    const mmStore = new LocalMemoryBackend({
         embedding: new FakeMultimodalEmbedding(),
         vectorDatabase: db,
         blobStore: new FileBlobStore(mmBlobDir),
@@ -347,7 +347,7 @@ async function withTokenServer(
 ): Promise<void> {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gemdex-serve-auth-"));
     const db = new LanceDBVectorDatabase({ uri: dir });
-    const store = new MemoryStore({ embedding: new FakeEmbedding(), vectorDatabase: db });
+    const store = new LocalMemoryBackend({ embedding: new FakeEmbedding(), vectorDatabase: db });
     const srv = createServer({ config: {} as any, store, token });
     await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
     const addr = srv.address() as AddressInfo;
@@ -434,7 +434,7 @@ test("token: CORS headers include X-Gemdex-Token in Allow-Headers", async () => 
 test("origin: request with mismatched Origin header returns 403", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gemdex-serve-origin-"));
     const db = new LanceDBVectorDatabase({ uri: dir });
-    const store = new MemoryStore({ embedding: new FakeEmbedding(), vectorDatabase: db });
+    const store = new LocalMemoryBackend({ embedding: new FakeEmbedding(), vectorDatabase: db });
     const srv = createServer({
         config: {} as any,
         store,
