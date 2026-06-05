@@ -282,6 +282,13 @@ docker compose exec gemdex-server sh -c \
 Set a valid server-side `GEMINI_API_KEY`, confirm the selected model supports
 the payload, and restart the service. Do not add the key to remote clients.
 
+For an optional real-Gemini smoke test after deterministic CI passes, create a
+throwaway memory and recall it using the authenticated curl commands in
+[`packages/server/README.md`](../packages/server/README.md#server-owned-embeddings).
+Use a real image for media testing; tiny placeholder images are rejected by
+Gemini. Remove the throwaway memory afterward through the desktop app or the
+authenticated `DELETE /v1/memories/:id` route.
+
 ### Database or Migration Failure
 
 - Inspect `docker compose logs postgres gemdex-server`.
