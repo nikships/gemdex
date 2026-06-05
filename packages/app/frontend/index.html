@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http://127.0.0.1:*; media-src 'self' blob: http://127.0.0.1:*; frame-src 'self' blob: http://127.0.0.1:*; object-src 'self' blob: http://127.0.0.1:*; connect-src 'self' http://127.0.0.1:* http://127.0.0.1:5173 ws://127.0.0.1:5173" />
+    <meta http-equiv="Content-Security-Policy" content="%GEMDEX_CSP%" />
     <title>Gemdex Memory</title>
   </head>
   <body>
@@ -68,6 +68,7 @@
             <div class="recovery-actions">
               <button type="button" id="recovery-settings" class="primary">Open Storage settings</button>
               <button type="button" id="recovery-local">Use local storage</button>
+              <button type="button" id="recovery-retry">Retry connection</button>
             </div>
           </div>
 
@@ -91,6 +92,7 @@
                 <ul id="attachment-list" class="attachment-list"></ul>
                 <p class="dropzone-hint" id="dropzone-hint">Drag &amp; drop media here, or “Add files”. Images (≤6), plus one each of audio / video / PDF. 20&nbsp;MB per file.</p>
               </div>
+              <p id="attach-progress" class="attach-progress" hidden></p>
               <p id="attach-error" class="attach-error" hidden></p>
             </section>
 
@@ -174,6 +176,16 @@
         </form>
 
         <p id="settings-error" class="setup-error" hidden></p>
+      </section>
+    </div>
+    <div id="confirm-modal" class="modal-backdrop" hidden>
+      <section class="confirm-card" role="dialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-message">
+        <h2 id="confirm-title">Confirm action</h2>
+        <p id="confirm-message"></p>
+        <div class="confirm-actions">
+          <button type="button" id="confirm-cancel">Cancel</button>
+          <button type="button" id="confirm-ok" class="primary">Continue</button>
+        </div>
       </section>
     </div>
     <script type="module" src="/src/main.js"></script>
