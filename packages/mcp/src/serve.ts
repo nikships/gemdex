@@ -202,6 +202,10 @@ export function createServer(ctx: ServeContext): http.Server {
                 sendJson(res, 413, { error: message }, corsHeaders);
                 return;
             }
+            if (message === 'Invalid JSON body') {
+                sendJson(res, 400, { error: message }, corsHeaders);
+                return;
+            }
             console.error('[serve] request error:', error);
             sendJson(res, 500, { error: message }, corsHeaders);
         }

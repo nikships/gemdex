@@ -1,5 +1,6 @@
 import * as http from "http";
-import { MemoryBackend } from "gemdex-core";
+import { SUPPORTED_MIME_TYPES } from "gemdex-core";
+import type { MemoryBackend } from "gemdex-core";
 
 /**
  * Build CORS response headers for a given request context. When an
@@ -29,11 +30,19 @@ export function sendJson(res: http.ServerResponse, status: number, body: unknown
 }
 
 /** Stream raw attachment bytes back to the WebView with their real content type. */
-export function sendBytes(res: http.ServerResponse, status: number, buf: Buffer, contentType: string, corsHeaders: Record<string, string>): void {
+export function sendBytes(
+    res: http.ServerResponse,
+    status: number,
+    buf: Buffer,
+    contentType: string,
+    corsHeaders: Record<string, string>,
+    extraHeaders: Record<string, string> = {},
+): void {
     res.writeHead(status, {
         'Content-Type': contentType,
         'Content-Length': buf.length,
         ...corsHeaders,
+        ...extraHeaders,
     });
     res.end(buf);
 }
@@ -42,33 +51,87 @@ export function sendBytes(res: http.ServerResponse, status: number, buf: Buffer,
 // a larger limit (ATTACHMENT_BODY_LIMIT) since media payloads are much bigger.
 export const DEFAULT_BODY_LIMIT = 50 * 1024 * 1024; // 50 MiB
 export const ATTACHMENT_BODY_LIMIT = 100 * 1024 * 1024; // 100 MiB for create/update/import with media
+const METHOD_ALLOW_HEADER = 'GET, POST, PUT, PATCH, DELETE, OPTIONS';
+const HEADER_ALLOW_HEADER = 'Content-Type, X-Gemdex-Token';
+const SAFE_INLINE_ATTACHMENT_MIME_TYPES = new Set([...SUPPORTED_MIME_TYPES, 'text/plain']);
+
+function attachmentResponseHeaders(mimeType: string): { contentType: string; headers: Record<string, string> } {
+    const normalized = typeof mimeType === 'string' ? mimeType.toLowerCase() : '';
+    const headers: Record<string, string> = {
+        'X-Content-Type-Options': 'nosniff',
+    };
+    if (SAFE_INLINE_ATTACHMENT_MIME_TYPES.has(normalized)) {
+        return { contentType: normalized, headers };
+    }
+    return {
+        contentType: 'application/octet-stream',
+        headers: {
+            ...headers,
+            'Content-Disposition': 'attachment',
+        },
+    };
+}
+
+function sendPreflight(res: http.ServerResponse, corsHeaders: Record<string, string>): void {
+    res.writeHead(204, {
+        'Allow': METHOD_ALLOW_HEADER,
+        'Access-Control-Allow-Methods': METHOD_ALLOW_HEADER,
+        'Access-Control-Allow-Headers': HEADER_ALLOW_HEADER,
+        ...corsHeaders,
+    });
+    res.end();
+}
 
 export function readBody(req: http.IncomingMessage, maxBytes: number = DEFAULT_BODY_LIMIT): Promise<any> {
     return new Promise((resolve, reject) => {
         const chunks: Buffer[] = [];
         let size = 0;
-        req.on('data', (chunk: Buffer) => {
+        let settled = false;
+
+        const finish = (fn: () => void): void => {
+            if (settled) return;
+            settled = true;
+            req.off('data', onData);
+            req.off('end', onEnd);
+            req.off('error', onError);
+            req.off('close', onClose);
+            fn();
+        };
+        const fail = (error: Error): void => finish(() => reject(error));
+        const onData = (chunk: Buffer): void => {
             size += chunk.length;
             if (size > maxBytes) {
-                reject(new Error('Request body too large'));
+                fail(new Error('Request body too large'));
                 req.destroy();
                 return;
             }
             chunks.push(chunk);
-        });
-        req.on('end', () => {
-            const raw = Buffer.concat(chunks).toString('utf-8');
-            if (raw.trim().length === 0) {
-                resolve({});
-                return;
+        };
+        const onEnd = (): void => {
+            finish(() => {
+                const raw = Buffer.concat(chunks).toString('utf-8');
+                if (raw.trim().length === 0) {
+                    resolve({});
+                    return;
+                }
+                try {
+                    resolve(JSON.parse(raw));
+                } catch (error) {
+                    reject(new Error('Invalid JSON body'));
+                }
+            });
+        };
+        const onError = (error: Error): void => fail(error);
+        const onClose = (): void => {
+            if (!req.complete) {
+                fail(new Error('Connection closed prematurely'));
             }
-            try {
-                resolve(JSON.parse(raw));
-            } catch (error) {
-                reject(new Error('Invalid JSON body'));
-            }
-        });
-        req.on('error', reject);
+        };
+
+        req.on('data', onData);
+        req.on('end', onEnd);
+        req.on('error', onError);
+        req.on('close', onClose);
     });
 }
 
@@ -136,8 +199,11 @@ export async function handleMemoryApiRequest(
         // POST /import — restore/merge (upsert by id)
         if (method === 'POST' && pathname === '/import') {
             const body = await readBody(req, ATTACHMENT_BODY_LIMIT);
-            const records = Array.isArray(body?.records) ? body.records : [];
-            const result = await store.importRecords(records);
+            if (!Array.isArray(body?.records)) {
+                sendJson(res, 400, { error: "Invalid payload: 'records' must be an array" }, corsHeaders);
+                return true;
+            }
+            const result = await store.importRecords(body.records);
             sendJson(res, 200, result, corsHeaders);
             return true;
         }
@@ -184,7 +250,8 @@ export async function handleMemoryApiRequest(
                 sendJson(res, 404, { error: 'Attachment not found' }, corsHeaders);
                 return true;
             }
-            sendBytes(res, 200, blob.data, blob.mimeType, corsHeaders);
+            const attachmentResponse = attachmentResponseHeaders(blob.mimeType);
+            sendBytes(res, 200, blob.data, attachmentResponse.contentType, corsHeaders, attachmentResponse.headers);
             return true;
         }
 
@@ -282,6 +349,10 @@ export async function handleMemoryApiRequest(
             sendJson(res, 413, { error: message }, corsHeaders);
             return true;
         }
+        if (message === 'Invalid JSON body') {
+            sendJson(res, 400, { error: message }, corsHeaders);
+            return true;
+        }
         console.error('[http-api] request error:', error);
         sendJson(res, 500, { error: message }, corsHeaders);
         return true;
@@ -290,13 +361,27 @@ export async function handleMemoryApiRequest(
 
 export function createMemoryApiHandler(options: MemoryApiHandlerOptions): http.RequestListener {
     return (req, res) => {
+        const method = req.method ?? 'GET';
+        const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+        const pathname = url.pathname.replace(/\/+$/, '') || '/';
+        const corsHeaders = options.corsHeaders ?? {};
+
+        if (method === 'OPTIONS') {
+            sendPreflight(res, corsHeaders);
+            return;
+        }
+
         void handleMemoryApiRequest(req, res, options).then((handled) => {
             if (!handled) {
-                const method = req.method ?? 'GET';
-                const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-                const pathname = url.pathname.replace(/\/+$/, '') || '/';
-                sendJson(res, 404, { error: `No route for ${method} ${pathname}` }, options.corsHeaders ?? {});
+                sendJson(res, 404, { error: `No route for ${method} ${pathname}` }, corsHeaders);
             }
+        }).catch((error) => {
+            console.error('[http-api] fatal handler error:', error);
+            if (!res.headersSent) {
+                sendJson(res, 500, { error: 'Internal server error' }, corsHeaders);
+                return;
+            }
+            if (!res.writableEnded) res.end();
         });
     };
 }
