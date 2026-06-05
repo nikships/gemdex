@@ -64,6 +64,9 @@ use `--token-env MY_TOKEN_VAR`.
 }
 ```
 
+See the [BYOI operations guide](../../docs/BYOI_OPERATIONS.md) for server
+deployment, TLS, storage, backup/restore, upgrades, and troubleshooting.
+
 ## Tools
 
 - `save_memory(content, title?)` — persist a new memory; returns its `id`.

@@ -2,6 +2,10 @@
 
 Self-hostable Gemdex Server — the official BYOI (Bring Your Own Infrastructure) remote backend HTTP service.
 
+For the complete empty-host-to-remote-MCP deployment, security model,
+backup/restore, upgrades, and troubleshooting, see the
+[BYOI operations guide](../../docs/BYOI_OPERATIONS.md).
+
 This package provides the `gemdex-server` CLI and the HTTP service that backs
 remote Gemdex clients (MCP, desktop app, CLI). It exposes the Gemdex v1 HTTP API
 under `/v1/*`.

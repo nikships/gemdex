@@ -40,8 +40,8 @@ across every repo and every session.
 - 🔌 **Plug-and-play** — speaks MCP over stdio, so any compatible client
   (Claude Code, Cursor, Codex CLI, Windsurf, Cline, Continue, Zed…) works
   instantly.
-- 🪶 **Truly local** — memories live in a single directory on your disk
-  (LanceDB at `~/.gemdex`). No Docker, no daemon, no SaaS, no telemetry.
+- 🪶 **Local by default** — use embedded LanceDB at `~/.gemdex`, or connect
+  multiple machines to a Gemdex Server running in infrastructure you own.
 - 🖥️ **Desktop manager** — a native app to browse / edit / delete / export /
   import your memory layer.
 
@@ -160,8 +160,8 @@ snippet into your client's root instructions file (conventionally `AGENTS.md`).
 | `update_memory` | `id` (required); `content`, `title`, `attachments` (optional — at least one required) | updated `id` + title | to revise a stored memory |
 
 Deletion is intentionally **not** an agent tool — it's a deliberate human action
-in the desktop app. All three tools embed via Gemini and require
-`GEMINI_API_KEY`.
+in the desktop app. All three tools embed via Gemini. Local mode requires
+`GEMINI_API_KEY`; remote mode uses the Gemdex Server owner's key.
 
 ### Multimodal attachments
 
@@ -260,12 +260,15 @@ npx gemdex serve --port 0   # localhost HTTP/JSON manager API; --port 0 = auto-p
 
 The sidecar binds `127.0.0.1` only — it's a single-user local app.
 
-## BYOI remote mode design
+## Self-hosted remote mode (BYOI)
 
-Gemdex is local-first today. The planned bring-your-own-infra remote mode is
-defined in [`docs/BYOI_REMOTE_MODE.md`](docs/BYOI_REMOTE_MODE.md), including the
-v1 HTTP API contract, auth model, attachment handling, version compatibility,
-ranking invariants, and non-goals.
+Run Gemdex Server with Postgres/pgvector and file or S3-compatible attachment
+storage, then connect MCP, CLI, and desktop clients to the same global memory
+pool. Embedding runs on the server, so remote clients do not need a Gemini key.
+
+Start with the [`BYOI operations guide`](docs/BYOI_OPERATIONS.md). The
+[`remote mode contract`](docs/BYOI_REMOTE_MODE.md) defines the v1 API, auth,
+attachment handling, compatibility checks, ranking invariants, and non-goals.
 
 ## Use as a library
 
@@ -298,6 +301,7 @@ console.log(hits[0].content); // the full memory, never a fragment
 |---------|-------------|
 | [`gemdex-core`](packages/core) | Memory store (parent-document chunking), Gemini embedding client, embedded LanceDB hybrid retrieval |
 | [`gemdex-mcp`](packages/mcp) | MCP server (`save_memory`/`recall`/`update_memory`) + `gemdex serve` localhost sidecar |
+| [`gemdex-server`](packages/server) | Self-hosted BYOI HTTP backend using Postgres/pgvector and file or S3-compatible blobs |
 | [`packages/app`](packages/app) | zero-native desktop app to manage the memory layer |
 
 ## Configuration
@@ -314,16 +318,21 @@ console.log(hits[0].content); // the full memory, never a fragment
 | `GEMINI_BASE_URL` | no | Google default | Custom Gemini endpoint |
 | `HYBRID_MODE` | no | `true` | Disable to use dense-only recall |
 | `GEMDEX_SERVE_PORT` | no | auto (0) | Default port for `gemdex serve` (the app picks one automatically) |
+| `GEMDEX_MODE` | no | `local` | Select the embedded `local` backend or a configured `remote` backend |
+| `GEMDEX_REMOTE_URL` | remote only | — | Gemdex Server root URL |
+| `GEMDEX_REMOTE_TOKEN` | remote only | — | Gemdex Server bearer token |
 
 </details>
 
 ## Privacy & safety
 
 Gemdex is a **power-dev tool with zero guardrails by design**. You may store API
-keys, credentials, and account details — in plaintext, locally. There is no
-secret redaction, no encryption mandate, and no safety enforcement. Storing
-sensitive data is your informed choice. Nothing leaves your machine except the
-text you embed, which is sent to the Gemini embeddings API.
+keys, credentials, and account details in plaintext. There is no secret
+redaction, encryption mandate, or safety enforcement. In local mode, records
+stay on the client except content sent to Gemini for embedding. In BYOI mode,
+records live in your server/database/blob infrastructure and embedding payloads
+are sent from that server to Gemini. Gemdex provides no hosted custody or
+account service. See the [BYOI security model](docs/BYOI_OPERATIONS.md#security-and-custody).
 
 ## Build from source
 
