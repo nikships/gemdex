@@ -40,10 +40,41 @@ network access, add a localhost sidecar route instead of widening the CSP.
 ## Architecture
 
 - **Zig shell** (`src/main.zig`): opens the window, applies the CSP /
-  navigation policy, spawns the Node sidecar (`gemdex serve`) on launch,
-  discovers the localhost port it bound (via the `PORT=<n>` handshake line),
-  hands that base URL to the WebView through the `gemdex.getApiBase` bridge
-  command, and kills the sidecar on exit. **No memory logic in Zig.**
+  navigation policy, brings up the Node sidecar (`gemdex serve`), discovers the
+  localhost port it bound (via the `PORT=<n>` handshake line), hands that base
+  URL to the WebView through the `gemdex.getApiBase` bridge command, and kills
+  the sidecar on exit. It owns the full sidecar lifecycle (install / start /
+  check) and exposes it to the WebView, but holds **no memory logic in Zig.**
+
+### First-launch bootstrap (no silent installs)
+
+Launch never installs over the network. `start()` decides a phase and the
+WebView drives onboarding from it (polling `gemdex.getStatus`):
+
+- **dev** — `GEMDEX_SERVE_CMD` set → run that Node entry directly.
+- **probe** — otherwise, if `node` + `npx` resolve on the login-shell PATH, try
+  `npx --offline gemdex-mcp serve` (cache-only, zero network). Handshake OK ⇒
+  `ready`; cache miss ⇒ `needs_bootstrap`.
+- **needs_node** — no `node`/`npx` on PATH; the UI shows a specific, actionable
+  error (install Node 20+, then retry). We can't install this for the user.
+
+Installing the sidecar package is reserved for an explicit, UI-approved action.
+`gemdex.bootstrap {install:true}` runs `npx -y gemdex-mcp serve` (the one
+permitted network install) on a **background thread** so the UI thread never
+blocks; the WebView shows a spinner and polls until `ready` or `error`. On
+success the shell drops a non-secret marker at `~/.gemdex/desktop.json`
+(`{"sidecarBootstrappedAt":…,"method":"npx"}`) — runtime state only, never the
+memory store. The three bridge commands (`gemdex.getApiBase`,
+`gemdex.getStatus`, `gemdex.bootstrap`) are gated to the packaged/dev origins.
+
+Bridge phases: `starting → ready | needs_node | needs_bootstrap`, with
+`needs_bootstrap → installing → ready | error` after the user approves.
+
+> **Auto-update tradeoff:** because launch now probes `--offline` instead of
+> `npx -y`, the sidecar package is no longer silently re-fetched on every
+> launch. A user-approved bootstrap uses `npx -y`, which installs/updates to the
+> latest published `gemdex-mcp`. The `.app` itself still auto-updates via
+> Sparkle.
 - **Node sidecar** (`gemdex serve`, from the `gemdex-mcp` package): wraps
   `gemdex-core` + LanceDB and exposes a localhost HTTP/JSON manager API. Shares
   the same `~/.gemdex` store the MCP server uses, so memories saved by the agent
@@ -57,9 +88,10 @@ The user never runs a sidecar command — the app spawns it automatically.
 ## Auto-updates (Sparkle)
 
 The packaged macOS app ships with [Sparkle](https://sparkle-project.org) for
-in-place auto-updates of the native shell + frontend. (The Node sidecar is
-pulled fresh on each launch via `npx -y gemdex-mcp`, so Sparkle only updates
-the `.app` itself.)
+in-place auto-updates of the native shell + frontend. Sparkle only updates the
+`.app` itself; the Node sidecar is installed/updated via a UI-approved
+`npx -y gemdex-mcp` bootstrap (see *First-launch bootstrap* above), not silently
+on every launch.
 
 - **Init:** `src/sparkle_host.m` exposes `gemdex_sparkle_start()`, called from
   `main.zig`'s `start()` (on the main thread, Sparkle's required init point).
@@ -117,5 +149,8 @@ zig build run
 
 Per the design, a release build should bundle the Node serve runtime (and the
 per-platform LanceDB native binding) so the installed app launches with zero
-user steps. The fallback used during development transparently invokes
-`npx -y gemdex serve` when a system Node is present.
+user steps. Until that bundling lands, an installed app with a system Node onboards
+through the UI: launch probes `npx --offline gemdex-mcp serve` (no network), and
+if the package isn't cached yet the user approves a one-time
+`npx -y gemdex-mcp serve` install from the bootstrap panel (see *First-launch
+bootstrap* above).

@@ -24,9 +24,14 @@ const html = `
     <div id="recovery-panel" hidden>
       <h2 id="recovery-title"></h2>
       <p id="recovery-message"></p>
+      <button id="recovery-bootstrap" hidden></button>
       <button id="recovery-settings"></button>
       <button id="recovery-local"></button>
       <button id="recovery-retry"></button>
+      <p id="recovery-progress" class="recovery-progress is-hidden" role="status" aria-live="polite" aria-atomic="true" aria-hidden="true">
+        <span class="spinner" aria-hidden="true"></span>
+        <span id="recovery-progress-text"></span>
+      </p>
     </div>
     <div id="placeholder"></div>
     <form id="editor" hidden>
@@ -131,6 +136,11 @@ describe("app-level UI flows", () => {
       configState: { configured: true, mode: "remote", activeRemote: { name: "prod" } },
       settingsState: { mode: "remote", localConfigured: true },
     });
+    __private.showBootstrapRecovery({
+      title: "Setup",
+      message: "Install",
+      progress: "Installing…",
+    });
 
     expect(__private.showRemoteRecovery(new Error("connection refused"))).toBe(true);
 
@@ -138,6 +148,8 @@ describe("app-level UI flows", () => {
     expect(__private.els.recoveryTitle.textContent).toBe("prod is unreachable");
     expect(__private.els.recoverySettings.hidden).toBe(false);
     expect(__private.els.recoveryLocal.hidden).toBe(false);
+    expect(__private.els.recoveryBootstrap.hidden).toBe(true);
+    expect(__private.els.recoveryProgress.getAttribute("aria-hidden")).toBe("true");
   });
 
   it("uses real buttons for memory rows and similar result rows", async () => {
@@ -248,8 +260,115 @@ describe("app-level UI flows", () => {
 
     expect(__private.els.recoveryPanel.hidden).toBe(false);
     expect(__private.els.recoveryTitle.textContent).toBe("Memory store did not start");
+    expect(__private.els.recoveryBootstrap.hidden).toBe(true);
     expect(__private.els.recoverySettings.hidden).toBe(true);
     expect(__private.els.recoveryLocal.hidden).toBe(true);
     expect(__private.els.recoveryRetry.hidden).toBe(false);
+  });
+
+  it("needs_bootstrap renders an install action, hiding settings/local/retry", async () => {
+    const { __private } = await loadMain();
+
+    await __private.handlePhase({
+      phase: "needs_bootstrap",
+      detail: "Gemdex needs to install its memory sidecar.",
+      previouslyInstalled: false,
+    });
+
+    expect(__private.els.recoveryPanel.hidden).toBe(false);
+    expect(__private.els.recoveryBootstrap.hidden).toBe(false);
+    expect(__private.els.recoveryBootstrap.textContent).toBe("Install & start");
+    expect(__private.els.recoveryMessage.textContent).toContain("install its memory sidecar");
+    expect(__private.els.recoverySettings.hidden).toBe(true);
+    expect(__private.els.recoveryLocal.hidden).toBe(true);
+    expect(__private.els.recoveryRetry.hidden).toBe(true);
+  });
+
+  it("needs_node shows a specific actionable error with no install button", async () => {
+    const { __private } = await loadMain();
+
+    await __private.handlePhase({
+      phase: "needs_node",
+      detail: "Node.js (node + npx) was not found.",
+      previouslyInstalled: false,
+    });
+
+    expect(__private.els.recoveryPanel.hidden).toBe(false);
+    expect(__private.els.recoveryTitle.textContent).toBe("Node.js is required");
+    expect(__private.els.recoveryMessage.textContent).toContain("not found");
+    expect(__private.els.recoveryBootstrap.hidden).toBe(true);
+    expect(__private.els.recoveryRetry.hidden).toBe(false);
+  });
+
+  it("uses the ready status base and token without an extra bridge call", async () => {
+    const { __private } = await loadMain();
+    const invoke = vi.fn((command) => {
+      if (command === "gemdex.getApiBase") throw new Error("unexpected getApiBase");
+      return Promise.resolve({});
+    });
+    vi.stubGlobal("zero", { invoke });
+    vi.stubGlobal("fetch", vi.fn((url) => {
+      if (String(url).endsWith("/config")) return jsonResponse({ configured: true, mode: "local" });
+      if (String(url).endsWith("/memories")) return jsonResponse({ memories: [] });
+      return jsonResponse({});
+    }));
+
+    await __private.handlePhase({
+      phase: "ready",
+      base: "http://127.0.0.1:7777",
+      token: "tok",
+      previouslyInstalled: true,
+    });
+
+    expect(invoke).not.toHaveBeenCalledWith("gemdex.getApiBase", {});
+    expect(fetch).toHaveBeenCalledWith(
+      "http://127.0.0.1:7777/config",
+      expect.objectContaining({
+        headers: expect.objectContaining({ "X-Gemdex-Token": "tok" }),
+      }),
+    );
+  });
+
+  it("approves bootstrap and loads the app once the sidecar is ready", async () => {
+    vi.useFakeTimers();
+    try {
+      const { __private } = await loadMain();
+
+      // The native bridge: bootstrap is accepted, then status walks
+      // installing→ready with the localhost base + token.
+      const statuses = [
+        { phase: "installing", detail: "Installing…" },
+        { phase: "ready", base: "http://127.0.0.1:7777", token: "tok", previouslyInstalled: true },
+      ];
+      const invoke = vi.fn((command) => {
+        if (command === "gemdex.bootstrap") return Promise.resolve({ accepted: true });
+        if (command === "gemdex.getStatus") return Promise.resolve(statuses.shift() ?? { phase: "ready", base: "http://127.0.0.1:7777", token: "tok" });
+        if (command === "gemdex.getApiBase") throw new Error("unexpected getApiBase");
+        return Promise.resolve({});
+      });
+      vi.stubGlobal("zero", { invoke });
+      vi.stubGlobal("fetch", vi.fn((url) => {
+        if (String(url).endsWith("/config")) return jsonResponse({ configured: true, mode: "local" });
+        if (String(url).endsWith("/memories")) return jsonResponse({ memories: [{ id: "m1", title: "Bootstrapped", preview: "ok" }] });
+        return jsonResponse({});
+      }));
+
+      // Render the first-run prompt, then approve the install.
+      await __private.handlePhase({ phase: "needs_bootstrap", previouslyInstalled: false });
+      expect(__private.els.recoveryBootstrap.hidden).toBe(false);
+
+      const bootstrapPromise = __private.startBootstrap();
+      expect(invoke).toHaveBeenCalledWith("gemdex.bootstrap", { install: true });
+      await bootstrapPromise;
+
+      // Drive the poll loop: installing → ready.
+      await vi.advanceTimersByTimeAsync(2000);
+
+      expect(__private.els.app.hidden).toBe(false);
+      expect(__private.els.recoveryPanel.hidden).toBe(true);
+      expect(document.querySelector(".memory-row")?.textContent).toContain("Bootstrapped");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
