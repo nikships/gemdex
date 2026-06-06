@@ -4,7 +4,7 @@
     .display_name = "Gemdex Memory",
     .version = "0.3.0",
     .icons = .{ "assets/icon.icns" },
-    .platforms = .{ "macos", "linux" },
+    .platforms = .{ "macos", "linux", "windows" },
     .permissions = .{},
     .capabilities = .{ "webview", "js_bridge" },
     .bridge = .{

@@ -1,0 +1,133 @@
+name: Release (Windows)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/app/**"
+      - "packages/core/**"
+      - "packages/mcp/**"
+      - ".github/workflows/release-windows.yml"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. v0.3.1). Leave blank for the rolling desktop-latest build."
+        required: false
+        default: ""
+
+concurrency:
+  group: release-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build package and publish
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install zero-native CLI + framework
+        run: npm install -g zero-native@0.2.0
+
+      - name: Install Inno Setup
+        run: choco install innosetup --yes --no-progress
+
+      - name: Install Zig 0.16
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Resolve zero-native framework path
+        id: zn
+        shell: pwsh
+        run: |
+          $path = (npm root -g).Trim()
+          "path=$path" >> $env:GITHUB_OUTPUT
+
+      - name: Read app version from manifest
+        id: meta
+        shell: pwsh
+        run: |
+          $manifest = Get-Content packages/app/app.zon -Raw
+          if ($manifest -notmatch '\.version\s*=\s*"([^"]+)"') {
+            Write-Error "Could not read app version from packages/app/app.zon"
+            exit 1
+          }
+          "version=$($Matches[1])" >> $env:GITHUB_OUTPUT
+          "App version: $($Matches[1])"
+
+      - name: Validate manifest
+        working-directory: packages/app
+        run: zero-native validate app.zon
+
+      - name: Build frontend
+        working-directory: packages/app/frontend
+        run: npm install && npm run build
+
+      - name: Build Windows package (ReleaseFast)
+        working-directory: packages/app
+        run: zig build package -Dplatform=windows -Dpackage-target=windows -Doptimize=ReleaseFast "-Dzero-native-path=${{ steps.zn.outputs.path }}"
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: |
+          $packageDir = Get-ChildItem packages/app/zig-out/package -Directory -Filter "gemdex-memory-*-windows-ReleaseFast" | Select-Object -First 1
+          if (!$packageDir) {
+            Write-Error "Expected Windows package directory missing under packages/app/zig-out/package"
+            exit 1
+          }
+          $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6/ISCC.exe"
+          if (!(Test-Path $iscc)) {
+            Write-Error "ISCC.exe was not found at $iscc"
+            exit 1
+          }
+          $outputDir = Join-Path (Resolve-Path "packages/app/zig-out/package") "installer"
+          New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
+          & $iscc `
+            "/DAppVersion=${{ steps.meta.outputs.version }}" `
+            "/DSourceDir=$($packageDir.FullName)" `
+            "/DOutputDir=$outputDir" `
+            "packages/app/windows/installer.iss"
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          $installer = Join-Path $outputDir "Gemdex-Memory-${{ steps.meta.outputs.version }}-windows-x64-setup.exe"
+          if (!(Test-Path $installer)) {
+            Write-Error "Expected installer missing: $installer"
+            exit 1
+          }
+          "INSTALLER_PATH=$installer" >> $env:GITHUB_ENV
+
+      - name: Determine release target
+        id: release
+        shell: pwsh
+        run: |
+          $tagInput = "${{ github.event.inputs.tag }}"
+          if ($tagInput) {
+            "tag=$tagInput" >> $env:GITHUB_OUTPUT
+            "name=Gemdex Memory $tagInput" >> $env:GITHUB_OUTPUT
+          } else {
+            "tag=desktop-windows-latest" >> $env:GITHUB_OUTPUT
+            "name=Gemdex Memory ${{ steps.meta.outputs.version }} Windows (build $($env:GITHUB_SHA.Substring(0, 7)))" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release.outputs.tag }}
+          name: ${{ steps.release.outputs.name }}
+          prerelease: false
+          make_latest: false
+          fail_on_unmatched_files: true
+          files: ${{ env.INSTALLER_PATH }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
