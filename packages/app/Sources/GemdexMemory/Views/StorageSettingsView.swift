@@ -37,19 +37,30 @@ struct StorageSettingsView: View {
             }
         }
         .frame(width: 560, height: 600)
-        .background(VisualEffectBackground(material: .windowBackground).ignoresSafeArea())
+        .background(BrandBackdrop())
         .task { await refresh() }
     }
 
     private var header: some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Storage settings").font(.title3.bold())
+                Label("Storage settings", systemImage: "externaldrive.connected.to.line.below")
+                    .font(.title3.bold())
+                    .labelStyle(.titleAndIcon)
                 Text("Choose the embedded local store or a Gemdex Server you control.")
                     .font(.callout).foregroundStyle(.secondary)
             }
             Spacer()
-            Button("Close") { dismiss() }
+            Button { dismiss() } label: {
+                Image(systemName: "xmark")
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 26, height: 26)
+                    .glassSurfaceInteractive(cornerRadius: 999)
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut(.cancelAction)
+            .accessibilityLabel("Close")
         }
         .padding(20)
     }
@@ -244,15 +255,12 @@ struct ModeCard: View {
                 Text(subtitle).font(.caption).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(14)
+            .padding(16)
             .frame(maxWidth: .infinity)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(active ? Brand.gold.opacity(0.12) : Color(nsColor: .controlBackgroundColor))
-            )
+            .glassSurfaceInteractive(cornerRadius: Metric.radiusCard, tint: active ? Brand.gold : nil)
             .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(active ? Brand.gold : Color(nsColor: .separatorColor))
+                RoundedRectangle(cornerRadius: Metric.radiusCard, style: .continuous)
+                    .strokeBorder(active ? Brand.gold : Color.clear, lineWidth: active ? 1.5 : 0)
             )
         }
         .buttonStyle(.plain)

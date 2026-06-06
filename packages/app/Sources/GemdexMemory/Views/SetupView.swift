@@ -30,14 +30,15 @@ struct SetupView: View {
             .padding(40)
             .frame(maxWidth: .infinity)
         }
-        .background(VisualEffectBackground(material: .windowBackground).ignoresSafeArea())
+        .background(BrandBackdrop())
         .onAppear { keyFocused = true }
     }
 
     private var header: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 14) {
             (Brand.image("logo-mark") ?? Image(systemName: "brain.head.profile"))
-                .resizable().scaledToFit().frame(width: 92, height: 92)
+                .resizable().scaledToFit().frame(width: 100, height: 100)
+                .shadow(color: Brand.gold.opacity(0.35), radius: 22, y: 8)
             if let wordmark = Brand.image("wordmark") {
                 wordmark.resizable().scaledToFit().frame(maxWidth: 280)
             } else {
@@ -113,15 +114,8 @@ struct SetupCard<Content: View>: View {
             }
             content
         }
-        .padding(20)
+        .padding(22)
         .frame(maxWidth: .infinity, minHeight: 220, alignment: .top)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(Color(nsColor: .separatorColor))
-        )
+        .glassSurface(cornerRadius: Metric.radiusPanel)
     }
 }

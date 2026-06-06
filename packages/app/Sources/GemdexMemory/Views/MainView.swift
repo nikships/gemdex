@@ -71,18 +71,25 @@ struct MainView: View {
     }
 }
 
-/// A compact pill showing the active backend (local / remote / needs key).
+/// A compact glass pill showing the active backend (local / remote / needs key)
+/// with a live status dot.
 struct BackendBadge: View {
     @EnvironmentObject var model: AppModel
 
     var body: some View {
-        Text(model.backendLabel)
-            .font(.caption.weight(.medium))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
-            .background(Capsule().fill(color.opacity(0.18)))
-            .foregroundStyle(color)
-            .help(model.backendLabel)
+        HStack(spacing: 6) {
+            Circle()
+                .fill(color)
+                .frame(width: 7, height: 7)
+                .shadow(color: color.opacity(0.7), radius: 3)
+            Text(model.backendLabel)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.primary)
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 5)
+        .glassSurface(cornerRadius: 999, tint: color)
+        .help(model.backendLabel)
     }
 
     private var color: Color {

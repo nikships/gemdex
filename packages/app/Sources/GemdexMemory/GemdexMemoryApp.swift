@@ -15,7 +15,8 @@ struct GemdexMemoryApp: App {
                 .onAppear { model.start() }
         }
         .defaultSize(width: 1080, height: 720)
-        .windowToolbarStyle(.unified)
+        .windowStyle(.titleBar)
+        .windowToolbarStyle(.unified(showsTitle: true))
         .commands {
             CommandGroup(after: .newItem) {
                 Button("New Memory") { model.openNew() }

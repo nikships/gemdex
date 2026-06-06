@@ -14,23 +14,31 @@ struct AttachmentsSection: View {
     private var editor: EditorModel { model.editor }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Attachments").font(.headline)
+                Label("Attachments", systemImage: "paperclip")
+                    .font(.headline)
+                    .labelStyle(.titleAndIcon)
                 Spacer()
                 Button(action: pickFiles) {
                     Label("Add files", systemImage: "plus")
+                        .font(.callout.weight(.medium))
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 6)
+                        .glassSurfaceInteractive(cornerRadius: Metric.radiusControl)
                 }
-                .controlSize(.small)
+                .buttonStyle(.plain)
             }
 
             dropZone
 
             if let progress = editor.attachProgress {
-                Text(progress).font(.caption).foregroundStyle(.secondary)
+                Label(progress, systemImage: "arrow.triangle.2.circlepath")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             if let error = editor.attachError {
-                Text(error).font(.caption).foregroundStyle(Brand.terracotta)
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(Brand.terracotta)
             }
         }
     }
@@ -38,32 +46,33 @@ struct AttachmentsSection: View {
     private var dropZone: some View {
         VStack(spacing: 12) {
             if editor.attachments.isEmpty {
-                VStack(spacing: 6) {
-                    Image(systemName: "tray.and.arrow.down").font(.title2).foregroundStyle(.secondary)
+                VStack(spacing: 8) {
+                    Image(systemName: "tray.and.arrow.down.fill")
+                        .font(.system(size: 26, weight: .light))
+                        .foregroundStyle(isTargeted ? Brand.gold : .secondary)
+                        .scaleEffect(isTargeted ? 1.1 : 1)
                     Text("Drag & drop media here, or “Add files”.")
-                        .font(.callout).foregroundStyle(.secondary)
+                        .font(.callout.weight(.medium)).foregroundStyle(.secondary)
                     Text("Images (≤6), plus one each of audio / video / PDF. 20 MB per file.")
                         .font(.caption).foregroundStyle(.tertiary)
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 26)
+                .padding(.vertical, 30)
             } else {
                 ForEach(editor.attachments) { attachment in
                     AttachmentCard(attachment: attachment)
                 }
             }
         }
-        .padding(12)
+        .padding(14)
         .frame(maxWidth: .infinity)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(isTargeted ? Brand.gold.opacity(0.12) : Color(nsColor: .controlBackgroundColor))
-        )
+        .glassSurface(cornerRadius: Metric.radiusPanel, tint: isTargeted ? Brand.gold : nil)
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(isTargeted ? Brand.gold : Color(nsColor: .separatorColor),
-                              style: StrokeStyle(lineWidth: isTargeted ? 2 : 1, dash: editor.attachments.isEmpty ? [6] : []))
+            RoundedRectangle(cornerRadius: Metric.radiusPanel, style: .continuous)
+                .strokeBorder(isTargeted ? Brand.gold : Color.clear,
+                              style: StrokeStyle(lineWidth: isTargeted ? 2 : 0, dash: editor.attachments.isEmpty ? [7] : []))
         )
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isTargeted)
         .onDrop(of: [.fileURL], isTargeted: $isTargeted) { providers in
             handleDrop(providers)
             return true
@@ -140,24 +149,34 @@ struct AttachmentCard: View {
 
                 HStack(spacing: 8) {
                     if case .existing = attachment.source {
-                        Button("Find similar") {
+                        Button {
                             Task { await model.findSimilar(to: attachment) }
+                        } label: {
+                            Label("Find similar", systemImage: "sparkle.magnifyingglass")
+                                .font(.caption.weight(.medium))
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 5)
+                                .glassSurfaceInteractive(cornerRadius: Metric.radiusChip, tint: Brand.gold)
                         }
-                        .controlSize(.small)
+                        .buttonStyle(.plain)
                     }
-                    Button("Remove", role: .destructive) {
+                    Button {
                         editor.remove(attachment)
+                    } label: {
+                        Label("Remove", systemImage: "trash")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(Brand.terracotta)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 5)
+                            .glassSurfaceInteractive(cornerRadius: Metric.radiusChip)
                     }
-                    .controlSize(.small)
+                    .buttonStyle(.plain)
                 }
             }
             Spacer(minLength: 0)
         }
-        .padding(10)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color(nsColor: .textBackgroundColor))
-        )
+        .padding(12)
+        .glassSurface(cornerRadius: Metric.radiusCard)
         .task(id: attachment.id) {
             await editor.loadPreviewData(for: attachment)
         }

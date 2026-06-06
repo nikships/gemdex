@@ -58,21 +58,38 @@ struct RootView: View {
     }
 }
 
-/// Centered spinner used while the sidecar is coming up.
+/// Centered spinner used while the sidecar is coming up. Floats a Liquid Glass
+/// capsule over the ambient brand backdrop.
 struct LoadingView: View {
     let message: String
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var breathe = false
+
     var body: some View {
-        VStack(spacing: 18) {
-            (Brand.image("logo-mark") ?? Image(systemName: "brain.head.profile"))
-                .resizable().scaledToFit().frame(width: 84, height: 84)
-                .opacity(0.9)
-            ProgressView()
-                .controlSize(.large)
-            Text(message)
-                .font(.callout)
-                .foregroundStyle(.secondary)
+        ZStack {
+            BrandBackdrop()
+
+            VStack(spacing: 22) {
+                (Brand.image("logo-mark") ?? Image(systemName: "brain.head.profile"))
+                    .resizable().scaledToFit().frame(width: 96, height: 96)
+                    .shadow(color: Brand.gold.opacity(0.35), radius: 24, y: 8)
+                    .scaleEffect(reduceMotion ? 1.0 : (breathe ? 1.04 : 0.97))
+                    .animation(reduceMotion ? nil : .easeInOut(duration: 2.4).repeatForever(autoreverses: true), value: breathe)
+
+                VStack(spacing: 14) {
+                    ProgressView()
+                        .controlSize(.large)
+                    Text(message)
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(.horizontal, 28)
+                .padding(.vertical, 22)
+                .glassSurface(cornerRadius: Metric.radiusPanel)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(VisualEffectBackground(material: .windowBackground).ignoresSafeArea())
+        .onAppear { if !reduceMotion { breathe = true } }
     }
 }
