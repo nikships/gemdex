@@ -85,6 +85,11 @@ jobs:
             Write-Error "Expected Windows package directory missing under packages/app/zig-out/package"
             exit 1
           }
+          $appExe = Join-Path $packageDir.FullName "bin/gemdex-memory.exe"
+          if (!(Test-Path $appExe)) {
+            Write-Error "Expected app executable missing: $appExe"
+            exit 1
+          }
           $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6/ISCC.exe"
           if (!(Test-Path $iscc)) {
             Write-Error "ISCC.exe was not found at $iscc"
