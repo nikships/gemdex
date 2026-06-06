@@ -17,7 +17,7 @@ struct RootView: View {
                     .zIndex(10)
             }
         }
-        .animation(.easeInOut(duration: 0.25), value: screenKey)
+        .animation(model.showSettings ? nil : .easeInOut(duration: 0.25), value: screenKey)
     }
 
     /// A stable key so SwiftUI animates between distinct screens, not on every

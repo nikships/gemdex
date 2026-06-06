@@ -196,6 +196,12 @@ struct BrandBackdrop: View {
                         .offset(x: drift ? w * 0.05 : -w * 0.02,
                                 y: drift ? h * 0.40 : h * 0.34)
                 }
+                // A ZStack sizes to its largest child (the 0.9·w blob), so
+                // without this it collapses to a top-leading square and
+                // `drawingGroup()` rasterizes only that square — leaving a hard
+                // grey edge where the layer stops. Fill the reader so the
+                // backdrop covers the whole window.
+                .frame(width: w, height: h)
                 .blur(radius: 80)
                 .drawingGroup()
             }
