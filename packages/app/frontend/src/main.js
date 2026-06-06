@@ -120,7 +120,15 @@ let confirmOpener = null;
 let confirmResolver = null;
 // Handle for the sidecar status poll loop (null when not polling).
 let pollHandle = null;
+let pollGeneration = 0;
 const POLL_INTERVAL_MS = 700;
+
+function clearPoll() {
+  pollGeneration += 1;
+  if (!pollHandle) return;
+  clearTimeout(pollHandle);
+  pollHandle = null;
+}
 
 const focusableSelector = [
   "a[href]",
@@ -1020,17 +1028,20 @@ function renderBackendBadge() {
 }
 
 function clearRecovery() {
+  clearPoll();
   els.recoveryPanel.hidden = true;
   els.recoveryBootstrap.hidden = true;
   els.recoverySettings.hidden = false;
   els.recoveryLocal.hidden = false;
   els.recoveryRetry.hidden = true;
-  els.recoveryProgress.hidden = true;
+  setRecoveryProgress();
 }
 
 function setRecoveryProgress(message = "") {
+  const visible = message.length > 0;
   els.recoveryProgressText.textContent = message;
-  els.recoveryProgress.hidden = message.length === 0;
+  els.recoveryProgress.classList.toggle("is-hidden", !visible);
+  els.recoveryProgress.setAttribute("aria-hidden", String(!visible));
 }
 
 /**
@@ -1096,6 +1107,7 @@ function showNodeMissingRecovery(message) {
 }
 
 function showRemoteRecovery(error) {
+  clearPoll();
   const backend = activeBackend();
   if (backend?.mode !== "remote") return false;
   const remoteName = activeRemoteName() || "remote storage";
@@ -1104,6 +1116,8 @@ function showRemoteRecovery(error) {
   els.recoverySettings.hidden = false;
   els.recoveryLocal.hidden = !settingsState?.localConfigured;
   els.recoveryRetry.hidden = true;
+  els.recoveryBootstrap.hidden = true;
+  setRecoveryProgress();
   els.recoveryPanel.hidden = false;
   els.placeholder.hidden = true;
   els.editor.hidden = true;
@@ -1114,11 +1128,14 @@ function showRemoteRecovery(error) {
 }
 
 function showSidecarRecovery() {
+  clearPoll();
   els.recoveryTitle.textContent = "Memory store did not start";
   els.recoveryMessage.textContent = "The desktop shell could not reach the local memory sidecar. Retry the connection; if it still fails, restart Gemdex and check the sidecar logs.";
+  els.recoveryBootstrap.hidden = true;
   els.recoverySettings.hidden = true;
   els.recoveryLocal.hidden = true;
   els.recoveryRetry.hidden = false;
+  setRecoveryProgress();
   els.recoveryPanel.hidden = false;
   els.placeholder.hidden = true;
   els.editor.hidden = true;
@@ -1224,6 +1241,7 @@ async function applyMode(mode, name) {
   ) {
     return;
   }
+  clearPoll();
   try {
     settingsState = await api("/settings/mode", {
       method: "POST",
@@ -1511,7 +1529,12 @@ async function legacyConnect() {
 async function handlePhase(status) {
   switch (status.phase) {
     case "ready":
-      apiBase = await resolveApiBase();
+      if (typeof status.base === "string" && status.base.length > 0) {
+        apiBase = status.base;
+        apiToken = typeof status.token === "string" ? status.token : "";
+      } else {
+        apiBase = await resolveApiBase();
+      }
       clearRecovery();
       if (!(await syncConfigGate())) setStatus("API key required");
       return;
@@ -1556,8 +1579,10 @@ async function handlePhase(status) {
  */
 async function pollStatus() {
   if (pollHandle) return; // a poll loop is already running
+  const generation = pollGeneration;
   const tick = async () => {
     const status = await fetchStatus();
+    if (generation !== pollGeneration) return;
     if (!status) {
       pollHandle = null;
       await legacyConnect();

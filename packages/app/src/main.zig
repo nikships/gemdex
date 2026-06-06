@@ -81,8 +81,33 @@ fn serveCommand(mode: ServeMode) []const u8 {
     };
 }
 
-/// Render the `gemdex.getStatus` payload. Pure + unit-tested. `detail` must be
-/// free of `"`/`\` (we only ever pass fixed, quote-free messages).
+fn writeJsonString(writer: anytype, value: []const u8) !void {
+    try writer.writeByte('"');
+    for (value) |ch| {
+        switch (ch) {
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            0...8, 11...12, 14...0x1f => try writer.print("\\u{x:0>4}", .{ch}),
+            else => try writer.writeByte(ch),
+        }
+    }
+    try writer.writeByte('"');
+}
+
+fn writeApiBaseJson(output: []u8, base: []const u8, token: []const u8) []const u8 {
+    var writer = std.Io.Writer.fixed(output);
+    writer.writeAll("{\"base\":") catch return output[0..0];
+    writeJsonString(&writer, base) catch return output[0..0];
+    writer.writeAll(",\"token\":") catch return output[0..0];
+    writeJsonString(&writer, token) catch return output[0..0];
+    writer.writeAll("}") catch return output[0..0];
+    return writer.buffered();
+}
+
+/// Render the `gemdex.getStatus` payload. Pure + unit-tested.
 fn writeStatusJson(
     output: []u8,
     phase: Phase,
@@ -91,29 +116,31 @@ fn writeStatusJson(
     detail: []const u8,
     previously_installed: bool,
 ) []const u8 {
-    return std.fmt.bufPrint(
-        output,
-        "{{\"phase\":\"{s}\",\"base\":\"{s}\",\"token\":\"{s}\",\"detail\":\"{s}\",\"previouslyInstalled\":{}}}",
-        .{ phaseName(phase), base, token, detail, previously_installed },
-    ) catch output[0..0];
+    var writer = std.Io.Writer.fixed(output);
+    writer.writeAll("{\"phase\":") catch return output[0..0];
+    writeJsonString(&writer, phaseName(phase)) catch return output[0..0];
+    writer.writeAll(",\"base\":") catch return output[0..0];
+    writeJsonString(&writer, base) catch return output[0..0];
+    writer.writeAll(",\"token\":") catch return output[0..0];
+    writeJsonString(&writer, token) catch return output[0..0];
+    writer.writeAll(",\"detail\":") catch return output[0..0];
+    writeJsonString(&writer, detail) catch return output[0..0];
+    writer.print(",\"previouslyInstalled\":{}}}", .{previously_installed}) catch return output[0..0];
+    return writer.buffered();
 }
 
 fn writeAcceptedJson(output: []u8, accepted: bool) []const u8 {
     return std.fmt.bufPrint(output, "{{\"accepted\":{}}}", .{accepted}) catch output[0..0];
 }
 
-/// Extract the `install` flag from the trusted bootstrap payload. The frontend
-/// sends compact JSON (`{"install":true}`); we find the quoted `"install"` key,
-/// skip to its `:` value, and require the literal `true` token — so sibling keys
-/// like `"installing"` or string values can't trip a false positive.
-fn parseInstallFlag(payload: []const u8) bool {
-    const key = "\"install\"";
-    const key_idx = std.mem.indexOf(u8, payload, key) orelse return false;
-    const after_key = key_idx + key.len;
-    const colon_rel = std.mem.indexOfScalar(u8, payload[after_key..], ':') orelse return false;
-    var i = after_key + colon_rel + 1;
-    while (i < payload.len and (payload[i] == ' ' or payload[i] == '\t')) : (i += 1) {}
-    return std.mem.startsWith(u8, payload[i..], "true");
+/// Extract the `install` flag from the trusted bootstrap payload.
+fn parseInstallFlag(allocator: std.mem.Allocator, payload: []const u8) bool {
+    const Parsed = struct { install: bool };
+    const parsed = std.json.parseFromSlice(Parsed, allocator, payload, .{
+        .ignore_unknown_fields = true,
+    }) catch return false;
+    defer parsed.deinit();
+    return parsed.value.install;
 }
 
 /// Gemdex Memory — a manage-only desktop app. The Zig shell opens the window,
@@ -142,6 +169,9 @@ const App = struct {
     shutting_down: std.atomic.Value(bool) = .init(false),
 
     sidecar: ?std.process.Child = null,
+    /// Child currently in its startup handshake. Registered so shutdown can
+    /// kill a bootstrap process before it is published as `sidecar`.
+    starting_child: ?*std.process.Child = null,
     api_base_buf: [64]u8 = undefined,
     api_base: []const u8 = "",
     /// Per-launch auth token minted by the sidecar (64 hex chars). Stored in
@@ -268,6 +298,10 @@ const App = struct {
             std.debug.print("[gemdex] failed to spawn sidecar: {s}\n", .{@errorName(err)});
             return false;
         };
+        self.mutex.lockUncancelable(self.io);
+        self.starting_child = &child;
+        self.mutex.unlock(self.io);
+        defer self.clearStartingChild(&child);
 
         var local_buf: [256]u8 = undefined;
         const handshake = readHandshake(self.io, &child, &local_buf) catch |err| {
@@ -325,29 +359,40 @@ const App = struct {
             },
         }
 
-        // Start Sparkle's auto-updater once we're actually running. `start` runs
-        // on the main thread from zero-native's launch event, which is Sparkle's
-        // required init point.
-        if (sparkle_enabled and self.currentPhase() == .ready) gemdex_sparkle_start();
+        // Start Sparkle's auto-updater from zero-native's main-thread launch
+        // callback, independent of the sidecar bootstrap phase.
+        if (sparkle_enabled) gemdex_sparkle_start();
     }
 
     fn stop(context: *anyopaque, runtime: *zero_native.Runtime) anyerror!void {
         _ = runtime;
         const self: *@This() = @ptrCast(@alignCast(context));
-        // Signal any in-flight bootstrap worker to stop publishing, then wait
-        // briefly for it to finish so we don't kill a child it's still touching.
+        // Signal any in-flight bootstrap worker to stop publishing, kill any
+        // child it is handshaking with, then wait for the detached thread to
+        // clear before the app state can be torn down.
         self.shutting_down.store(true, .release);
-        var waited_ms: i64 = 0;
-        while (self.worker_busy.load(.acquire) and waited_ms < 1500) {
+        self.resetSidecar();
+        while (self.worker_busy.load(.acquire)) {
             self.io.sleep(std.Io.Duration.fromMilliseconds(20), .awake) catch break;
-            waited_ms += 20;
         }
         self.resetSidecar();
+    }
+
+    fn clearStartingChild(self: *@This(), child: *std.process.Child) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.starting_child) |starting| {
+            if (starting == child) self.starting_child = null;
+        }
     }
 
     fn resetSidecar(self: *@This()) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        if (self.starting_child) |child| {
+            child.kill(self.io);
+            self.starting_child = null;
+        }
         if (self.sidecar) |*child| {
             child.kill(self.io);
             self.sidecar = null;
@@ -362,9 +407,10 @@ const App = struct {
     fn bootstrapWorker(self: *@This(), install: bool) void {
         defer self.worker_busy.store(false, .release);
         if (self.startSidecar(if (install) .install else .offline)) {
-            self.writeMarker();
+            if (!self.shutting_down.load(.acquire)) self.writeMarker();
             return;
         }
+        if (self.shutting_down.load(.acquire)) return;
         if (install) {
             self.setDetail("Install failed. Check your internet connection and that Node/npm work, then retry.");
         } else {
@@ -378,7 +424,7 @@ const App = struct {
         const self: *@This() = @ptrCast(@alignCast(context));
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        return std.fmt.bufPrint(output, "{{\"base\":\"{s}\",\"token\":\"{s}\"}}", .{ self.api_base, self.api_token });
+        return writeApiBaseJson(output, self.api_base, self.api_token);
     }
 
     fn getStatus(context: *anyopaque, invocation: zero_native.bridge.Invocation, output: []u8) anyerror![]const u8 {
@@ -396,7 +442,7 @@ const App = struct {
     /// polls `gemdex.getStatus` for the result.
     fn bootstrap(context: *anyopaque, invocation: zero_native.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *@This() = @ptrCast(@alignCast(context));
-        const install = parseInstallFlag(invocation.request.payload);
+        const install = parseInstallFlag(self.gpa, invocation.request.payload);
 
         // Claim the worker slot; reject if one is already running.
         if (self.worker_busy.cmpxchgStrong(false, true, .acq_rel, .monotonic) != null) {
@@ -423,10 +469,7 @@ const App = struct {
     fn markerPath(self: *@This(), buf: []u8) []const u8 {
         const home = self.env_map.get("HOME") orelse return "";
         if (home.len == 0) return "";
-        const path = std.fmt.bufPrint(buf, "{s}/.gemdex/desktop.json", .{home}) catch return "";
-        // Guard against a silently-truncated path from an over-long HOME.
-        if (!std.mem.endsWith(u8, path, "/.gemdex/desktop.json")) return "";
-        return path;
+        return std.fmt.bufPrint(buf, "{s}/.gemdex/desktop.json", .{home}) catch return "";
     }
 
     fn markerExists(self: *@This()) bool {
@@ -589,20 +632,28 @@ test "serveCommand never installs except in install mode" {
 test "writeStatusJson renders phase, fields, and error alias" {
     var buf: [512]u8 = undefined;
 
-    const ready = writeStatusJson(&buf, .ready, "http://127.0.0.1:5051", "abc", "", true);
+    const ready = writeStatusJson(&buf, .ready, "http://127.0.0.1:5051", "abc\\123", "", true);
     try std.testing.expect(std.mem.indexOf(u8, ready, "\"phase\":\"ready\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, ready, "\"base\":\"http://127.0.0.1:5051\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ready, "\"token\":\"abc\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ready, "\"token\":\"abc\\\\123\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, ready, "\"previouslyInstalled\":true") != null);
 
     // `.failed` is surfaced to the frontend as the generic "error" phase.
-    const failed = writeStatusJson(&buf, .failed, "", "", "boom", false);
+    const failed = writeStatusJson(&buf, .failed, "", "", "quote \" boom", false);
     try std.testing.expect(std.mem.indexOf(u8, failed, "\"phase\":\"error\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, failed, "\"detail\":\"boom\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, failed, "\"detail\":\"quote \\\" boom\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, failed, "\"previouslyInstalled\":false") != null);
 
     const needs = writeStatusJson(&buf, .needs_bootstrap, "", "", "", false);
     try std.testing.expect(std.mem.indexOf(u8, needs, "\"phase\":\"needs_bootstrap\"") != null);
+}
+
+test "writeApiBaseJson escapes string fields" {
+    var buf: [128]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "{\"base\":\"http://127.0.0.1:1/\\\"x\",\"token\":\"tok\\\\en\"}",
+        writeApiBaseJson(&buf, "http://127.0.0.1:1/\"x", "tok\\en"),
+    );
 }
 
 test "writeAcceptedJson emits the accepted flag" {
@@ -612,13 +663,13 @@ test "writeAcceptedJson emits the accepted flag" {
 }
 
 test "parseInstallFlag reads the install boolean" {
-    try std.testing.expect(parseInstallFlag("{\"install\":true}"));
-    try std.testing.expect(parseInstallFlag("{\"install\": true}"));
-    try std.testing.expect(!parseInstallFlag("{\"install\":false}"));
-    try std.testing.expect(!parseInstallFlag("null"));
-    try std.testing.expect(!parseInstallFlag("{}"));
+    try std.testing.expect(parseInstallFlag(std.testing.allocator, "{\"install\":true}"));
+    try std.testing.expect(parseInstallFlag(std.testing.allocator, "{\n  \"install\": true,\n  \"ignored\": 1\n}"));
+    try std.testing.expect(!parseInstallFlag(std.testing.allocator, "{\"install\":false}"));
+    try std.testing.expect(!parseInstallFlag(std.testing.allocator, "null"));
+    try std.testing.expect(!parseInstallFlag(std.testing.allocator, "{}"));
     // Sibling key must not trip a false positive.
-    try std.testing.expect(!parseInstallFlag("{\"installing\":true}"));
+    try std.testing.expect(!parseInstallFlag(std.testing.allocator, "{\"installing\":true}"));
     // String value, not the boolean literal.
-    try std.testing.expect(!parseInstallFlag("{\"install\":\"true\"}"));
+    try std.testing.expect(!parseInstallFlag(std.testing.allocator, "{\"install\":\"true\"}"));
 }

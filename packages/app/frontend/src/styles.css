@@ -691,6 +691,10 @@ button:disabled {
   line-height: 1.5;
 }
 
+.recovery-progress.is-hidden {
+  display: none;
+}
+
 .spinner {
   flex: none;
   width: 16px;
@@ -709,7 +713,8 @@ button:disabled {
 
 @media (prefers-reduced-motion: reduce) {
   .spinner {
-    animation-duration: 2s;
+    animation: none;
+    transition: none;
   }
 }
 
