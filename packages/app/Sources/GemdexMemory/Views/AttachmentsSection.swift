@@ -5,8 +5,8 @@ import PDFKit
 import UniformTypeIdentifiers
 
 /// Attachment editor: drag-and-drop / pick files, caption them, preview each
-/// (image / audio / video / PDF), remove, and run "Find similar" on existing
-/// media. Mirrors the web editor's attachments panel.
+/// (image / audio / video / PDF), and remove. Mirrors the web editor's
+/// attachments panel.
 struct AttachmentsSection: View {
     @EnvironmentObject var model: AppModel
     @State private var isTargeted = false
@@ -148,18 +148,6 @@ struct AttachmentCard: View {
                 }
 
                 HStack(spacing: 8) {
-                    if case .existing = attachment.source {
-                        Button {
-                            Task { await model.findSimilar(to: attachment) }
-                        } label: {
-                            Label("Find similar", systemImage: "sparkle.magnifyingglass")
-                                .font(.caption.weight(.medium))
-                                .padding(.horizontal, 9)
-                                .padding(.vertical, 5)
-                                .glassSurfaceInteractive(cornerRadius: Metric.radiusChip, tint: Brand.gold)
-                        }
-                        .buttonStyle(.plain)
-                    }
                     Button {
                         editor.remove(attachment)
                     } label: {

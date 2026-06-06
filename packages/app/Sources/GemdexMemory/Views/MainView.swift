@@ -25,9 +25,7 @@ struct MainView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(placement: .navigation) {
-            BackendBadge()
-        }
+        backendBadgeItem
         ToolbarItemGroup(placement: .primaryAction) {
             Button { model.showSettings = true } label: {
                 Label("Storage", systemImage: "externaldrive")
@@ -43,6 +41,29 @@ struct MainView: View {
             }
             .keyboardShortcut("n", modifiers: .command)
         }
+    }
+
+    /// The backend badge carries its own glass pill, so opt it out of the
+    /// system's automatic toolbar-item glass container on macOS 26 to avoid a
+    /// doubled pill. No-op on earlier SDKs/runtimes.
+    @ToolbarContentBuilder
+    private var backendBadgeItem: some ToolbarContent {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, *) {
+            ToolbarItem(placement: .navigation) {
+                BackendBadge()
+            }
+            .sharedBackgroundVisibility(.hidden)
+        } else {
+            ToolbarItem(placement: .navigation) {
+                BackendBadge()
+            }
+        }
+        #else
+        ToolbarItem(placement: .navigation) {
+            BackendBadge()
+        }
+        #endif
     }
 
     private func exportMemories() {

@@ -15,6 +15,15 @@ enum AppScreen: Equatable {
     case remoteUnavailable(detail: String)
 }
 
+/// Sidebar search state. `.idle` shows the local title filter / full list;
+/// `.results` holds the relevance-ranked recall hits from `POST /recall`.
+enum SearchState: Equatable {
+    case idle
+    case searching
+    case results([RecallResult])
+    case failed(String)
+}
+
 /// Central observable app state. Owns the sidecar lifecycle, the API client,
 /// and all loaded memory/config/settings state. Views read from here and call
 /// its async methods; it never reaches around the sidecar for store access.
@@ -34,20 +43,13 @@ final class AppModel: ObservableObject {
     @Published var isEditorOpen = false
     @Published var showSettings = false
 
-    /// Recall-by-example panel state (nil = hidden).
-    @Published var similar: SimilarState?
+    /// Semantic free-text search state (`.idle` = local title filter).
+    @Published var searchState: SearchState = .idle
 
     let editor = EditorModel()
     let sidecar = SidecarManager()
     private(set) var api: APIClient?
     private var cancellables = Set<AnyCancellable>()
-
-    struct SimilarState: Equatable {
-        var title: String
-        var results: [RecallResult]
-        var errorMessage: String?
-        var loading: Bool
-    }
 
     var visibleMemories: [MemorySummary] {
         let query = filterText.trimmingCharacters(in: .whitespaces).lowercased()
@@ -55,6 +57,13 @@ final class AppModel: ObservableObject {
         // Match displayTitle so empty-title memories ("Untitled memory") filter
         // consistently with how they render.
         return memories.filter { $0.displayTitle.lowercased().contains(query) }
+    }
+
+    /// Recall hits joined back to loaded summaries, preserving recall order so
+    /// the sidebar can render ranked results with the normal `MemoryRow`.
+    func resultSummaries(_ results: [RecallResult]) -> [MemorySummary] {
+        let byID = Dictionary(memories.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return results.compactMap { byID[$0.id] }
     }
 
     init() {
@@ -162,7 +171,6 @@ final class AppModel: ObservableObject {
     func openNew() {
         selectedID = nil
         editor.startNew()
-        similar = nil
         isEditorOpen = true
     }
 
@@ -172,7 +180,6 @@ final class AppModel: ObservableObject {
             let memory = try await api.getMemory(id)
             selectedID = memory.id
             editor.load(memory)
-            similar = nil
             isEditorOpen = true
         } catch {
             setStatus("Error: \(error.localizedDescription)", isError: true)
@@ -192,22 +199,36 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func findSimilar(to attachment: EditorAttachment) async {
-        guard let api, let memoryID = selectedID,
-              case let .existing(attachmentId) = attachment.source else { return }
-        similar = SimilarState(title: "Finding similar memories…", results: [], errorMessage: nil, loading: true)
-        do {
-            let bytes = try await api.attachmentBytes(memoryId: memoryID, attachmentId: attachmentId)
-            let results = try await api.recallByMedia(mimeType: bytes.mimeType, base64: bytes.data.base64EncodedString())
-                .filter { $0.id != memoryID }
-            // Drop results if the user switched memories while we were loading.
-            guard selectedID == memoryID else { return }
-            similar = SimilarState(title: "Similar memories", results: results, errorMessage: nil, loading: false)
-        } catch {
-            guard selectedID == memoryID else { return }
-            similar = SimilarState(title: "Find similar needs attention", results: [], errorMessage: error.localizedDescription, loading: false)
-            setStatus("Find similar failed: \(error.localizedDescription)", isError: true)
+    // MARK: - Search
+
+    /// Run semantic free-text recall for the current `filterText`. An empty
+    /// query resets to the local-filter idle state; otherwise the sidecar
+    /// embeds the query and returns the parent-document hybrid ranking.
+    func runSearch() async {
+        guard let api else { return }
+        let query = filterText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else {
+            searchState = .idle
+            return
         }
+        searchState = .searching
+        do {
+            let results = try await api.recallByText(query: query)
+            // Drop stale results if the user edited the query while loading.
+            guard filterText.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
+            searchState = .results(results)
+        } catch let err as APIError {
+            searchState = .failed(err.message)
+            setStatus("Search failed: \(err.message)", isError: true)
+        } catch {
+            searchState = .failed(error.localizedDescription)
+            setStatus("Search failed: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    func clearSearch() {
+        filterText = ""
+        searchState = .idle
     }
 
     // MARK: - Export / import

@@ -1,8 +1,9 @@
 import SwiftUI
 
-/// Source-list of memories with a title filter. Selecting a row opens it in the
-/// detail editor. There is intentionally no free-text *search* box — recall is
-/// an agent/MCP capability; this filters loaded titles client-side.
+/// Source-list of memories with a search box. Typing filters loaded titles
+/// client-side; pressing Return runs semantic free-text recall (`POST /recall`)
+/// and lists the parent-document hybrid ranking. Selecting a row opens it in
+/// the detail editor.
 struct SidebarView: View {
     @EnvironmentObject var model: AppModel
 
@@ -22,11 +23,17 @@ struct SidebarView: View {
             Image(systemName: "magnifyingglass")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
-            TextField("Filter by title…", text: $model.filterText)
+            TextField("Search memories…", text: $model.filterText)
                 .textFieldStyle(.plain)
                 .font(.callout)
+                .onSubmit { Task { await model.runSearch() } }
+                .onChange(of: model.filterText) { _ in
+                    // Editing the query returns to the live local-title filter
+                    // until the next Return-triggered semantic search.
+                    if case .idle = model.searchState {} else { model.searchState = .idle }
+                }
             if !model.filterText.isEmpty {
-                Button { model.filterText = "" } label: {
+                Button { model.clearSearch() } label: {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
@@ -41,33 +48,74 @@ struct SidebarView: View {
 
     @ViewBuilder
     private var listContent: some View {
-        if model.memories.isEmpty {
-            emptyState
-        } else {
-            List(selection: Binding(
-                get: { model.selectedID },
-                set: { newID in if let newID { Task { await model.openMemory(newID) } } }
-            )) {
-                ForEach(model.visibleMemories) { memory in
-                    MemoryRow(memory: memory, isSelected: memory.id == model.selectedID)
-                        .tag(memory.id)
-                        .listRowSeparator(.hidden)
-                        .listRowBackground(Color.clear)
-                        .contextMenu {
-                            Button("Open") { Task { await model.openMemory(memory.id) } }
-                            Button("Delete", role: .destructive) {
-                                Task {
-                                    await model.openMemory(memory.id)
-                                    await model.deleteSelected()
-                                }
+        switch model.searchState {
+        case .searching:
+            statusState(systemImage: nil, title: "Searching memories…", detail: nil, showSpinner: true)
+        case let .failed(message):
+            statusState(systemImage: "exclamationmark.triangle", title: "Search could not complete.", detail: message, showSpinner: false)
+        case let .results(results):
+            let hits = model.resultSummaries(results)
+            if hits.isEmpty {
+                statusState(systemImage: "magnifyingglass", title: "No matching memories.", detail: nil, showSpinner: false)
+            } else {
+                memoryList(hits)
+            }
+        case .idle:
+            if model.memories.isEmpty {
+                emptyState
+            } else {
+                memoryList(model.visibleMemories)
+            }
+        }
+    }
+
+    private func memoryList(_ items: [MemorySummary]) -> some View {
+        List(selection: Binding(
+            get: { model.selectedID },
+            set: { newID in if let newID { Task { await model.openMemory(newID) } } }
+        )) {
+            ForEach(items) { memory in
+                MemoryRow(memory: memory, isSelected: memory.id == model.selectedID)
+                    .tag(memory.id)
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                    .contextMenu {
+                        Button("Open") { Task { await model.openMemory(memory.id) } }
+                        Button("Delete", role: .destructive) {
+                            Task {
+                                await model.openMemory(memory.id)
+                                await model.deleteSelected()
                             }
                         }
-                }
+                    }
             }
-            .listStyle(.sidebar)
-            .scrollContentBackground(.hidden)
-            .softScrollEdges()
         }
+        .listStyle(.sidebar)
+        .scrollContentBackground(.hidden)
+        .softScrollEdges()
+    }
+
+    private func statusState(systemImage: String?, title: String, detail: String?, showSpinner: Bool) -> some View {
+        VStack(spacing: 14) {
+            if showSpinner {
+                ProgressView().controlSize(.large)
+            } else if let systemImage {
+                Image(systemName: systemImage)
+                    .font(.system(size: 30, weight: .light))
+                    .foregroundStyle(Brand.gold.gradient)
+            }
+            Text(title)
+                .font(.callout.weight(.semibold))
+                .multilineTextAlignment(.center)
+            if let detail {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
     }
 
     private var emptyState: some View {

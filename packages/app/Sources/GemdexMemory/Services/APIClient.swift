@@ -167,13 +167,12 @@ actor APIClient {
         return AttachmentBytes(data: data, mimeType: mime)
     }
 
-    // MARK: - Recall by example
+    // MARK: - Recall
 
-    func recallByMedia(mimeType: String, base64: String, limit: Int = 10) async throws -> [RecallResult] {
-        let payload: [String: Any] = [
-            "attachments": [["mimeType": mimeType, "data": base64]],
-            "limit": limit,
-        ]
+    /// Semantic free-text recall: the sidecar embeds the query and returns the
+    /// parent-document hybrid (dense + BM25 + RRF) ranking, whole parents.
+    func recallByText(query: String, limit: Int = 50) async throws -> [RecallResult] {
+        let payload: [String: Any] = ["query": query, "limit": limit]
         let body = try JSONSerialization.data(withJSONObject: payload)
         let (data, _) = try await send(makeRequest("POST", "/recall", body: body))
         struct Wrapper: Decodable { let results: [RecallResult] }

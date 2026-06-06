@@ -259,9 +259,9 @@ export async function handleMemoryApiRequest(
         }
 
         // POST /recall — relevance search by text and/or inline media.
-        // Powers the app's "find similar" (recall-by-example); there is no
-        // free-text search box, so query is usually omitted in favor of an
-        // attachment lifted from an existing memory.
+        // Powers the app's semantic free-text search (query) as well as
+        // recall-by-example (an attachment lifted from an existing memory);
+        // at least one of query or attachments is required.
         if (method === 'POST' && pathname === '/recall') {
             const body = await readBody(req, ATTACHMENT_BODY_LIMIT);
             if (!isJsonObject(body)) {

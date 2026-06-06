@@ -6,7 +6,7 @@ its own** — all retrieval/embedding/storage lives in the sidecar (`gemdex serv
 from `gemdex-mcp`, wrapping `gemdex-core` + LanceDB over the shared `~/.gemdex`
 store). The app spawns that sidecar, reads a localhost handshake, and drives a
 browse/create/edit/delete UI (inline image/audio/video/PDF attachments,
-"Find similar" recall-by-example, JSONL export/import). Behavior changes belong
+semantic free-text search, JSONL export/import). Behavior changes belong
 in `core`/`mcp`/`server`, not here. This is Swift/SwiftUI — the repo-wide TS
 lint rules (`??` over `||`, no `eslint-disable`) do **not** apply.
 
@@ -81,7 +81,7 @@ Routes used by `APIClient`: `GET /health`, `GET|POST /config`,
 `GET|POST /memories`, `GET|PUT|DELETE /memories/:id`,
 `PATCH /memories/:id/attachments` (caption-only),
 `GET /memories/:id/attachments/:attachmentId` (stream bytes),
-`POST /recall` (recall-by-media), `GET /export`, `POST /import`,
+`POST /recall` (semantic free-text search), `GET /export`, `POST /import`,
 `GET /settings`, `POST /settings/mode`, `POST|DELETE /settings/remotes[/:name]`,
 `POST /settings/test`, `POST /settings/import-local`.
 
@@ -126,8 +126,10 @@ binary directly (not `open`) against a local sidecar build with
 
 - Apple-Silicon (arm64) only; deployment target macOS 13.
 - All app↔sidecar traffic is localhost-only **and** tokened (`X-Gemdex-Token`).
-- No free-text search by design — `visibleMemories` filters loaded titles only;
-  semantic recall is media-only via `POST /recall`.
+- Sidebar search is two-tier — `visibleMemories` filters loaded titles while
+  typing; pressing Return runs semantic free-text recall via `POST /recall`
+  (`AppModel.runSearch` → `searchState`), listing the parent-document hybrid
+  ranking. Editing or clearing the query returns to the local title filter.
 - The sidecar child is killed on app quit and must never outlive the app.
 - A network install happens **only** through the explicit
   `bootstrap(install: true)` path; every other mode is offline/probe-only.
