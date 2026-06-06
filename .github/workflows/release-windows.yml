@@ -133,6 +133,8 @@ jobs:
           $mcpPackageDir = Join-Path $sidecarDir "node_modules/gemdex-mcp"
           Copy-Item -Path (Join-Path $mcpPackageDir "dist") -Destination (Join-Path $sidecarDir "dist") -Recurse -Force
           Copy-Item -Path (Join-Path $mcpPackageDir "package.json") -Destination (Join-Path $sidecarDir "package.json") -Force
+          Get-ChildItem $sidecarDir -Recurse -Directory -Include dist-types,types,test,tests,__tests__,docs,doc,example,examples | Remove-Item -Recurse -Force
+          Get-ChildItem $sidecarDir -Recurse -File -Include *.d.ts,*.map,*.tsbuildinfo,*.md,*.markdown,LICENSE,LICENSE.*,CHANGELOG*,README* | Remove-Item -Force
 
           $nodeVersion = (node -p "process.version.slice(1)").Trim()
           $nodeZip = "node-v$nodeVersion-win-x64.zip"
