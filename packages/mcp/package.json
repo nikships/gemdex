@@ -1,6 +1,6 @@
 {
     "name": "gemdex-mcp",
-    "version": "0.3.20",
+    "version": "0.3.21",
     "description": "MCP memory layer for AI coding agents — save/recall/update memories via Gemini embeddings + embedded LanceDB",
     "type": "module",
     "main": "dist/index.js",
