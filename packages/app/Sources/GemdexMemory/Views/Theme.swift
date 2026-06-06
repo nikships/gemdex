@@ -44,8 +44,14 @@ enum Metric {
 extension View {
     /// A floating glass surface (cards, panels). Uses real Liquid Glass on
     /// macOS 26+, and a tasteful vibrancy + hairline fallback below that.
+    ///
+    /// The Liquid Glass APIs only exist in the macOS 26 SDK (Swift 6.2+
+    /// toolchain), so the `#if compiler(>=6.2)` guard keeps older SDKs (e.g.
+    /// CI's Swift 5.10 / macOS 14) compiling the fallback — `#available` alone
+    /// is a runtime gate and can't hide a symbol that's missing at compile time.
     @ViewBuilder
     func glassSurface(cornerRadius: CGFloat = Metric.radiusCard, tint: Color? = nil) -> some View {
+        #if compiler(>=6.2)
         if #available(macOS 26.0, *) {
             if let tint {
                 glassEffect(.regular.tint(tint.opacity(0.18)), in: .rect(cornerRadius: cornerRadius))
@@ -53,30 +59,40 @@ extension View {
                 glassEffect(.regular, in: .rect(cornerRadius: cornerRadius))
             }
         } else {
-            background(
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(.ultraThinMaterial)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .strokeBorder(
-                        LinearGradient(
-                            colors: [Color.white.opacity(0.35), Color.white.opacity(0.05)],
-                            startPoint: .top, endPoint: .bottom
-                        ),
-                        lineWidth: 0.75
-                    )
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(tint?.opacity(0.10) ?? .clear)
-            )
+            glassFallback(cornerRadius: cornerRadius, tint: tint)
         }
+        #else
+        glassFallback(cornerRadius: cornerRadius, tint: tint)
+        #endif
+    }
+
+    /// Vibrancy + hairline-stroke fallback used on pre-macOS-26 SDKs/runtimes.
+    @ViewBuilder
+    func glassFallback(cornerRadius: CGFloat, tint: Color?) -> some View {
+        background(
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(.ultraThinMaterial)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .strokeBorder(
+                    LinearGradient(
+                        colors: [Color.white.opacity(0.35), Color.white.opacity(0.05)],
+                        startPoint: .top, endPoint: .bottom
+                    ),
+                    lineWidth: 0.75
+                )
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(tint?.opacity(0.10) ?? .clear)
+        )
     }
 
     /// An interactive glass surface that reacts to hover/press on macOS 26+.
     @ViewBuilder
     func glassSurfaceInteractive(cornerRadius: CGFloat = Metric.radiusCard, tint: Color? = nil) -> some View {
+        #if compiler(>=6.2)
         if #available(macOS 26.0, *) {
             if let tint {
                 glassEffect(.regular.tint(tint.opacity(0.20)).interactive(), in: .rect(cornerRadius: cornerRadius))
@@ -84,18 +100,25 @@ extension View {
                 glassEffect(.regular.interactive(), in: .rect(cornerRadius: cornerRadius))
             }
         } else {
-            glassSurface(cornerRadius: cornerRadius, tint: tint)
+            glassFallback(cornerRadius: cornerRadius, tint: tint)
         }
+        #else
+        glassFallback(cornerRadius: cornerRadius, tint: tint)
+        #endif
     }
 
     /// macOS 26 progressive blur at scroll edges; no-op below.
     @ViewBuilder
     func softScrollEdges() -> some View {
+        #if compiler(>=6.2)
         if #available(macOS 26.0, *) {
             scrollEdgeEffectStyle(.soft, for: .all)
         } else {
             self
         }
+        #else
+        self
+        #endif
     }
 }
 
