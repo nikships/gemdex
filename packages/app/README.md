@@ -146,8 +146,14 @@ GEMINI_API_KEY=your-key \
 
 ## Release
 
-`.github/workflows/release-macos.yml` runs on every push to `main` (and via
-manual dispatch). It builds the bundled `.app`, embeds + signs Sparkle,
-deep-signs the bundle, notarizes + staples, builds + notarizes the DMG,
-generates a signed `appcast.xml`, and publishes both to a rolling
-`desktop-latest` release marked as `latest`.
+The unified `.github/workflows/release.yml` runs on every push to `main` (and
+via manual dispatch). It first patch-bumps the repo-wide version (the root
+`VERSION` file, stamped into every package by `scripts/sync-version.mjs`), then
+its `macos` job builds the bundled `.app`, embeds + signs Sparkle, deep-signs
+the bundle, notarizes + staples, builds + notarizes the DMG, generates a signed
+`appcast.xml`, and publishes both to a versioned `v<version>` GitHub release
+marked as `latest`. `make_latest: true` keeps the `…/releases/latest/download/`
+URLs baked into the app's `SUFeedURL` pointed at the newest build, and because
+the version increments every release, Sparkle reliably detects the update. The
+same workflow publishes `gemdex-core`/`gemdex-mcp`/`gemdex-server` to npm and
+GitHub Packages at that identical version.

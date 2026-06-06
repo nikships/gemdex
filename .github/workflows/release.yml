@@ -1,34 +1,193 @@
-name: Release (macOS · signed + notarized DMG)
+name: Release
+
+# One unified release pipeline for the whole repo. Any change to any package
+# pushed to main bumps a SINGLE shared version (the root VERSION file, stamped
+# into every package by scripts/sync-version.mjs) and then releases every
+# artifact at that one version:
+#   • gemdex-core, gemdex-mcp, gemdex-server  → npmjs.org
+#   • @anand-92/{gemdex-core,gemdex-mcp,gemdex-server} → GitHub Packages
+#   • the macOS app → a signed, notarized DMG on a versioned GitHub release
+#     (which is what makes Sparkle actually offer the update).
+#
+# Flow: prepare (bump + commit) → { npm → github-packages, macos } in parallel.
 
 on:
   push:
     branches: [main]
     paths:
-      - "packages/app/**"
-      - "packages/core/**"
-      - "packages/mcp/**"
-      - ".github/workflows/release-macos.yml"
+      - "packages/**"
+      - "scripts/**"
+      - ".github/workflows/release.yml"
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Release tag to publish (e.g. v0.4.1). Leave blank for the rolling desktop-latest build."
-        required: false
-        default: ""
 
 concurrency:
-  group: release-macos-${{ github.ref }}
-  cancel-in-progress: true
-
-permissions:
-  contents: write
+  # Never run two releases at once and never cancel one mid-notarization.
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  build:
-    name: Build · sign · notarize · DMG · release
-    runs-on: macos-14 # Apple Silicon (arm64)
+  prepare:
+    name: Bump + sync unified version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      sha: ${{ steps.push.outputs.sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Pushes made with the default GITHUB_TOKEN do NOT re-trigger workflows
+          # (GitHub policy), so the bump commit below can't loop this workflow.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Patch-bump + sync version across all packages
+        id: bump
+        run: |
+          set -euo pipefail
+          VERSION="$(node scripts/sync-version.mjs --bump | tail -n1)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Unified version is now $VERSION"
+
+      - name: Commit + push bump to main
+        id: push
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add VERSION package.json packages/core/package.json \
+            packages/mcp/package.json packages/server/package.json packages/app/VERSION
+          # [skip ci] is belt-and-suspenders; GITHUB_TOKEN pushes already don't
+          # re-trigger workflows. Downstream jobs check out this exact SHA.
+          git commit -m "Release v${{ steps.bump.outputs.version }} [skip ci]"
+          git push origin HEAD:main
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  npm:
+    name: Publish to npm
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout bumped commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build packages
+        run: pnpm build
+
+      - name: Publish gemdex-core, gemdex-mcp, gemdex-server
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          for dir in core mcp server; do
+            name=$(node -p "require('./packages/$dir/package.json').name")
+            version=$(node -p "require('./packages/$dir/package.json').version")
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version already on npm; skipping."
+            else
+              pnpm --filter "$name" publish --access public --no-git-checks
+            fi
+          done
+
+  github-packages:
+    name: Publish to GitHub Packages (@anand-92)
+    needs: [prepare, npm]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout bumped commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.4
+
+      - name: Setup Node.js (auth for GitHub Packages)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@anand-92"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build packages
+        run: pnpm build
+
+      - name: Rewrite package.json files for the @anand-92 scope
+        run: node scripts/prepare-gh-packages.mjs
+
+      - name: Refresh workspace graph after rename
+        # The renames invalidate the frozen lockfile for these workspace entries;
+        # a relaxed install reattaches them under their new names so
+        # `pnpm --filter` and `workspace:*` resolution both see the scoped packages.
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Publish scoped core, mcp, server to GitHub Packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          for dir in core mcp server; do
+            name=$(node -p "require('./packages/$dir/package.json').name")
+            version=$(node -p "require('./packages/$dir/package.json').version")
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version already on GitHub Packages; skipping."
+            else
+              # --ignore-scripts: the dist was already built and import-rewritten
+              # above. A prepublishOnly rebuild would rimraf dist and recompile
+              # with the unscoped `gemdex-core` specifier, which no longer
+              # resolves after the @anand-92 rename — so skip it.
+              pnpm --filter "$name" publish --no-git-checks --ignore-scripts
+            fi
+          done
+
+  macos:
+    name: macOS · sign · notarize · DMG · release
+    needs: prepare
+    runs-on: macos-14 # Apple Silicon (arm64)
+    permissions:
+      contents: write
+    env:
+      APP_VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Checkout bumped commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -50,29 +209,8 @@ jobs:
       - name: Install workspace dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build TypeScript workspace (core + mcp dist)
+      - name: Build TypeScript workspace (core + mcp dist for the bundled sidecar)
         run: pnpm build
-
-      - name: Read + bump app version
-        id: meta
-        run: |
-          set -euo pipefail
-          CURRENT="$(cat packages/app/VERSION | tr -d '[:space:]')"
-          if [ -n "${{ github.event.inputs.tag }}" ]; then
-            # Explicit manual release: ship VERSION as-is, never auto-bump.
-            APP_VERSION="$CURRENT"
-            echo "bumped=false" >> "$GITHUB_OUTPUT"
-          else
-            # Rolling push-to-main build: bump the patch so the release carries a
-            # higher version than the installed app — that is what makes Sparkle
-            # actually offer the update.
-            IFS=. read -r MAJ MIN PAT <<< "$CURRENT"
-            APP_VERSION="$MAJ.$MIN.$((PAT + 1))"
-            printf '%s\n' "$APP_VERSION" > packages/app/VERSION
-            echo "bumped=true" >> "$GITHUB_OUTPUT"
-          fi
-          echo "version=$APP_VERSION" >> "$GITHUB_OUTPUT"
-          echo "App version: $CURRENT -> $APP_VERSION"
 
       - name: Fetch Sparkle (framework + tools)
         working-directory: packages/app
@@ -119,7 +257,6 @@ jobs:
         working-directory: packages/app
         env:
           GEMDEX_SPARKLE: "1"
-          APP_VERSION: ${{ steps.meta.outputs.version }}
         run: bash macos/build-app.sh --with-sidecar
 
       - name: Sign · notarize · staple · DMG
@@ -131,7 +268,7 @@ jobs:
         run: |
           set -euo pipefail
           APP="build/Gemdex Memory.app"
-          DMG="build/Gemdex-Memory-${{ steps.meta.outputs.version }}-macos-arm64.dmg"
+          DMG="build/Gemdex-Memory-${APP_VERSION}-macos-arm64.dmg"
 
           IDENTITY=$(security find-identity -v -p codesigning build.keychain \
             | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.*)"/\1/')
@@ -184,23 +321,10 @@ jobs:
           echo "DMG_PATH=packages/app/$DMG" >> "$GITHUB_ENV"
           echo "DMG_NAME=$(basename "$DMG")" >> "$GITHUB_ENV"
 
-      - name: Determine release target
-        id: release
-        run: |
-          TAG_INPUT="${{ github.event.inputs.tag }}"
-          if [ -n "$TAG_INPUT" ]; then
-            echo "tag=$TAG_INPUT" >> "$GITHUB_OUTPUT"
-            echo "name=Gemdex Memory $TAG_INPUT" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=desktop-latest" >> "$GITHUB_OUTPUT"
-            echo "name=Gemdex Memory ${{ steps.meta.outputs.version }} (build ${GITHUB_SHA::7})" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Generate signed appcast.xml
         working-directory: packages/app
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
-          APP_VERSION: ${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
           if [ -z "$SPARKLE_PRIVATE_KEY" ]; then
@@ -244,18 +368,14 @@ jobs:
           echo "APPCAST_PATH=packages/app/$APPCAST" >> "$GITHUB_ENV"
           echo "==> appcast.xml:"; cat "$APPCAST"
 
-      - name: Refresh rolling desktop-latest tag
-        if: steps.release.outputs.tag == 'desktop-latest'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release delete desktop-latest -y --cleanup-tag || true
-
-      - name: Publish release
+      - name: Publish versioned release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.release.outputs.tag }}
-          name: ${{ steps.release.outputs.name }}
+          tag_name: v${{ needs.prepare.outputs.version }}
+          name: Gemdex Memory v${{ needs.prepare.outputs.version }}
           prerelease: false
+          # make_latest:true keeps …/releases/latest/download/{appcast.xml,DMG}
+          # — the URLs baked into the app's SUFeedURL — pointed at this build.
           make_latest: true
           fail_on_unmatched_files: true
           files: |
@@ -263,18 +383,6 @@ jobs:
             ${{ env.APPCAST_PATH }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Persist bumped version to main
-        if: steps.meta.outputs.bumped == 'true'
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add packages/app/VERSION
-          # [skip ci] is required: this commit touches packages/app/**, which would
-          # otherwise re-trigger this release workflow in an endless bump loop.
-          git commit -m "Release desktop app v${{ steps.meta.outputs.version }} [skip ci]"
-          git push origin HEAD:main
 
       - name: Cleanup keychain
         if: always()

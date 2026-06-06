@@ -5,7 +5,7 @@
 # + helpers first, then the framework, then — by the caller — the outer app).
 #
 # Run this after build-app.sh assembles the bundle and BEFORE the outer
-# `codesign --deep` in release-macos.yml.
+# `codesign --deep` in the release workflow (.github/workflows/release.yml).
 #
 # Usage:
 #   embed-sparkle.sh <path-to.app>
@@ -14,7 +14,7 @@
 #   SIGN_IDENTITY   Developer ID Application identity (required; signs Sparkle).
 #   SPARKLE_DIR     Path to vendored Sparkle (default: third_party/sparkle,
 #                   relative to this script's package root).
-#   SU_FEED_URL     Appcast feed URL (default: the gemdex desktop-latest asset).
+#   SU_FEED_URL     Appcast feed URL (default: the gemdex latest-release asset).
 #   SU_PUBLIC_ED_KEY            EdDSA public key (default: the committed key).
 #   SU_CHECK_INTERVAL_SECONDS  Scheduled check interval (default: 86400 = daily).
 #
