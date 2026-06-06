@@ -1,10 +1,12 @@
 const std = @import("std");
 const runner = @import("runner");
 const zero_native = @import("zero-native");
+const build_options = @import("build_options");
 
 pub const panic = std.debug.FullPanic(zero_native.debug.capturePanic);
 
 const bridge_origins = [_][]const u8{ "zero://app", "zero://inline", "http://127.0.0.1:5173" };
+const windows_build = std.mem.eql(u8, build_options.platform, "windows");
 
 /// Kick off Sparkle's updater (defined in src/sparkle_host.m). Lazily creates
 /// and retains an SPUStandardUpdaterController; the feed URL + EdDSA public key
@@ -15,7 +17,7 @@ const bridge_origins = [_][]const u8{ "zero://app", "zero://inline", "http://127
 /// macOS branch of `build.zig`. `-Dplatform=null` on a Mac still targets
 /// os.tag=macos, so we must key off build_options.platform to avoid an
 /// unresolved symbol there.
-const sparkle_enabled = std.mem.eql(u8, @import("build_options").platform, "macos");
+const sparkle_enabled = std.mem.eql(u8, build_options.platform, "macos");
 extern fn gemdex_sparkle_start() void;
 
 const command_policies = [_]zero_native.BridgeCommandPolicy{
@@ -74,11 +76,19 @@ fn decideLaunch(has_serve_cmd: bool, node_available: bool) LaunchDecision {
 /// to Node so our kill reaps the sidecar. `--offline` resolves only from the
 /// npm/npx cache (no network); `-y` permits the one network install.
 fn serveCommand(mode: ServeMode) []const u8 {
-    return switch (mode) {
-        .dev => "exec node \"$GEMDEX_SERVE_CMD\" serve --port 0",
-        .offline => "exec npx --offline gemdex-mcp serve --port 0",
-        .install => "exec npx -y gemdex-mcp serve --port 0",
-    };
+    if (windows_build) {
+        return switch (mode) {
+            .dev => "node \"%GEMDEX_SERVE_CMD%\" serve --port 0",
+            .offline => "npx --offline gemdex-mcp serve --port 0",
+            .install => "npx -y gemdex-mcp serve --port 0",
+        };
+    } else {
+        return switch (mode) {
+            .dev => "exec node \"$GEMDEX_SERVE_CMD\" serve --port 0",
+            .offline => "exec npx --offline gemdex-mcp serve --port 0",
+            .install => "exec npx -y gemdex-mcp serve --port 0",
+        };
+    }
 }
 
 fn writeJsonString(writer: anytype, value: []const u8) !void {
@@ -241,6 +251,12 @@ const App = struct {
     /// neither Homebrew nor nvm, so a bare `npx`/`node` would not be found. A
     /// login shell sources the profile where `brew shellenv` (etc.) live.
     fn shellPath(self: *@This()) []const u8 {
+        if (windows_build) {
+            if (self.env_map.get("COMSPEC")) |s| {
+                if (s.len > 0) return s;
+            }
+            return "cmd.exe";
+        }
         if (self.env_map.get("SHELL")) |s| {
             if (s.len > 0) return s;
         }
@@ -254,15 +270,37 @@ const App = struct {
 
     fn buildServeArgv(self: *@This(), buf: *[3][]const u8, mode: ServeMode) []const []const u8 {
         buf[0] = self.shellPath();
-        buf[1] = "-lc";
+        buf[1] = if (windows_build) "/C" else "-lc";
         buf[2] = serveCommand(mode);
         return buf[0..3];
     }
 
+    fn bundledSidecarAvailable(self: *@This()) bool {
+        if (!windows_build) return false;
+        var cwd = std.Io.Dir.cwd();
+        cwd.access(self.io, "resources/node/node.exe", .{}) catch return false;
+        cwd.access(self.io, "resources/sidecar/dist/index.js", .{}) catch return false;
+        return true;
+    }
+
+    fn bundledServeArgv(self: *@This(), buf: *[5][]const u8, mode: ServeMode) ?[]const []const u8 {
+        if (mode == .dev or !self.bundledSidecarAvailable()) return null;
+        buf[0] = "resources/node/node.exe";
+        buf[1] = "resources/sidecar/dist/index.js";
+        buf[2] = "serve";
+        buf[3] = "--port";
+        buf[4] = "0";
+        return buf[0..5];
+    }
+
     /// Whether `node` and `npx` resolve on the login-shell PATH.
     fn nodeAvailable(self: *@This()) bool {
+        const command = if (windows_build)
+            "where node >NUL 2>NUL && where npx >NUL 2>NUL"
+        else
+            "command -v node >/dev/null 2>&1 && command -v npx >/dev/null 2>&1";
         const result = std.process.run(self.gpa, self.io, .{
-            .argv = &.{ self.shellPath(), "-lc", "command -v node >/dev/null 2>&1 && command -v npx >/dev/null 2>&1" },
+            .argv = &.{ self.shellPath(), if (windows_build) "/C" else "-lc", command },
             .stdout_limit = .limited(256),
             .stderr_limit = .limited(256),
         }) catch return false;
@@ -286,14 +324,16 @@ const App = struct {
     /// up. If shutdown was requested while we were starting, the local child is
     /// reaped here so it never leaks.
     fn startSidecar(self: *@This(), mode: ServeMode) bool {
-        var argv_buf: [3][]const u8 = undefined;
-        const argv = self.buildServeArgv(&argv_buf, mode);
+        var bundled_argv_buf: [5][]const u8 = undefined;
+        const bundled_argv = self.bundledServeArgv(&bundled_argv_buf, mode);
+        var shell_argv_buf: [3][]const u8 = undefined;
+        const argv = bundled_argv orelse self.buildServeArgv(&shell_argv_buf, mode);
 
         var child = std.process.spawn(self.io, .{
             .argv = argv,
             .stdin = .ignore,
             .stdout = .pipe,
-            .stderr = .inherit,
+            .stderr = if (bundled_argv != null) .ignore else .inherit,
         }) catch |err| {
             std.debug.print("[gemdex] failed to spawn sidecar: {s}\n", .{@errorName(err)});
             return false;
@@ -335,6 +375,8 @@ const App = struct {
 
         const decision = if (self.hasServeCmd())
             decideLaunch(true, false)
+        else if (self.bundledSidecarAvailable())
+            LaunchDecision.probe_offline
         else
             decideLaunch(false, self.nodeAvailable());
 
@@ -406,7 +448,8 @@ const App = struct {
     /// we record an actionable message and flip to `.failed`.
     fn bootstrapWorker(self: *@This(), install: bool) void {
         defer self.worker_busy.store(false, .release);
-        if (self.startSidecar(if (install) .install else .offline)) {
+        const mode: ServeMode = if (self.bundledSidecarAvailable()) .offline else if (install) .install else .offline;
+        if (self.startSidecar(mode)) {
             if (!self.shutting_down.load(.acquire)) self.writeMarker();
             return;
         }
@@ -467,9 +510,21 @@ const App = struct {
     /// Absolute path to the bootstrap marker (`~/.gemdex/desktop.json`). Returns
     /// the slice written into `buf`, or "" if HOME is unavailable / too long.
     fn markerPath(self: *@This(), buf: []u8) []const u8 {
-        const home = self.env_map.get("HOME") orelse return "";
+        const home = self.homeDir() orelse return "";
         if (home.len == 0) return "";
         return std.fmt.bufPrint(buf, "{s}/.gemdex/desktop.json", .{home}) catch return "";
+    }
+
+    fn homeDir(self: *@This()) ?[]const u8 {
+        if (windows_build) {
+            if (self.env_map.get("USERPROFILE")) |home| {
+                if (home.len > 0) return home;
+            }
+        }
+        if (self.env_map.get("HOME")) |home| {
+            if (home.len > 0) return home;
+        }
+        return null;
     }
 
     fn markerExists(self: *@This()) bool {
@@ -484,7 +539,7 @@ const App = struct {
     /// bootstrapped. Best-effort; never blocks startup on failure. This is the
     /// only state the shell writes, and it is not the memory store.
     fn writeMarker(self: *@This()) void {
-        const home = self.env_map.get("HOME") orelse return;
+        const home = self.homeDir() orelse return;
         if (home.len == 0) return;
         var dir_buf: [1024]u8 = undefined;
         const dir = std.fmt.bufPrint(&dir_buf, "{s}/.gemdex", .{home}) catch return;

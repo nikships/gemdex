@@ -96,6 +96,9 @@ pub fn build(b: *std.Build) void {
         .name = app_exe_name,
         .root_module = app_mod,
     });
+    if (target.result.os.tag == .windows) {
+        exe.subsystem = .windows;
+    }
     linkPlatform(b, target, app_mod, exe, selected_platform, web_engine, zero_native_path, cef_dir, cef_auto_install);
     b.installArtifact(exe);
 
