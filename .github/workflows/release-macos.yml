@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to publish (e.g. v0.3.1). Leave blank for the rolling desktop-latest build."
+        description: "Release tag to publish (e.g. v0.4.1). Leave blank for the rolling desktop-latest build."
         required: false
         default: ""
 
@@ -30,21 +30,35 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.4
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
-
-      - name: Install zero-native CLI + framework
-        run: npm install -g zero-native@0.2.0
-
-      - name: Install Zig 0.16
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
+          node-version: "22"
+          cache: "pnpm"
 
       - name: Install create-dmg
         run: brew install create-dmg
+
+      - name: Show Swift toolchain
+        run: swift --version
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build TypeScript workspace (core + mcp dist)
+        run: pnpm build
+
+      - name: Read app version
+        id: meta
+        run: |
+          APP_VERSION="$(cat packages/app/VERSION | tr -d '[:space:]')"
+          echo "version=$APP_VERSION" >> "$GITHUB_OUTPUT"
+          echo "App version: $APP_VERSION"
 
       - name: Fetch Sparkle (framework + tools)
         working-directory: packages/app
@@ -62,17 +76,6 @@ jobs:
           rm -f third_party/sparkle/Sparkle-*.tar.xz
           test -d third_party/sparkle/Sparkle.framework
           test -x third_party/sparkle/bin/sign_update
-
-      - name: Resolve zero-native framework path
-        id: zn
-        run: echo "path=$(npm root -g)/zero-native" >> "$GITHUB_OUTPUT"
-
-      - name: Read app version from manifest
-        id: meta
-        run: |
-          APP_VERSION=$(grep -E '\.version[[:space:]]*=' packages/app/app.zon | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
-          echo "version=$APP_VERSION" >> "$GITHUB_OUTPUT"
-          echo "App version: $APP_VERSION"
 
       - name: Import Developer ID certificate into a temp keychain
         env:
@@ -98,13 +101,12 @@ jobs:
           echo "Signing identities available:"
           security find-identity -v -p codesigning "$KEYCHAIN"
 
-      - name: Build frontend
-        working-directory: packages/app/frontend
-        run: npm install && npm run build
-
-      - name: Build app package (ReleaseFast)
+      - name: Build native app bundle (Sparkle + bundled sidecar)
         working-directory: packages/app
-        run: zig build package -Doptimize=ReleaseFast "-Dzero-native-path=${{ steps.zn.outputs.path }}"
+        env:
+          GEMDEX_SPARKLE: "1"
+          APP_VERSION: ${{ steps.meta.outputs.version }}
+        run: bash macos/build-app.sh --with-sidecar
 
       - name: Sign · notarize · staple · DMG
         working-directory: packages/app
@@ -114,8 +116,8 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
-          APP="zig-out/package/Gemdex Memory.app"
-          DMG="zig-out/package/Gemdex-Memory-${{ steps.meta.outputs.version }}-macos-arm64.dmg"
+          APP="build/Gemdex Memory.app"
+          DMG="build/Gemdex-Memory-${{ steps.meta.outputs.version }}-macos-arm64.dmg"
 
           IDENTITY=$(security find-identity -v -p codesigning build.keychain \
             | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.*)"/\1/')
@@ -128,21 +130,14 @@ jobs:
           echo "==> Embedding + signing Sparkle (inside-out, before outer sign)"
           SIGN_IDENTITY="$IDENTITY" bash macos/embed-sparkle.sh "$APP"
 
-          echo "==> Signing app (hardened runtime)"
-          codesign --deep --force --verify --verbose \
-            --sign "$IDENTITY" \
-            --options runtime \
-            --entitlements macos/entitlements.plist \
-            --timestamp \
-            "$APP"
+          echo "==> Deep-signing bundle (sidecar native libs + Node w/ JIT + outer app)"
+          SIGN_IDENTITY="$IDENTITY" bash macos/sign-app.sh "$APP"
 
           echo "==> Verifying dynamic-link layout (guards against dyld 'Library missing' at launch)"
-          # spctl/notarization confirm the signature is valid but NOT that dyld
-          # can resolve the app's frameworks. A hardened binary aborts at launch
-          # if any LC_RPATH is a bare relative path (e.g. "Frameworks" instead of
-          # "@executable_path/../Frameworks"). Catch that here instead of shipping
-          # a DMG that crashes on every user's Mac.
-          EXE="$APP/Contents/MacOS/gemdex-memory"
+          # A hardened binary aborts at launch if any LC_RPATH is a bare relative
+          # path (e.g. "Frameworks" instead of "@executable_path/../Frameworks").
+          # Catch that here instead of shipping a DMG that crashes on every Mac.
+          EXE="$APP/Contents/MacOS/GemdexMemory"
           BAD_RPATHS=$(otool -l "$EXE" \
             | awk '/LC_RPATH/{f=1;next} f&&/path /{print $2;f=0}' \
             | grep -vE '^(/|@)' || true)
@@ -151,10 +146,13 @@ jobs:
             echo "$BAD_RPATHS"
             exit 1
           fi
-          # Sparkle is loaded via @rpath; confirm it is actually embedded.
           test -f "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle" \
             || { echo "::error::Sparkle.framework missing from app bundle"; exit 1; }
-          echo "    rpaths OK; Sparkle embedded."
+          test -x "$APP/Contents/Resources/node/bin/node" \
+            || { echo "::error::bundled Node runtime missing from app bundle"; exit 1; }
+          test -f "$APP/Contents/Resources/sidecar/dist/index.js" \
+            || { echo "::error::bundled sidecar entry missing from app bundle"; exit 1; }
+          echo "    rpaths OK; Sparkle + bundled sidecar embedded."
 
           echo "==> Notarizing app"
           ditto -c -k --keepParent "$APP" /tmp/gemdex-app.zip
@@ -195,7 +193,7 @@ jobs:
             echo "::error::SPARKLE_PRIVATE_KEY secret is empty — cannot sign the appcast."
             exit 1
           fi
-          DMG="zig-out/package/$DMG_NAME"
+          DMG="build/$DMG_NAME"
           KEY_FILE="$(mktemp)"
           trap 'rm -f "$KEY_FILE"' EXIT
           printf '%s' "$SPARKLE_PRIVATE_KEY" > "$KEY_FILE"
@@ -209,7 +207,7 @@ jobs:
           DMG_URL="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/${DMG_NAME}"
           PUB_DATE="$(date -u +'%a, %d %b %Y %H:%M:%S +0000')"
 
-          APPCAST="zig-out/package/appcast.xml"
+          APPCAST="build/appcast.xml"
           cat > "$APPCAST" <<EOF
           <?xml version="1.0" encoding="utf-8"?>
           <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
@@ -223,7 +221,7 @@ jobs:
                 <pubDate>${PUB_DATE}</pubDate>
                 <sparkle:version>${APP_VERSION}</sparkle:version>
                 <sparkle:shortVersionString>${APP_VERSION}</sparkle:shortVersionString>
-                <sparkle:minimumSystemVersion>11.0</sparkle:minimumSystemVersion>
+                <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
                 <enclosure url="${DMG_URL}" type="application/octet-stream" ${ENCLOSURE_ATTRS} />
               </item>
             </channel>

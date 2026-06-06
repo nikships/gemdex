@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
 #
-# Embed Sparkle into a freshly-packaged .app, inject the updater Info.plist
-# keys, and codesign the framework inside-out (XPC services + helpers first,
-# then the framework, then — by the caller — the outer app).
+# Embed Sparkle into an assembled .app (see macos/build-app.sh), inject the
+# updater Info.plist keys, and codesign the framework inside-out (XPC services
+# + helpers first, then the framework, then — by the caller — the outer app).
 #
-# zero-native's `package` step writes a fixed 9-key Info.plist and only creates
-# Contents/Frameworks for Chromium builds, so for the system-WebView app we add
-# the framework and the SU* keys here, after packaging and BEFORE the outer
+# Run this after build-app.sh assembles the bundle and BEFORE the outer
 # `codesign --deep` in release-macos.yml.
 #
 # Usage:
@@ -79,4 +77,7 @@ sign "$EMBEDDED_FRAMEWORK"
 echo "==> Verifying embedded Sparkle signature"
 codesign --verify --deep --strict --verbose=2 "$EMBEDDED_FRAMEWORK"
 
-echo "==> Done embedding Sparkle. Now sign the outer .app (--deep) as usual."
+# NOTE: sign the outer .app with macos/sign-app.sh, which signs each nested
+# Mach-O individually (NOT `--deep`). A blanket `--deep` re-sign would clobber
+# the JIT entitlements on the bundled Node binary and crash the notarized app.
+echo "==> Done embedding Sparkle. Next: macos/sign-app.sh signs the outer .app."

@@ -1,8 +1,0 @@
-.{
-    .name = .gemdex_memory,
-    .fingerprint = 0x683abcaf57844cc6,
-    .version = "0.3.0",
-    .minimum_zig_version = "0.16.0",
-    .dependencies = .{},
-    .paths = .{ "build.zig", "build.zig.zon", "src", "assets", "frontend", "windows", "app.zon", "README.md" },
-}

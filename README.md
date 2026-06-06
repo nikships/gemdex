@@ -202,8 +202,8 @@ sharp matching on long content, but the agent always gets the whole memory.
 
 ## The desktop app
 
-A native, **manage-only** app (built on [zero-native](https://www.npmjs.com/package/zero-native))
-that opens straight into your memory layer:
+A native, **manage-only** SwiftUI app for macOS (Apple Silicon) that opens
+straight into your memory layer:
 
 - Browse / list all memories (sorted by recency).
 - View, create, edit, and delete memories — including inline media attachments
@@ -237,10 +237,15 @@ exporting, and importing memories.
 </p>
 
 ```bash
-# from packages/app — requires Zig 0.16 and the zero-native CLI
+# from packages/app — requires a Swift 5.9+ toolchain (no Xcode needed)
 cd packages/app
-zig build run            # builds the frontend + native shell and opens the window
+bash macos/build-app.sh                 # assemble build/Gemdex Memory.app
+open "build/Gemdex Memory.app"          # launch it
 ```
+
+Download a signed, notarized DMG from the
+[latest release](https://github.com/anand-92/gemdex/releases/latest) — it bundles
+its own Node runtime, so it runs with zero manual dependency installation.
 
 The sidecar is the same package as the MCP server:
 
@@ -320,7 +325,7 @@ console.log(hits[0].content); // the full memory, never a fragment
 | [`gemdex-core`](packages/core) | Memory store (parent-document chunking), Gemini embedding client, embedded LanceDB hybrid retrieval |
 | [`gemdex-mcp`](packages/mcp) | MCP server (`save_memory`/`recall`/`update_memory`) + `gemdex serve` localhost sidecar |
 | [`gemdex-server`](packages/server) | Self-hosted BYOI HTTP backend using Postgres/pgvector and file or S3-compatible blobs |
-| [`packages/app`](packages/app) | zero-native desktop app to manage the memory layer |
+| [`packages/app`](packages/app) | native SwiftUI macOS app to manage the memory layer |
 
 ## Configuration
 

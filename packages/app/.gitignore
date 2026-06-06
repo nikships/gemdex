@@ -1,5 +1,4 @@
-zig-out/
-.zig-cache/
-frontend/dist/
-frontend/node_modules/
+.build/
+build/
 third_party/
+.DS_Store

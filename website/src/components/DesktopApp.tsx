@@ -11,7 +11,7 @@ export function DesktopApp() {
                         A native, <em>manage-only</em> window into your memory.
                     </h3>
                     <p>
-                        Built on zero-native, it opens straight into your memory layer — <b>browse, create, edit and
+                        A native SwiftUI app for macOS, it opens straight into your memory layer — <b>browse, create, edit and
                         delete</b> memories, including inline media you can drag-and-drop, caption and preview in place.
                     </p>
                     <p>
