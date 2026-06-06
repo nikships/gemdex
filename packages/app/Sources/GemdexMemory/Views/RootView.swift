@@ -62,6 +62,7 @@ struct RootView: View {
 /// capsule over the ambient brand backdrop.
 struct LoadingView: View {
     let message: String
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var breathe = false
 
     var body: some View {
@@ -72,8 +73,8 @@ struct LoadingView: View {
                 (Brand.image("logo-mark") ?? Image(systemName: "brain.head.profile"))
                     .resizable().scaledToFit().frame(width: 96, height: 96)
                     .shadow(color: Brand.gold.opacity(0.35), radius: 24, y: 8)
-                    .scaleEffect(breathe ? 1.04 : 0.97)
-                    .animation(.easeInOut(duration: 2.4).repeatForever(autoreverses: true), value: breathe)
+                    .scaleEffect(reduceMotion ? 1.0 : (breathe ? 1.04 : 0.97))
+                    .animation(reduceMotion ? nil : .easeInOut(duration: 2.4).repeatForever(autoreverses: true), value: breathe)
 
                 VStack(spacing: 14) {
                     ProgressView()
@@ -89,6 +90,6 @@ struct LoadingView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear { breathe = true }
+        .onAppear { if !reduceMotion { breathe = true } }
     }
 }

@@ -67,11 +67,17 @@ extension View {
     }
 
     /// Vibrancy + hairline-stroke fallback used on pre-macOS-26 SDKs/runtimes.
+    /// The tint fill lives *inside* the background so it sits behind content
+    /// (keeping text/icon contrast); only the hairline stroke overlays on top.
     @ViewBuilder
     func glassFallback(cornerRadius: CGFloat, tint: Color?) -> some View {
         background(
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                 .fill(.ultraThinMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .fill(tint?.opacity(0.10) ?? .clear)
+                )
         )
         .overlay(
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
@@ -82,10 +88,6 @@ extension View {
                     ),
                     lineWidth: 0.75
                 )
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .fill(tint?.opacity(0.10) ?? .clear)
         )
     }
 
@@ -181,20 +183,21 @@ struct BrandBackdrop: View {
                 let w = geo.size.width
                 let h = geo.size.height
                 ZStack {
-                    blob(Brand.gold, opacity: scheme == .dark ? 0.30 : 0.22)
+                    blob(Brand.gold, opacity: scheme == .dark ? 0.30 : 0.22, radius: w * 0.45)
                         .frame(width: w * 0.9, height: w * 0.9)
                         .offset(x: drift ? -w * 0.22 : -w * 0.30,
                                 y: drift ? -h * 0.28 : -h * 0.20)
-                    blob(Brand.terracotta, opacity: scheme == .dark ? 0.26 : 0.18)
+                    blob(Brand.terracotta, opacity: scheme == .dark ? 0.26 : 0.18, radius: w * 0.4)
                         .frame(width: w * 0.8, height: w * 0.8)
                         .offset(x: drift ? w * 0.32 : w * 0.24,
                                 y: drift ? h * 0.10 : h * 0.22)
-                    blob(Brand.sage, opacity: scheme == .dark ? 0.22 : 0.14)
+                    blob(Brand.sage, opacity: scheme == .dark ? 0.22 : 0.14, radius: w * 0.35)
                         .frame(width: w * 0.7, height: w * 0.7)
                         .offset(x: drift ? w * 0.05 : -w * 0.02,
                                 y: drift ? h * 0.40 : h * 0.34)
                 }
                 .blur(radius: 80)
+                .drawingGroup()
             }
             .ignoresSafeArea()
         }
@@ -206,12 +209,12 @@ struct BrandBackdrop: View {
         }
     }
 
-    private func blob(_ color: Color, opacity: Double) -> some View {
+    private func blob(_ color: Color, opacity: Double, radius: CGFloat) -> some View {
         Circle()
             .fill(
                 RadialGradient(
                     colors: [color.opacity(opacity), color.opacity(0)],
-                    center: .center, startRadius: 0, endRadius: 320
+                    center: .center, startRadius: 0, endRadius: max(radius, 1)
                 )
             )
     }

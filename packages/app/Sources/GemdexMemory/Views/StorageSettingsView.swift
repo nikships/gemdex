@@ -60,6 +60,7 @@ struct StorageSettingsView: View {
             }
             .buttonStyle(.plain)
             .keyboardShortcut(.cancelAction)
+            .accessibilityLabel("Close")
         }
         .padding(20)
     }

@@ -78,6 +78,7 @@ struct SimilarPanel: View {
                 }
                 .buttonStyle(.plain)
                 .keyboardShortcut(.cancelAction)
+                .accessibilityLabel("Close")
             }
             .padding(18)
 

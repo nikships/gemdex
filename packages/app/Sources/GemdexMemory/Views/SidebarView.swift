@@ -52,6 +52,7 @@ struct SidebarView: View {
                     MemoryRow(memory: memory, isSelected: memory.id == model.selectedID)
                         .tag(memory.id)
                         .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
                         .contextMenu {
                             Button("Open") { Task { await model.openMemory(memory.id) } }
                             Button("Delete", role: .destructive) {
