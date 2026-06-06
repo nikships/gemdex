@@ -9,26 +9,34 @@ struct SidebarView: View {
     var body: some View {
         VStack(spacing: 0) {
             filterField
-            Divider()
+                .padding(.horizontal, 10)
+                .padding(.top, 8)
+                .padding(.bottom, 6)
             listContent
         }
         .background(VisualEffectBackground(material: .sidebar).ignoresSafeArea())
     }
 
     private var filterField: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "line.3.horizontal.decrease.circle")
+        HStack(spacing: 7) {
+            Image(systemName: "magnifyingglass")
+                .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
             TextField("Filter by title…", text: $model.filterText)
                 .textFieldStyle(.plain)
+                .font(.callout)
             if !model.filterText.isEmpty {
                 Button { model.filterText = "" } label: {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
+                .transition(.scale.combined(with: .opacity))
             }
         }
-        .padding(8)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .glassSurface(cornerRadius: Metric.radiusControl)
+        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: model.filterText.isEmpty)
     }
 
     @ViewBuilder
@@ -41,8 +49,9 @@ struct SidebarView: View {
                 set: { newID in if let newID { Task { await model.openMemory(newID) } } }
             )) {
                 ForEach(model.visibleMemories) { memory in
-                    MemoryRow(memory: memory)
+                    MemoryRow(memory: memory, isSelected: memory.id == model.selectedID)
                         .tag(memory.id)
+                        .listRowSeparator(.hidden)
                         .contextMenu {
                             Button("Open") { Task { await model.openMemory(memory.id) } }
                             Button("Delete", role: .destructive) {
@@ -55,16 +64,18 @@ struct SidebarView: View {
                 }
             }
             .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
+            .softScrollEdges()
         }
     }
 
     private var emptyState: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 14) {
             Image(systemName: "tray")
-                .font(.system(size: 30))
-                .foregroundStyle(.secondary)
+                .font(.system(size: 30, weight: .light))
+                .foregroundStyle(Brand.gold.gradient)
             Text("No memories yet.")
-                .font(.callout.weight(.medium))
+                .font(.callout.weight(.semibold))
             Text("Create one, or save from your agent.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -80,17 +91,14 @@ struct SidebarView: View {
 struct MemoryRow: View {
     @EnvironmentObject var model: AppModel
     let memory: MemorySummary
+    var isSelected: Bool = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            if let image = memory.firstImage {
-                ThumbnailView(memoryID: memory.id, attachmentID: image.id)
-                    .frame(width: 44, height: 44)
-                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-            }
+        HStack(alignment: .top, spacing: 11) {
+            thumbnail
             VStack(alignment: .leading, spacing: 3) {
                 Text(memory.displayTitle)
-                    .font(.body.weight(.medium))
+                    .font(.body.weight(.semibold))
                     .lineLimit(1)
                 if !memory.preview.isEmpty {
                     Text(memory.preview)
@@ -98,21 +106,59 @@ struct MemoryRow: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
                 }
-                HStack(spacing: 6) {
+                HStack(spacing: 7) {
                     Text(EditorModel.fmt(memory.updatedAt))
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                     if !memory.attachments.isEmpty {
                         Label("\(memory.attachments.count)", systemImage: "paperclip")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(Brand.gold)
                             .labelStyle(.titleAndIcon)
                     }
                 }
+                .padding(.top, 1)
             }
             Spacer(minLength: 0)
         }
-        .padding(.vertical, 3)
+        .padding(.vertical, 7)
+        .padding(.horizontal, 9)
+        .background(selectionBackground)
+        .contentShape(RoundedRectangle(cornerRadius: Metric.radiusControl, style: .continuous))
+    }
+
+    @ViewBuilder
+    private var thumbnail: some View {
+        if let image = memory.firstImage {
+            ThumbnailView(memoryID: memory.id, attachmentID: image.id)
+                .frame(width: 46, height: 46)
+                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.08))
+                )
+        } else {
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(Brand.warmGradient.opacity(0.16))
+                .frame(width: 46, height: 46)
+                .overlay(
+                    Image(systemName: "doc.text")
+                        .font(.system(size: 16, weight: .light))
+                        .foregroundStyle(Brand.gold)
+                )
+        }
+    }
+
+    @ViewBuilder
+    private var selectionBackground: some View {
+        if isSelected {
+            RoundedRectangle(cornerRadius: Metric.radiusControl, style: .continuous)
+                .fill(Brand.gold.opacity(0.16))
+                .overlay(
+                    RoundedRectangle(cornerRadius: Metric.radiusControl, style: .continuous)
+                        .strokeBorder(Brand.gold.opacity(0.45), lineWidth: 1)
+                )
+        }
     }
 }
 
@@ -128,7 +174,7 @@ struct ThumbnailView: View {
             if let image {
                 Image(nsImage: image).resizable().scaledToFill()
             } else {
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
                     .fill(Color(nsColor: .controlColor))
                     .overlay(Image(systemName: "photo").foregroundStyle(.secondary).font(.caption))
             }

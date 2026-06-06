@@ -12,26 +12,26 @@ struct EditorView: View {
     var body: some View {
         VStack(spacing: 0) {
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 18) {
                     TextField("Title (optional — auto-derived if blank)", text: titleBinding)
                         .textFieldStyle(.plain)
-                        .font(.title2.weight(.semibold))
+                        .font(.title.weight(.bold))
 
                     ContentTextEditor(text: contentBinding)
-                        .frame(minHeight: 220)
+                        .frame(minHeight: 240)
 
                     AttachmentsSection()
                 }
-                .padding(24)
+                .padding(28)
             }
+            .softScrollEdges()
 
-            Divider()
             footer
         }
     }
 
     private var footer: some View {
-        HStack {
+        HStack(spacing: 12) {
             Text(editor.metaText)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -39,7 +39,13 @@ struct EditorView: View {
             if editor.isEditingExisting {
                 Button(role: .destructive) { showDeleteConfirm = true } label: {
                     Label("Delete", systemImage: "trash")
+                        .font(.callout.weight(.medium))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .foregroundStyle(Brand.terracotta)
+                        .glassSurfaceInteractive(cornerRadius: Metric.radiusControl)
                 }
+                .buttonStyle(.plain)
                 .confirmationDialog("Delete this memory? This cannot be undone.", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
                     Button("Delete", role: .destructive) { Task { await model.deleteSelected() } }
                     Button("Cancel", role: .cancel) {}
@@ -49,7 +55,11 @@ struct EditorView: View {
                 Task { await editor.save() }
             } label: {
                 HStack(spacing: 6) {
-                    if editor.isSaving { ProgressView().controlSize(.small) }
+                    if editor.isSaving {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "checkmark.circle.fill")
+                    }
                     Text("Save")
                 }
             }
@@ -57,9 +67,10 @@ struct EditorView: View {
             .keyboardShortcut("s", modifiers: .command)
             .disabled(editor.isSaving)
         }
-        .padding(.horizontal, 24)
+        .padding(.horizontal, 18)
         .padding(.vertical, 12)
-        .background(VisualEffectBackground(material: .titlebar))
+        .background(.ultraThinMaterial)
+        .overlay(alignment: .top) { Divider().opacity(0.5) }
     }
 
     // Bind through the ObservableObject editor.
@@ -78,22 +89,16 @@ struct ContentTextEditor: View {
     var body: some View {
         TextEditor(text: $text)
             .font(.system(.body, design: .default))
+            .lineSpacing(2)
             .scrollContentBackground(.hidden)
-            .padding(10)
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color(nsColor: .textBackgroundColor))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(Color(nsColor: .separatorColor))
-            )
+            .padding(14)
+            .glassSurface(cornerRadius: Metric.radiusCard)
             .overlay(alignment: .topLeading) {
                 if text.isEmpty {
                     Text("Memory content. A one-line fact or a 300-line playbook — anything.")
                         .foregroundStyle(.secondary)
-                        .padding(.horizontal, 15)
-                        .padding(.vertical, 18)
+                        .padding(.horizontal, 19)
+                        .padding(.vertical, 22)
                         .allowsHitTesting(false)
                 }
             }

@@ -17,38 +17,46 @@ struct RecoveryView: View {
     let kind: Kind
 
     var body: some View {
-        VStack(spacing: 18) {
-            Image(systemName: iconName)
-                .font(.system(size: 44))
-                .foregroundStyle(Brand.gold)
-            Text(title)
-                .font(.title2.bold())
-                .multilineTextAlignment(.center)
-            Text(message)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 460)
+        ZStack {
+            BrandBackdrop()
 
-            if case let .installing(detail) = kind {
-                HStack(spacing: 10) {
-                    ProgressView().controlSize(.small)
-                    Text(detail.isEmpty ? "Working…" : detail).foregroundStyle(.secondary)
-                }
-                .padding(.top, 4)
-            }
+            VStack(spacing: 18) {
+                Image(systemName: iconName)
+                    .font(.system(size: 38, weight: .light))
+                    .foregroundStyle(Brand.gold)
+                    .frame(width: 84, height: 84)
+                    .glassSurface(cornerRadius: 999, tint: Brand.gold)
+                Text(title)
+                    .font(.title2.bold())
+                    .multilineTextAlignment(.center)
+                Text(message)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 460)
 
-            HStack(spacing: 12) {
-                ForEach(actions, id: \.label) { action in
-                    Button(action.label, action: action.run)
-                        .modifier(ActionStyle(prominent: action.prominent))
+                if case let .installing(detail) = kind {
+                    HStack(spacing: 10) {
+                        ProgressView().controlSize(.small)
+                        Text(detail.isEmpty ? "Working…" : detail).foregroundStyle(.secondary)
+                    }
+                    .padding(.top, 4)
                 }
+
+                HStack(spacing: 12) {
+                    ForEach(actions, id: \.label) { action in
+                        Button(action.label, action: action.run)
+                            .modifier(ActionStyle(prominent: action.prominent))
+                    }
+                }
+                .padding(.top, 6)
             }
-            .padding(.top, 6)
+            .padding(44)
+            .glassSurface(cornerRadius: Metric.radiusPanel)
+            .frame(maxWidth: 520)
+            .padding(40)
         }
-        .padding(48)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(VisualEffectBackground(material: .windowBackground).ignoresSafeArea())
     }
 
     private var iconName: String {
