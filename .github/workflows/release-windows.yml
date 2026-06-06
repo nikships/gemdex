@@ -84,13 +84,9 @@ jobs:
         working-directory: packages/app/frontend
         run: npm install && npm run build
 
-      - name: Install Chromium runtime
-        working-directory: packages/app
-        run: zero-native cef install --dir third_party/cef/windows --source official --allow-build-tools
-
       - name: Build Windows package (ReleaseFast)
         working-directory: packages/app
-        run: zig build package -Dplatform=windows -Dpackage-target=windows -Doptimize=ReleaseFast -Dweb-engine=chromium "-Dzero-native-path=${{ steps.zn.outputs.path }}"
+        run: zig build package -Dplatform=windows -Dpackage-target=windows -Doptimize=ReleaseFast "-Dzero-native-path=${{ steps.zn.outputs.path }}"
 
       - name: Stage bundled sidecar runtime
         shell: pwsh
