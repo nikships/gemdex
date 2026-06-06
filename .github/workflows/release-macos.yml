@@ -53,12 +53,26 @@ jobs:
       - name: Build TypeScript workspace (core + mcp dist)
         run: pnpm build
 
-      - name: Read app version
+      - name: Read + bump app version
         id: meta
         run: |
-          APP_VERSION="$(cat packages/app/VERSION | tr -d '[:space:]')"
+          set -euo pipefail
+          CURRENT="$(cat packages/app/VERSION | tr -d '[:space:]')"
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            # Explicit manual release: ship VERSION as-is, never auto-bump.
+            APP_VERSION="$CURRENT"
+            echo "bumped=false" >> "$GITHUB_OUTPUT"
+          else
+            # Rolling push-to-main build: bump the patch so the release carries a
+            # higher version than the installed app — that is what makes Sparkle
+            # actually offer the update.
+            IFS=. read -r MAJ MIN PAT <<< "$CURRENT"
+            APP_VERSION="$MAJ.$MIN.$((PAT + 1))"
+            printf '%s\n' "$APP_VERSION" > packages/app/VERSION
+            echo "bumped=true" >> "$GITHUB_OUTPUT"
+          fi
           echo "version=$APP_VERSION" >> "$GITHUB_OUTPUT"
-          echo "App version: $APP_VERSION"
+          echo "App version: $CURRENT -> $APP_VERSION"
 
       - name: Fetch Sparkle (framework + tools)
         working-directory: packages/app
@@ -249,6 +263,18 @@ jobs:
             ${{ env.APPCAST_PATH }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Persist bumped version to main
+        if: steps.meta.outputs.bumped == 'true'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/app/VERSION
+          # [skip ci] is required: this commit touches packages/app/**, which would
+          # otherwise re-trigger this release workflow in an endless bump loop.
+          git commit -m "Release desktop app v${{ steps.meta.outputs.version }} [skip ci]"
+          git push origin HEAD:main
 
       - name: Cleanup keychain
         if: always()
