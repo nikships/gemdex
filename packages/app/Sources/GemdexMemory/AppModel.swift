@@ -52,7 +52,9 @@ final class AppModel: ObservableObject {
     var visibleMemories: [MemorySummary] {
         let f = filterText.trimmingCharacters(in: .whitespaces).lowercased()
         guard !f.isEmpty else { return memories }
-        return memories.filter { $0.title.lowercased().contains(f) }
+        // Match displayTitle so empty-title memories ("Untitled memory") filter
+        // consistently with how they render.
+        return memories.filter { $0.displayTitle.lowercased().contains(f) }
     }
 
     init() {
@@ -198,8 +200,11 @@ final class AppModel: ObservableObject {
             let bytes = try await api.attachmentBytes(memoryId: memoryID, attachmentId: attachmentId)
             let results = try await api.recallByMedia(mimeType: bytes.mimeType, base64: bytes.data.base64EncodedString())
                 .filter { $0.id != memoryID }
+            // Drop results if the user switched memories while we were loading.
+            guard selectedID == memoryID else { return }
             similar = SimilarState(title: "Similar memories", results: results, errorMessage: nil, loading: false)
         } catch {
+            guard selectedID == memoryID else { return }
             similar = SimilarState(title: "Find similar needs attention", results: [], errorMessage: error.localizedDescription, loading: false)
             setStatus("Find similar failed: \(error.localizedDescription)", isError: true)
         }
@@ -211,9 +216,13 @@ final class AppModel: ObservableObject {
         guard let api else { return }
         do {
             let records = try await api.exportAll()
-            let encoder = JSONEncoder()
-            let lines = try records.map { String(data: try encoder.encode($0), encoding: .utf8) ?? "" }
-            try lines.joined(separator: "\n").data(using: .utf8)?.write(to: url)
+            // Encode + write off the main thread so a large export can't stutter.
+            try await Task.detached(priority: .userInitiated) {
+                let encoder = JSONEncoder()
+                let lines = try records.map { String(data: try encoder.encode($0), encoding: .utf8) ?? "" }
+                let data = Data(lines.joined(separator: "\n").utf8)
+                try data.write(to: url, options: .atomic)
+            }.value
             setStatus("Exported \(records.count) memories.")
         } catch {
             setStatus("Error: \(error.localizedDescription)", isError: true)
@@ -223,9 +232,12 @@ final class AppModel: ObservableObject {
     func importFile(_ url: URL) async {
         guard let api else { return }
         do {
-            let text = try String(contentsOf: url, encoding: .utf8)
-            let records = try Self.parseImport(text)
-            let payload = try JSONSerialization.data(withJSONObject: ["records": records])
+            // Read + parse off the main thread; the network import stays here.
+            let payload = try await Task.detached(priority: .userInitiated) {
+                let text = try String(contentsOf: url, encoding: .utf8)
+                let records = try Self.parseImport(text)
+                return try JSONSerialization.data(withJSONObject: ["records": records])
+            }.value
             let result = try await api.importRecords(payload)
             await refreshList()
             setStatus("Imported \(result.imported) memories.")
@@ -234,15 +246,18 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Accept either a JSON array or JSONL (one record per line).
-    private static func parseImport(_ text: String) throws -> [Any] {
+    /// Accept either a JSON array or JSONL (one record per line). Pure +
+    /// nonisolated so it can run on a detached background task.
+    nonisolated private static func parseImport(_ text: String) throws -> [Any] {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { return [] }
         if trimmed.hasPrefix("[") {
             return (try JSONSerialization.jsonObject(with: Data(trimmed.utf8)) as? [Any]) ?? []
         }
         return try trimmed.split(separator: "\n").compactMap { line -> Any? in
-            let t = line.trimmingCharacters(in: .whitespaces)
+            // Trim newlines too so Windows CRLF (\r\n) files don't leave a
+            // trailing \r that breaks JSON parsing.
+            let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !t.isEmpty else { return nil }
             return try JSONSerialization.jsonObject(with: Data(t.utf8))
         }

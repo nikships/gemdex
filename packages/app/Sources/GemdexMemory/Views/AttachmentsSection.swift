@@ -76,7 +76,8 @@ struct AttachmentsSection: View {
         panel.canChooseDirectories = false
         panel.allowedContentTypes = [.png, .jpeg, .mpeg4Movie, .quickTimeMovie, .mp3, .wav, .pdf, .audio, .movie, .image]
         if panel.runModal() == .OK {
-            editor.addFiles(panel.urls)
+            let urls = panel.urls
+            Task { await editor.addFiles(urls) }
         }
     }
 
@@ -86,12 +87,16 @@ struct AttachmentsSection: View {
         for provider in providers {
             group.enter()
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                if let url { urls.append(url) }
-                group.leave()
+                // Completion fires on an internal background queue; serialize
+                // the append onto main to avoid a data race on `urls`.
+                DispatchQueue.main.async {
+                    if let url { urls.append(url) }
+                    group.leave()
+                }
             }
         }
         group.notify(queue: .main) {
-            editor.addFiles(urls)
+            Task { await editor.addFiles(urls) }
         }
     }
 }
@@ -166,6 +171,8 @@ struct AttachmentPreview: View {
     @EnvironmentObject var model: AppModel
     let attachment: EditorAttachment
     @State private var data: Data?
+    /// Temp file for AVPlayer (audio/video), written off the main thread.
+    @State private var mediaURL: URL?
 
     var body: some View {
         Group {
@@ -175,12 +182,12 @@ struct AttachmentPreview: View {
                     Image(nsImage: image).resizable().scaledToFill()
                 } else { placeholder("photo") }
             case .video:
-                if let url = tempFileURL(data) {
-                    MediaPlayerView(url: url)
+                if let mediaURL {
+                    MediaPlayerView(url: mediaURL)
                 } else { placeholder("film") }
             case .audio:
-                if let url = tempFileURL(data) {
-                    MediaPlayerView(url: url)
+                if let mediaURL {
+                    MediaPlayerView(url: mediaURL)
                 } else { placeholder("waveform") }
             case .pdf:
                 if let data {
@@ -193,11 +200,17 @@ struct AttachmentPreview: View {
     }
 
     private func loadData() async {
-        if let inline = attachment.data { data = inline; return }
-        guard case let .existing(attachmentId) = attachment.source,
-              let memoryID = model.selectedID, let api = model.api else { return }
-        if let bytes = try? await api.attachmentBytes(memoryId: memoryID, attachmentId: attachmentId) {
-            data = bytes.data
+        var bytes = attachment.data
+        if bytes == nil {
+            guard case let .existing(attachmentId) = attachment.source,
+                  let memoryID = model.selectedID, let api = model.api else { return }
+            bytes = try? await api.attachmentBytes(memoryId: memoryID, attachmentId: attachmentId).data
+        }
+        guard let bytes else { return }
+        data = bytes
+        // AVPlayer needs a file URL; materialize it off the main thread.
+        if attachment.kind == .video || attachment.kind == .audio {
+            mediaURL = await Self.writeTempFile(bytes, id: attachment.id, mimeType: attachment.mimeType)
         }
     }
 
@@ -208,15 +221,15 @@ struct AttachmentPreview: View {
         }
     }
 
-    /// Materialize bytes into a temp file so AVPlayer/QuickLook can read them.
-    private func tempFileURL(_ data: Data?) -> URL? {
-        guard let data else { return nil }
-        let ext = UTType(mimeType: attachment.mimeType)?.preferredFilenameExtension ?? "bin"
+    private static func writeTempFile(_ data: Data, id: UUID, mimeType: String) async -> URL {
+        let ext = UTType(mimeType: mimeType)?.preferredFilenameExtension ?? "bin"
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("gemdex-\(attachment.id.uuidString)")
+            .appendingPathComponent("gemdex-\(id.uuidString)")
             .appendingPathExtension(ext)
         if !FileManager.default.fileExists(atPath: url.path) {
-            try? data.write(to: url)
+            try? await Task.detached(priority: .userInitiated) {
+                try data.write(to: url)
+            }.value
         }
         return url
     }

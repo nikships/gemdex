@@ -283,12 +283,17 @@ final class SidecarManager: ObservableObject {
         proc.arguments = ["-lc", "command -v node >/dev/null 2>&1 && command -v npx >/dev/null 2>&1"]
         proc.standardOutput = FileHandle.nullDevice
         proc.standardError = FileHandle.nullDevice
-        do {
-            try proc.run()
-            proc.waitUntilExit()
-            return proc.terminationStatus == 0
-        } catch {
-            return false
+        // Await exit via terminationHandler so we don't block a cooperative
+        // concurrency thread with waitUntilExit().
+        return await withCheckedContinuation { continuation in
+            proc.terminationHandler = { p in
+                continuation.resume(returning: p.terminationStatus == 0)
+            }
+            do {
+                try proc.run()
+            } catch {
+                continuation.resume(returning: false)
+            }
         }
     }
 

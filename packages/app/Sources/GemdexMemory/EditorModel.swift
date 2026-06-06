@@ -102,7 +102,7 @@ final class EditorModel: ObservableObject {
 
     // MARK: - Adding / removing files
 
-    func addFiles(_ urls: [URL]) {
+    func addFiles(_ urls: [URL]) async {
         attachError = nil
         var counts: [AttachmentKind: Int] = [:]
         for a in attachments { counts[a.kind, default: 0] += 1 }
@@ -113,7 +113,10 @@ final class EditorModel: ObservableObject {
                 attachError = "Unsupported file type: \(url.lastPathComponent)."
                 continue
             }
-            guard let data = try? Data(contentsOf: url) else {
+            // Read off the main thread so large files don't stutter the UI.
+            guard let data = try? await Task.detached(priority: .userInitiated, operation: {
+                try Data(contentsOf: url)
+            }).value else {
                 attachError = "Could not read \(url.lastPathComponent)."
                 continue
             }

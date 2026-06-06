@@ -14,6 +14,7 @@ struct LaunchOverlay: View {
     @State private var endObserver: NSObjectProtocol?
     @State private var failObserver: NSObjectProtocol?
     @State private var appeared = false
+    @State private var isDismissed = false
 
     private var videoURL: URL? {
         Bundle.main.url(forResource: "startup-intro", withExtension: "mp4")
@@ -96,6 +97,10 @@ struct LaunchOverlay: View {
     }
 
     private func dismiss() {
+        // The video-end, failure, tap, Skip, and safety-net paths can all fire;
+        // only the first should tear down and notify.
+        guard !isDismissed else { return }
+        isDismissed = true
         teardown()
         onDismiss()
     }
@@ -123,8 +128,9 @@ final class PlayerNSView: NSView {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        // Configure the existing backing layer rather than replacing it (AppKit
+        // discourages assigning a fresh CALayer after wantsLayer = true).
         wantsLayer = true
-        layer = CALayer()
         layer?.backgroundColor = NSColor.black.cgColor
         playerLayer.frame = bounds
         layer?.addSublayer(playerLayer)
