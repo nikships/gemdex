@@ -254,10 +254,10 @@ final class EditorModel: ObservableObject {
     }
 
     static func mimeType(for url: URL) -> String {
-        if let type = UTType(filenameExtension: url.pathExtension), let mime = type.preferredMIMEType {
-            // Normalize a couple of audio aliases the validator expects.
-            return mime
+        guard let type = UTType(filenameExtension: url.pathExtension),
+              let mime = type.preferredMIMEType else {
+            return "application/octet-stream"
         }
-        return "application/octet-stream"
+        return mime
     }
 }

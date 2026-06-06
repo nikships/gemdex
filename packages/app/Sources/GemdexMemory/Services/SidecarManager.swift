@@ -253,8 +253,7 @@ final class SidecarManager: ObservableObject {
     // MARK: - Environment probes
 
     private func hasServeCmd() async -> Bool {
-        if let cmd = ProcessInfo.processInfo.environment["GEMDEX_SERVE_CMD"] { return !cmd.isEmpty }
-        return false
+        !(ProcessInfo.processInfo.environment["GEMDEX_SERVE_CMD"] ?? "").isEmpty
     }
 
     private var nodeBinaryURL: URL? {

@@ -19,6 +19,7 @@ struct StorageSettingsView: View {
     @State private var saving = false
 
     private var settings: SettingsSummary? { model.settings }
+    private var remotes: [RemoteSummary] { settings?.remotes ?? [] }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -85,12 +86,12 @@ struct StorageSettingsView: View {
             Text("Configured remote").font(.headline)
             HStack {
                 Picker("", selection: $selectedRemote) {
-                    ForEach(settings?.remotes ?? []) { remote in
+                    ForEach(remotes) { remote in
                         Text(remote.hasToken ? remote.name : "\(remote.name) (no token)").tag(remote.name)
                     }
                 }
                 .labelsHidden()
-                .disabled((settings?.remotes ?? []).isEmpty)
+                .disabled(remotes.isEmpty)
                 .onChange(of: selectedRemote) { _ in populateForm() }
             }
 
@@ -102,7 +103,7 @@ struct StorageSettingsView: View {
                 Button("Import local") { Task { await importLocal() } }
                     .disabled(!canUseSelectedRemote || !(settings?.localConfigured ?? false))
                 Button("Remove", role: .destructive) { Task { await removeRemote() } }
-                    .disabled((settings?.remotes ?? []).isEmpty)
+                    .disabled(remotes.isEmpty)
             }
             .controlSize(.small)
 
@@ -129,15 +130,18 @@ struct StorageSettingsView: View {
                 HStack { if saving { ProgressView().controlSize(.small) }; Text("Save remote") }
             }
             .brandPrimary()
-            .disabled(saving || formName.trimmingCharacters(in: .whitespaces).isEmpty || formURL.trimmingCharacters(in: .whitespaces).isEmpty)
+            .disabled(saving || trimmedFormName.isEmpty || trimmedFormURL.isEmpty)
             Text("The token is sent once to the localhost sidecar and stored in ~/.gemdex/.env. It is never returned to this app.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
 
     private var canUseSelectedRemote: Bool {
-        (settings?.remotes ?? []).first { $0.name == selectedRemote }?.hasToken ?? false
+        remotes.first { $0.name == selectedRemote }?.hasToken ?? false
     }
+
+    private var trimmedFormName: String { formName.trimmingCharacters(in: .whitespaces) }
+    private var trimmedFormURL: String { formURL.trimmingCharacters(in: .whitespaces) }
 
     // MARK: - Actions
 
@@ -145,15 +149,20 @@ struct StorageSettingsView: View {
         await model.refreshSettings()
         await model.refreshConfig()
         if selectedRemote.isEmpty {
-            selectedRemote = model.config?.activeRemote?.name ?? settings?.remotes.first?.name ?? ""
+            selectedRemote = model.config?.activeRemote?.name ?? remotes.first?.name ?? ""
         }
         populateForm()
-        status = settings?.mode == "remote" ? "Using \(selectedRemote.isEmpty ? "remote storage" : selectedRemote)." : "Using the embedded local store."
+        if settings?.mode == "remote" {
+            let label = selectedRemote.isEmpty ? "remote storage" : selectedRemote
+            status = "Using \(label)."
+        } else {
+            status = "Using the embedded local store."
+        }
         statusIsError = false
     }
 
     private func populateForm() {
-        guard let remote = (settings?.remotes ?? []).first(where: { $0.name == selectedRemote }) else { return }
+        guard let remote = remotes.first(where: { $0.name == selectedRemote }) else { return }
         formName = remote.name
         formURL = remote.url
         formToken = ""
@@ -174,12 +183,12 @@ struct StorageSettingsView: View {
         saving = true
         defer { saving = false }
         do {
-            try await model.saveRemote(name: formName.trimmingCharacters(in: .whitespaces),
-                                       url: formURL.trimmingCharacters(in: .whitespaces),
+            try await model.saveRemote(name: trimmedFormName,
+                                       url: trimmedFormURL,
                                        token: formToken.isEmpty ? nil : formToken)
             formToken = ""
             await model.refreshSettings()
-            selectedRemote = formName.trimmingCharacters(in: .whitespaces)
+            selectedRemote = trimmedFormName
             status = "Saved \(selectedRemote)."
             statusIsError = false
         } catch {
@@ -226,7 +235,7 @@ struct StorageSettingsView: View {
         do {
             try await model.removeRemote(selectedRemote)
             await model.refreshSettings()
-            selectedRemote = settings?.remotes.first?.name ?? ""
+            selectedRemote = remotes.first?.name ?? ""
             populateForm()
             status = "Removed remote."
             statusIsError = false

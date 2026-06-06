@@ -156,7 +156,7 @@ private struct BrandReveal: View {
                 .frame(width: 132, height: 132)
                 .scaleEffect(show ? 1 : 0.7)
                 .opacity(show ? 1 : 0)
-            (Brand.image("wordmark") ?? nil).map { img in
+            Brand.image("wordmark").map { img in
                 img.resizable().scaledToFit().frame(maxWidth: 320)
                     .opacity(show ? 1 : 0)
             }

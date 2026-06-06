@@ -41,12 +41,7 @@ actor APIClient {
     // MARK: - Core request plumbing
 
     private func makeRequest(_ method: String, _ path: String, body: Data? = nil) -> URLRequest {
-        var req = URLRequest(url: baseURL.appendingPathComponent(path.hasPrefix("/") ? String(path.dropFirst()) : path))
-        req.httpMethod = method
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if !token.isEmpty { req.setValue(token, forHTTPHeaderField: "X-Gemdex-Token") }
-        req.httpBody = body
-        return req
+        request(method, path: path, body: body)
     }
 
     /// Build a request against an exact path (preserving slashes/segments).
@@ -134,8 +129,7 @@ actor APIClient {
 
     @discardableResult
     func updateMemory(_ id: String, content: String, title: String?, attachments: [AttachmentInput]?) async throws -> Memory {
-        var payload: [String: Any] = ["content": content]
-        payload["title"] = title?.isEmpty == false ? title! : NSNull()
+        var payload: [String: Any] = ["content": content, "title": titleValue(title)]
         if let attachments { payload["attachments"] = attachments.map(encodeAttachment) }
         let body = try JSONSerialization.data(withJSONObject: payload)
         let (data, _) = try await send(request("PUT", path: "/memories/\(id)", body: body))
@@ -146,8 +140,7 @@ actor APIClient {
     /// Caption-only edit: PUT content/title (no attachments) then PATCH captions
     /// so existing media isn't re-fetched and re-embedded.
     func updateContentOnly(_ id: String, content: String, title: String?) async throws {
-        var payload: [String: Any] = ["content": content]
-        payload["title"] = title?.isEmpty == false ? title! : NSNull()
+        let payload: [String: Any] = ["content": content, "title": titleValue(title)]
         let body = try JSONSerialization.data(withJSONObject: payload)
         _ = try await send(request("PUT", path: "/memories/\(id)", body: body))
     }
@@ -251,5 +244,11 @@ actor APIClient {
         var item: [String: Any] = ["mimeType": a.mimeType, "data": a.data]
         if let caption = a.caption, !caption.isEmpty { item["caption"] = caption }
         return item
+    }
+
+    /// A non-empty title encodes as a string; an empty/nil title clears it.
+    private func titleValue(_ title: String?) -> Any {
+        guard let title, !title.isEmpty else { return NSNull() }
+        return title
     }
 }

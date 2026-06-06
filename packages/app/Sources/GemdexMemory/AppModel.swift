@@ -50,11 +50,11 @@ final class AppModel: ObservableObject {
     }
 
     var visibleMemories: [MemorySummary] {
-        let f = filterText.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !f.isEmpty else { return memories }
+        let query = filterText.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !query.isEmpty else { return memories }
         // Match displayTitle so empty-title memories ("Untitled memory") filter
         // consistently with how they render.
-        return memories.filter { $0.displayTitle.lowercased().contains(f) }
+        return memories.filter { $0.displayTitle.lowercased().contains(query) }
     }
 
     init() {
@@ -136,7 +136,7 @@ final class AppModel: ObservableObject {
             let list = try await api.listMemories()
             self.memories = list
             screen = .ready
-            setStatus("\(list.count) \(list.count == 1 ? "memory" : "memories")")
+            setStatus(Self.countLabel(list.count))
         } catch let err as APIError {
             if config?.mode == "remote" {
                 screen = .remoteUnavailable(detail: err.message)
@@ -153,7 +153,7 @@ final class AppModel: ObservableObject {
         guard let api else { return }
         if let list = try? await api.listMemories() {
             self.memories = list
-            setStatus("\(list.count) \(list.count == 1 ? "memory" : "memories")")
+            setStatus(Self.countLabel(list.count))
         }
     }
 
@@ -332,5 +332,9 @@ final class AppModel: ObservableObject {
     func setStatus(_ text: String, isError: Bool = false) {
         statusText = text
         statusIsError = isError
+    }
+
+    private static func countLabel(_ count: Int) -> String {
+        "\(count) \(count == 1 ? "memory" : "memories")"
     }
 }

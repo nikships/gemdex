@@ -24,14 +24,14 @@ struct RootView: View {
     /// associated-value tweak.
     private var screenKey: String {
         switch model.screen {
-        case .launching: return "launching"
-        case .setup: return "setup"
-        case .ready: return "ready"
-        case .needsNode: return "needsNode"
-        case .needsBootstrap: return "needsBootstrap"
-        case .installing: return "installing"
-        case .sidecarFailed: return "sidecarFailed"
-        case .remoteUnavailable: return "remoteUnavailable"
+        case .launching: "launching"
+        case .setup: "setup"
+        case .ready: "ready"
+        case .needsNode: "needsNode"
+        case .needsBootstrap: "needsBootstrap"
+        case .installing: "installing"
+        case .sidecarFailed: "sidecarFailed"
+        case .remoteUnavailable: "remoteUnavailable"
         }
     }
 
