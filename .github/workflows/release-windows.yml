@@ -50,7 +50,7 @@ jobs:
         id: zn
         shell: pwsh
         run: |
-          $path = (npm root -g).Trim()
+          $path = Join-Path (npm root -g).Trim() "zero-native"
           "path=$path" >> $env:GITHUB_OUTPUT
 
       - name: Read app version from manifest
