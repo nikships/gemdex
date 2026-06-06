@@ -27,7 +27,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '../../..');
 const fixturePath = path.join(
     repoRoot,
-    'packages/app/frontend/public/brand/logo-mark-256.png',
+    'packages/app/assets/brand/logo-mark-256.png',
 );
 
 if (!DATABASE_URL) {

@@ -10,7 +10,7 @@ import { resolveAttachmentInputs } from "./attachment-path.js";
 const here = path.dirname(fileURLToPath(import.meta.url));
 // A real PNG (tiny placeholders are rejected by Gemini, but for fs resolution
 // any real file works); reused as the canonical on-disk attachment fixture.
-const REAL_IMAGE = path.resolve(here, "../../app/frontend/public/brand/logo-mark-256.png");
+const REAL_IMAGE = path.resolve(here, "../../app/assets/brand/logo-mark-256.png");
 
 test("reads a path-backed attachment into base64 with mimeType inferred from the extension", async () => {
     const [a] = await resolveAttachmentInputs([{ path: REAL_IMAGE, caption: "logo" }]);

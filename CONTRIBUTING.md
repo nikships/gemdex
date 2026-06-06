@@ -70,8 +70,8 @@ The monorepo is small — find the right layer before you change anything:
   around `MemoryStore` for store access.
 - `packages/mcp` (`gemdex-mcp`) — the MCP stdio server (the three tools) plus
   `serve.ts`, the localhost HTTP sidecar that backs the desktop app.
-- `packages/app` — the zero-native desktop manager (Zig shell + web frontend).
-  No memory logic lives in Zig.
+- `packages/app` — the native SwiftUI macOS desktop manager (Apple Silicon).
+  No memory logic lives in the app.
 - `plugin/` — the Claude Code plugin (the `memory` skill + manifest).
 
 When adding behaviour, add a unit test next to the code it covers.

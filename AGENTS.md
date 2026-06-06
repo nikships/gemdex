@@ -11,10 +11,11 @@ LanceDB hybrid (dense + BM25) store.
   parent-document chunker). No file-indexing.
 - `packages/mcp` (`gemdex-mcp`) — MCP stdio server exposing the 3 tools, plus
   `serve.ts`, the localhost HTTP sidecar (`gemdex serve`) for the desktop app.
-- `packages/app` — zero-native desktop manager (Zig shell + web frontend).
-  Browse/create/edit/delete/export/import. The Zig shell spawns/kills the Node
-  sidecar; **no memory logic lives in Zig**. macOS builds ship Sparkle
-  auto-updates (`src/sparkle_host.m`, vendored `third_party/sparkle`,
+- `packages/app` — native **SwiftUI** macOS desktop manager (Apple Silicon).
+  Browse/create/edit/delete/export/import. The Swift app spawns/kills the Node
+  sidecar (`Services/SidecarManager.swift`); **no memory logic lives in the
+  app**. Release builds bundle their own Node runtime + sidecar (zero user
+  install) and ship Sparkle auto-updates (vendored `third_party/sparkle`,
   `macos/embed-sparkle.sh`) — see `packages/app/README.md`.
 - `plugin/` — Claude Code plugin (the `memory` skill + manifest).
 
@@ -56,20 +57,15 @@ pnpm -r --if-present test   # 82 tests: 62 core (jest) + 20 mcp (node:test): ser
 ```
 
 Always run typecheck + lint + tests before committing. The MCP entry point
-builds to `packages/mcp/dist/index.js`. Note `eslint` only covers `**/*.ts` —
-the desktop frontend (`packages/app/frontend`, plain JS) is **not** linted, so
-keep it clean by hand and match the file's existing 2-space style.
+builds to `packages/mcp/dist/index.js`. Note `eslint` only covers `**/*.ts`.
 
 ### Desktop app (`packages/app`)
 
-Needs **Zig 0.16** and the `zero-native` CLI/framework. You don't know
-zero-native from general knowledge — load its skill first:
-`npx zero-native skills get core --full` (and `automation` for smoke tests).
-See `packages/app/README.md` for the shell↔sidecar handshake and CSP policy.
-
-The frontend is a standalone Vite app (npm, **not** in the pnpm workspace).
-Validate it without Zig via
-`npm --prefix packages/app/frontend install && npm --prefix packages/app/frontend run build`.
+Native **SwiftUI** app for macOS (Apple Silicon), built with SwiftPM — no
+Xcode/`xcodebuild` required. `swift build -c release --arch arm64` compiles the
+binary; `macos/build-app.sh` assembles the `.app` bundle (add `--with-sidecar`
+to bundle the Node runtime + sidecar). It is **not** in the pnpm workspace.
+See `packages/app/README.md` for the app↔sidecar handshake and signing flow.
 
 ### Live smoke-testing the sidecar / multimodal paths
 
@@ -89,7 +85,7 @@ gotchas so you don't repeat them:
   `~/.gemdex/blobs`), plus a real `new GeminiEmbedding({ apiKey, model: 'gemini-embedding-2' })`.
 - **Use a real image.** Gemini rejects tiny 1×1 placeholder PNGs with
   `"Provided image is not valid"`. Use an actual file (e.g.
-  `packages/app/frontend/public/brand/logo-mark-256.png`).
+  `packages/app/assets/brand/logo-mark-256.png`).
 - Needs `GEMINI_API_KEY` in the env. Clean up temp dirs and `rm` the throwaway
   script when done.
 

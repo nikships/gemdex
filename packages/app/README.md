@@ -1,16 +1,16 @@
 # Gemdex Memory — desktop app
 
 A native, **manage-only** desktop app for the [Gemdex](https://github.com/anand-92/gemdex)
-memory layer, built on [zero-native](https://www.npmjs.com/package/zero-native)
-(a Zig desktop shell + web UI). It opens straight into your memory layer to
-browse, create, edit, delete, export, and import memories.
+memory layer, built in **SwiftUI** for macOS (Apple Silicon). It opens straight
+into your memory layer to browse, create, edit, delete, export, and import
+memories.
 
 The Storage settings panel can switch the sidecar between the embedded local
 backend and a named BYOI Gemdex Server. Remote bearer tokens are accepted by
 the UI only for the configuration request, persisted by the sidecar under
-`~/.gemdex/.env`, and never returned to frontend JavaScript. The same panel can
-test remote health/authentication and import local memories to the remote while
-preserving ids.
+`~/.gemdex/.env`, and never returned to the app. The same panel can test remote
+health/authentication and import local memories to the remote while preserving
+ids.
 
 There is **no free-text search box** — recall is an agent/MCP capability. This
 app is a fast local manager. (It does offer recall-*by-example*: a "Find
@@ -21,92 +21,85 @@ similar" action on any attachment, which runs media recall against the sidecar.)
 Memories can carry inline media (image / audio / video / PDF). In the editor you
 can drag-and-drop or pick files, give each a caption (which backs the BM25
 keyword branch on recall), and remove them. The detail view renders images, an
-audio player, a video player, and native inline PDF preview. Bytes are streamed
-from the sidecar's `GET /memories/:id/attachments/:attachmentId` route; "Find
-similar" posts the attachment to `POST /recall` for recall-by-media. Loading
-local media into the WebView requires the relaxed `img-src` / `media-src` /
-`frame-src` / `object-src` directives in `frontend/index.html`'s CSP (they allow
-`http://127.0.0.1:*` and `blob:`); keep that policy as tight as these features
-allow.
+audio player (AVKit), a video player (AVKit), and native inline PDF preview
+(PDFKit). Bytes are streamed from the sidecar's
+`GET /memories/:id/attachments/:attachmentId` route; "Find similar" posts the
+attachment to `POST /recall` for recall-by-media.
 
-Remote mode still talks only to the localhost sidecar. The frontend must never
-connect directly to a configured Gemdex Server, and the CSP must not be broadened
-to arbitrary remote origins for `connect-src`, media, frames, or objects. The
-sidecar owns outbound remote traffic because it can attach the stored bearer
-token without exposing it to frontend JavaScript; the WebView receives only the
-per-launch localhost base URL and request token. If a remote feature needs new
-network access, add a localhost sidecar route instead of widening the CSP.
+Remote mode still talks only to the localhost sidecar. The app must never
+connect directly to a configured Gemdex Server — the sidecar owns outbound
+remote traffic because it can attach the stored bearer token without ever
+exposing it to the app. The app receives only the per-launch localhost base URL
+and request token via the sidecar handshake.
 
 ## Architecture
 
-- **Zig shell** (`src/main.zig`): opens the window, applies the CSP /
-  navigation policy, brings up the Node sidecar (`gemdex serve`), discovers the
-  localhost port it bound (via the `PORT=<n>` handshake line), hands that base
-  URL to the WebView through the `gemdex.getApiBase` bridge command, and kills
-  the sidecar on exit. It owns the full sidecar lifecycle (install / start /
-  check) and exposes it to the WebView, but holds **no memory logic in Zig.**
-
-### First-launch bootstrap (no silent installs)
-
-Launch never installs over the network. `start()` decides a phase and the
-WebView drives onboarding from it (polling `gemdex.getStatus`):
-
-- **dev** — `GEMDEX_SERVE_CMD` set → run that Node entry directly.
-- **probe** — otherwise, if `node` + `npx` resolve on the login-shell PATH, try
-  `npx --offline gemdex-mcp serve` (cache-only, zero network). Handshake OK ⇒
-  `ready`; cache miss ⇒ `needs_bootstrap`.
-- **needs_node** — no `node`/`npx` on PATH; the UI shows a specific, actionable
-  error (install Node 20+, then retry). We can't install this for the user.
-
-Installing the sidecar package is reserved for an explicit, UI-approved action.
-`gemdex.bootstrap {install:true}` runs `npx -y gemdex-mcp serve` (the one
-permitted network install) on a **background thread** so the UI thread never
-blocks; the WebView shows a spinner and polls until `ready` or `error`. On
-success the shell drops a non-secret marker at `~/.gemdex/desktop.json`
-(`{"sidecarBootstrappedAt":…,"method":"npx"}`) — runtime state only, never the
-memory store. The three bridge commands (`gemdex.getApiBase`,
-`gemdex.getStatus`, `gemdex.bootstrap`) are gated to the packaged/dev origins.
-
-Bridge phases: `starting → ready | needs_node | needs_bootstrap`, with
-`needs_bootstrap → installing → ready | error` after the user approves.
-
-> **Auto-update tradeoff:** because launch now probes `--offline` instead of
-> `npx -y`, the sidecar package is no longer silently re-fetched on every
-> launch. A user-approved bootstrap uses `npx -y`, which installs/updates to the
-> latest published `gemdex-mcp`. The `.app` itself still auto-updates via
-> Sparkle.
+- **SwiftUI app** (`Sources/GemdexMemory/`): a native AppKit/SwiftUI window. It
+  brings up the Node sidecar (`gemdex serve`), parses the
+  `PORT=<n> TOKEN=<hex>` handshake line it prints to stdout, talks to it over
+  localhost HTTP/JSON (`Services/APIClient.swift`), and tears it down on exit
+  (`Services/SidecarManager.swift`). It owns the full sidecar lifecycle
+  (probe / start / bundled-launch) but holds **no memory logic** — that lives in
+  `gemdex-core`/`gemdex-mcp`.
 - **Node sidecar** (`gemdex serve`, from the `gemdex-mcp` package): wraps
   `gemdex-core` + LanceDB and exposes a localhost HTTP/JSON manager API. Shares
   the same `~/.gemdex` store the MCP server uses, so memories saved by the agent
-  show up here and vice-versa.
-- **Web UI** (`frontend/`): plain Vite app that talks to the sidecar with
-  `fetch`. Using localhost HTTP (not the Zig bridge) sidesteps the bridge's
-  16 KiB cap, so a 300-line memory is never truncated.
+  show up here and vice-versa. Every request carries the per-launch
+  `X-Gemdex-Token`; the server binds `127.0.0.1` only.
 
-The user never runs a sidecar command — the app spawns it automatically.
+### Sidecar launch (no silent installs)
+
+`SidecarManager.start()` picks a launch mode and the UI drives onboarding from
+the published `phase`:
+
+- **dev** — `GEMDEX_SERVE_CMD` set → run that Node entry directly.
+- **bundled** — a release `.app` ships its own Node runtime + sidecar under
+  `Contents/Resources/{node,sidecar}` (see *Zero-dependency packaging*). Launch
+  prefers this and needs **no** user-installed Node.
+- **probe** — otherwise, if `node` + `npx` resolve on the login-shell PATH, try
+  `npx --offline gemdex-mcp serve` (cache-only, zero network). Handshake OK ⇒
+  `ready`; cache miss ⇒ `needsBootstrap`.
+- **needsNode** — no bundled runtime and no `node`/`npx` on PATH; the recovery
+  screen shows an actionable error.
+
+A user-approved bootstrap (`bootstrap(install:true)`) runs `npx -y gemdex-mcp
+serve` (the one permitted network install) on a background thread and drops a
+non-secret marker at `~/.gemdex/desktop.json`. Bundled release builds never need
+this path.
+
+## Zero-dependency packaging
+
+A release `.app` is fully self-contained — a user on any Apple-Silicon Mac can
+download the DMG and run the app with **zero** manual dependency installation:
+
+- `macos/build-app.sh --with-sidecar` compiles the Swift binary, assembles the
+  `.app`, and calls `macos/stage-sidecar.sh`, which downloads the official Node
+  arm64 runtime and installs the packed `gemdex-core` + `gemdex-mcp` (prod deps
+  only, including LanceDB's native arm64 binding) under
+  `Contents/Resources/{node,sidecar}`.
+- `macos/sign-app.sh` deep-signs every nested Mach-O: the bundled `*.node` /
+  `*.dylib` (hardened runtime), the Node binary (hardened runtime **plus** the
+  `allow-jit` / `allow-unsigned-executable-memory` entitlements V8 needs), then
+  the outer app.
 
 ## Auto-updates (Sparkle)
 
 The packaged macOS app ships with [Sparkle](https://sparkle-project.org) for
-in-place auto-updates of the native shell + frontend. Sparkle only updates the
-`.app` itself; the Node sidecar is installed/updated via a UI-approved
-`npx -y gemdex-mcp` bootstrap (see *First-launch bootstrap* above), not silently
-on every launch.
+in-place auto-updates of the `.app`. Sparkle only updates the app bundle; the
+bundled sidecar is updated by shipping a new DMG.
 
-- **Init:** `src/sparkle_host.m` exposes `gemdex_sparkle_start()`, called from
-  `main.zig`'s `start()` (on the main thread, Sparkle's required init point).
-  It lazily creates and retains an `SPUStandardUpdaterController`; config comes
-  entirely from Info.plist.
+- **Init:** `Services/UpdaterController.swift` wraps Sparkle's
+  `SPUStandardUpdaterController`, compiled only when `GEMDEX_SPARKLE=1`
+  (`#if SPARKLE_ENABLED`). Local/dev/screenshot builds omit Sparkle entirely so
+  no framework is required.
 - **Framework:** vendored under `third_party/sparkle/` (gitignored; pinned to
-  2.9.2, fetched in CI). `build.zig` compiles `sparkle_host.m`, links
-  `Sparkle.framework`, and adds two rpaths: `@executable_path/../Frameworks`
-  (packaged) and the source tree (so `zig build run` finds it).
-- **Packaging:** `macos/embed-sparkle.sh` runs after `zig build package` and
-  before the outer `codesign --deep`. It copies the framework into
-  `Contents/Frameworks/`, injects `SUFeedURL` / `SUPublicEDKey` /
-  `SUEnableAutomaticChecks` / `SUScheduledCheckInterval` into Info.plist, and
-  codesigns Sparkle inside-out (XPC services + `Updater.app` + `Autoupdate`
-  first, then the framework).
+  2.9.2, fetched in CI). `Package.swift` links `Sparkle.framework` and adds the
+  `@executable_path/../Frameworks` rpath when `GEMDEX_SPARKLE=1`.
+- **Packaging:** `macos/embed-sparkle.sh` runs after `build-app.sh` and before
+  the outer sign. It copies the framework into `Contents/Frameworks/`, injects
+  `SUFeedURL` / `SUPublicEDKey` / `SUEnableAutomaticChecks` /
+  `SUScheduledCheckInterval` into Info.plist, and codesigns Sparkle inside-out
+  (XPC services + `Updater.app` + `Autoupdate` first, then the framework).
 - **Feed:** the release workflow generates a `sign_update`-signed `appcast.xml`
   and publishes it alongside the DMG, so `SUFeedURL`
   (`…/releases/latest/download/appcast.xml`) always points at the newest build.
@@ -114,43 +107,47 @@ on every launch.
   private key is the `SPARKLE_PRIVATE_KEY` GitHub Actions secret. Re-key with
   `third_party/sparkle/bin/generate_keys` and update both.
 
-## Requirements
+## Requirements (development)
 
-- **Zig 0.16** (the zero-native template targets 0.16 APIs).
-- The **zero-native** framework. The build resolves it from
-  `-Dzero-native-path=/path/to/zero-native`, then `packages/app/node_modules`,
-  then the global npm root (`npm install -g zero-native`).
+- A **Swift 5.9+** toolchain (Xcode or CommandLineTools). The build uses
+  SwiftPM (`swift build`) and a shell script to assemble the bundle, so a full
+  Xcode/`xcodebuild` install is not required.
 - A system Node (for `npx -y gemdex serve`), or set `GEMDEX_SERVE_CMD` to a
   local `gemdex-mcp` entry script for development.
-- `GEMINI_API_KEY` in the environment (the sidecar embeds on create/edit).
+- `GEMINI_API_KEY` in the environment (the sidecar embeds on create/edit), or
+  enter it in the in-app setup screen.
 
 ## Commands
 
 ```sh
-zig build run                 # build frontend + native shell, open the window
-zig build dev                 # frontend dev server + native shell (HMR)
-zig build test -Dplatform=null
-zig build package             # self-contained app bundle
-zero-native doctor --manifest app.zon --strict
+# Build the .app bundle (no Sparkle, no bundled sidecar — fast dev loop):
+bash macos/build-app.sh
+
+# Build a self-contained release bundle (bundled Node + sidecar):
+bash macos/build-app.sh --with-sidecar
+
+# Build with Sparkle linked (requires third_party/sparkle):
+GEMDEX_SPARKLE=1 bash macos/build-app.sh --with-sidecar
+
+# Compile only (no bundle):
+swift build -c release --arch arm64
 ```
 
 ## Dev against a local build
 
-Point the shell at your local `gemdex-mcp` build so you don't need the published
-package:
+Point the app at your local `gemdex-mcp` build so you don't need the published
+package or a bundled sidecar:
 
 ```sh
 GEMDEX_SERVE_CMD=/abs/path/to/gemdex/packages/mcp/dist/index.js \
 GEMINI_API_KEY=your-key \
-zig build run
+"build/Gemdex Memory.app/Contents/MacOS/GemdexMemory"
 ```
 
-## Packaging note
+## Release
 
-Per the design, a release build should bundle the Node serve runtime (and the
-per-platform LanceDB native binding) so the installed app launches with zero
-user steps. Until that bundling lands, an installed app with a system Node onboards
-through the UI: launch probes `npx --offline gemdex-mcp serve` (no network), and
-if the package isn't cached yet the user approves a one-time
-`npx -y gemdex-mcp serve` install from the bootstrap panel (see *First-launch
-bootstrap* above).
+`.github/workflows/release-macos.yml` runs on every push to `main` (and via
+manual dispatch). It builds the bundled `.app`, embeds + signs Sparkle,
+deep-signs the bundle, notarizes + staples, builds + notarizes the DMG,
+generates a signed `appcast.xml`, and publishes both to a rolling
+`desktop-latest` release marked as `latest`.
