@@ -81,7 +81,10 @@ cp "$MCP_MODULE/package.json" "$SIDECAR_DIR/package.json"
 
 # 4) Trim the bundled npm again now that install is done — the app never needs
 #    it at runtime. Keep node_modules (the deps) but drop the npm CLI to shrink.
+#    The npm/npx/corepack symlinks in bin/ point into the now-deleted lib/ —
+#    remove them too, or codesign --verify fails on the dangling symlinks.
 rm -rf "$NODE_DIR/lib"
+rm -f "$NODE_DIR/bin/npm" "$NODE_DIR/bin/npx" "$NODE_DIR/bin/corepack"
 
 # 5) Prune obvious dev cruft to keep the DMG small.
 find "$SIDECAR_DIR" -type d \( -name test -o -name tests -o -name __tests__ -o -name docs -o -name doc -o -name example -o -name examples \) -prune -exec rm -rf {} + 2>/dev/null || true
