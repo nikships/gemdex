@@ -18,14 +18,14 @@ struct MainView: View {
         .navigationTitle("Gemdex Memory")
         .navigationSubtitle(model.statusText)
         .toolbar { toolbarContent }
-        .sheet(isPresented: $model.showSettings) {
-            StorageSettingsView().environmentObject(model)
-        }
     }
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         backendBadgeItem
+        ToolbarItem {
+            Spacer()
+        }
         ToolbarItemGroup(placement: .primaryAction) {
             Button { model.showSettings = true } label: {
                 Label("Storage", systemImage: "externaldrive")

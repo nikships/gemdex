@@ -6,6 +6,7 @@ import SwiftUI
 struct StorageSettingsView: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.dismiss) private var dismiss
+    var isEmbedded: Bool = false
 
     @State private var selectedRemote: String = ""
     @State private var status: String = ""
@@ -37,8 +38,9 @@ struct StorageSettingsView: View {
                 .padding(20)
             }
         }
-        .frame(width: 560, height: 600)
-        .background(BrandBackdrop())
+        .frame(width: isEmbedded ? nil : 560, height: isEmbedded ? nil : 600)
+        .frame(maxWidth: isEmbedded ? 600 : .infinity)
+        .background(isEmbedded ? nil : BrandBackdrop())
         .task { await refresh() }
     }
 
@@ -52,7 +54,13 @@ struct StorageSettingsView: View {
                     .font(.callout).foregroundStyle(.secondary)
             }
             Spacer()
-            Button { dismiss() } label: {
+            Button {
+                if isEmbedded {
+                    model.showSettings = false
+                } else {
+                    dismiss()
+                }
+            } label: {
                 Image(systemName: "xmark")
                     .font(.callout.weight(.semibold))
                     .foregroundStyle(.secondary)

@@ -9,7 +9,10 @@ struct DetailPane: View {
         ZStack {
             BrandBackdrop()
 
-            if model.isEditorOpen {
+            if model.showSettings {
+                StorageSettingsView(isEmbedded: true)
+                    .transition(.opacity.combined(with: .move(edge: .trailing)))
+            } else if model.isEditorOpen {
                 EditorView()
                     .transition(.opacity.combined(with: .move(edge: .trailing)))
             } else {
@@ -18,7 +21,7 @@ struct DetailPane: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: model.isEditorOpen)
+        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: model.showSettings || model.isEditorOpen)
     }
 
     private var placeholder: some View {

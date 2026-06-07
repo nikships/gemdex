@@ -89,6 +89,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func configureWindow(_ window: NSWindow) {
         guard window.styleMask.contains(.titled) else { return }
+        guard !(window is NSPanel) else { return }
         
         if !window.styleMask.contains(.fullSizeContentView) || !window.titlebarAppearsTransparent || window.titlebarSeparatorStyle != .none {
             window.titlebarAppearsTransparent = true
