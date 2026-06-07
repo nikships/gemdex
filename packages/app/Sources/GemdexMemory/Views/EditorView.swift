@@ -86,12 +86,81 @@ struct ContentTextEditor: View {
     @Binding var text: String
 
     var body: some View {
-        TextField("Memory content. A one-line fact or a 300-line playbook — anything.", text: $text, axis: .vertical)
-            .font(.system(.body, design: .default))
-            .lineSpacing(2)
-            .textFieldStyle(.plain)
-            .padding(14)
-            .frame(maxWidth: .infinity, minHeight: 240, alignment: .topLeading)
-            .glassSurface(cornerRadius: Metric.radiusCard)
+        ZStack(alignment: .topLeading) {
+            AutoExpandingTextViewRepresentable(text: $text)
+                .frame(maxWidth: .infinity)
+            
+            if text.isEmpty {
+                Text("Memory content. A one-line fact or a 300-line playbook — anything.")
+                    .font(.system(.body, design: .default))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 8)
+                    .allowsHitTesting(false)
+            }
+        }
+        .padding(14)
+        .glassSurface(cornerRadius: Metric.radiusCard)
+    }
+}
+
+/// Bridge AppKit NSTextView to SwiftUI for high-performance auto-expanding text input.
+struct AutoExpandingTextViewRepresentable: NSViewRepresentable {
+    @Binding var text: String
+
+    func makeNSView(context: Context) -> AutoGrowingTextView {
+        let textView = AutoGrowingTextView()
+        textView.isEditable = true
+        textView.isSelectable = true
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: 100, height: CGFloat.greatestFiniteMagnitude)
+        textView.drawsBackground = false
+        textView.backgroundColor = .clear
+        textView.font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        textView.focusRingType = .none
+        textView.delegate = context.coordinator
+        return textView
+    }
+
+    func updateNSView(_ nsView: AutoGrowingTextView, context: Context) {
+        if nsView.string != text {
+            nsView.string = text
+            nsView.invalidateIntrinsicContentSize()
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: AutoExpandingTextViewRepresentable
+        init(_ parent: AutoExpandingTextViewRepresentable) {
+            self.parent = parent
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            parent.text = textView.string
+        }
+    }
+}
+
+class AutoGrowingTextView: NSTextView {
+    override var intrinsicContentSize: NSSize {
+        guard let layoutManager = textContainer?.layoutManager,
+              let textContainer = textContainer else {
+            return super.intrinsicContentSize
+        }
+        layoutManager.ensureLayout(for: textContainer)
+        let size = layoutManager.usedRect(for: textContainer).size
+        return NSSize(width: NSView.noIntrinsicMetric, height: max(size.height, 220))
+    }
+
+    override func didChangeText() {
+        super.didChangeText()
+        self.invalidateIntrinsicContentSize()
     }
 }
