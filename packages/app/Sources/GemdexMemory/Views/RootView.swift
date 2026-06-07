@@ -9,8 +9,14 @@ struct RootView: View {
 
     var body: some View {
         ZStack {
-            content
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // Content is only mounted after the intro dismisses. The toolbar
+            // lives in the window chrome layer (above any ZStack/zIndex), so
+            // hiding content is the only way to prevent it bleeding through
+            // the intro overlay.
+            if !showIntro {
+                content
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
 
             if showIntro {
                 LaunchOverlay { withAnimation(.easeInOut(duration: 0.4)) { showIntro = false } }

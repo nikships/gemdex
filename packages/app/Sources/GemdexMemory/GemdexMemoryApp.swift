@@ -15,8 +15,8 @@ struct GemdexMemoryApp: App {
                 .onAppear { model.start() }
         }
         .defaultSize(width: 1080, height: 720)
-        .windowStyle(.titleBar)
-        .windowToolbarStyle(.unified(showsTitle: true))
+        .windowStyle(.hiddenTitleBar)
+        .windowToolbarStyle(.unified(showsTitle: false))
         .commands {
             CommandGroup(after: .newItem) {
                 Button("New Memory") { model.openNew() }
@@ -56,6 +56,52 @@ struct GemdexMemoryApp: App {
 /// `NSApplication.willTerminate` (see `SidecarManager`), so quitting the last
 /// window quits the app and stops the child process.
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    override init() {
+        super.init()
+        
+        let center = NotificationCenter.default
+        center.addObserver(
+            forName: NSWindow.didBecomeKeyNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            if let window = notification.object as? NSWindow {
+                self?.configureWindow(window)
+            }
+        }
+
+        center.addObserver(
+            forName: NSWindow.didUpdateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            if let window = notification.object as? NSWindow {
+                self?.configureWindow(window)
+            }
+        }
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        for window in NSApp.windows {
+            configureWindow(window)
+        }
+    }
+
+    private func configureWindow(_ window: NSWindow) {
+        guard window.styleMask.contains(.titled) else { return }
+        
+        if !window.styleMask.contains(.fullSizeContentView) || !window.titlebarAppearsTransparent || window.titlebarSeparatorStyle != .none {
+            window.titlebarAppearsTransparent = true
+            window.titleVisibility = .hidden
+            window.styleMask.insert(.fullSizeContentView)
+            window.titlebarSeparatorStyle = .none
+            window.isMovableByWindowBackground = true
+            window.backgroundColor = .clear
+            window.isOpaque = false
+            window.hasShadow = true
+        }
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
     }
