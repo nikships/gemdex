@@ -18,7 +18,6 @@ struct EditorView: View {
                         .font(.title.weight(.bold))
 
                     ContentTextEditor(text: contentBinding)
-                        .frame(minHeight: 240)
 
                     AttachmentsSection()
                 }
@@ -82,25 +81,17 @@ struct EditorView: View {
     }
 }
 
-/// A monospace-friendly multiline text editor for memory content.
+/// A monospace-friendly multiline text editor for memory content that expands to fit text.
 struct ContentTextEditor: View {
     @Binding var text: String
 
     var body: some View {
-        TextEditor(text: $text)
+        TextField("Memory content. A one-line fact or a 300-line playbook — anything.", text: $text, axis: .vertical)
             .font(.system(.body, design: .default))
             .lineSpacing(2)
-            .scrollContentBackground(.hidden)
+            .textFieldStyle(.plain)
             .padding(14)
+            .frame(maxWidth: .infinity, minHeight: 240, alignment: .topLeading)
             .glassSurface(cornerRadius: Metric.radiusCard)
-            .overlay(alignment: .topLeading) {
-                if text.isEmpty {
-                    Text("Memory content. A one-line fact or a 300-line playbook — anything.")
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 19)
-                        .padding(.vertical, 22)
-                        .allowsHitTesting(false)
-                }
-            }
     }
 }
