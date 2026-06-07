@@ -7,16 +7,22 @@ struct DetailPane: View {
 
     var body: some View {
         ZStack {
-            BrandBackdrop()
-
             if model.showSettings {
                 StorageSettingsView(isEmbedded: true)
                     .transition(.opacity.combined(with: .move(edge: .trailing)))
             } else if model.isEditorOpen {
-                EditorView()
+                EditorView(editor: model.editor)
                     .transition(.opacity.combined(with: .move(edge: .trailing)))
             } else {
                 placeholder
+                    .transition(.opacity)
+            }
+
+            if model.isMemoryLoading {
+                ProgressView()
+                    .controlSize(.large)
+                    .padding(22)
+                    .glassSurface(cornerRadius: Metric.radiusPanel)
                     .transition(.opacity)
             }
         }

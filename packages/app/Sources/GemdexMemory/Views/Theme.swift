@@ -185,16 +185,13 @@ struct BrandBackdrop: View {
                 ZStack {
                     blob(Brand.gold, opacity: scheme == .dark ? 0.30 : 0.22, radius: w * 0.45)
                         .frame(width: w * 0.9, height: w * 0.9)
-                        .offset(x: drift ? -w * 0.22 : -w * 0.30,
-                                y: drift ? -h * 0.28 : -h * 0.20)
+                        .offset(x: -w * 0.26, y: -h * 0.24)
                     blob(Brand.terracotta, opacity: scheme == .dark ? 0.26 : 0.18, radius: w * 0.4)
                         .frame(width: w * 0.8, height: w * 0.8)
-                        .offset(x: drift ? w * 0.32 : w * 0.24,
-                                y: drift ? h * 0.10 : h * 0.22)
+                        .offset(x: w * 0.28, y: h * 0.16)
                     blob(Brand.sage, opacity: scheme == .dark ? 0.22 : 0.14, radius: w * 0.35)
                         .frame(width: w * 0.7, height: w * 0.7)
-                        .offset(x: drift ? w * 0.05 : -w * 0.02,
-                                y: drift ? h * 0.40 : h * 0.34)
+                        .offset(x: w * 0.02, y: h * 0.37)
                 }
                 // A ZStack sizes to its largest child (the 0.9·w blob), so
                 // without this it collapses to a top-leading square and
@@ -204,6 +201,11 @@ struct BrandBackdrop: View {
                 .frame(width: w, height: h)
                 .blur(radius: 80)
                 .drawingGroup()
+                // Animate the already-rasterized layer. Moving individual blobs
+                // would re-run the full-window blur throughout the animation.
+                .scaleEffect(drift ? 1.035 : 1.0)
+                .offset(x: drift ? w * 0.012 : -w * 0.012,
+                        y: drift ? -h * 0.012 : h * 0.012)
             }
             .ignoresSafeArea()
         }

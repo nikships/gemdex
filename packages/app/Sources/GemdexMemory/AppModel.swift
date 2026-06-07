@@ -41,6 +41,7 @@ final class AppModel: ObservableObject {
     @Published var settings: SettingsSummary?
 
     @Published var isEditorOpen = false
+    @Published var isMemoryLoading = false
     @Published var showSettings = false
 
     /// Semantic free-text search state (`.idle` = local title filter).
@@ -50,6 +51,8 @@ final class AppModel: ObservableObject {
     let sidecar = SidecarManager()
     private(set) var api: APIClient?
     private var cancellables = Set<AnyCancellable>()
+    private var memoryLoadTask: Task<Void, Never>?
+    private var memoryLoadID: UUID?
 
     var visibleMemories: [MemorySummary] {
         let query = filterText.trimmingCharacters(in: .whitespaces).lowercased()
@@ -169,6 +172,10 @@ final class AppModel: ObservableObject {
     // MARK: - Memory actions
 
     func openNew() {
+        memoryLoadTask?.cancel()
+        memoryLoadTask = nil
+        memoryLoadID = nil
+        isMemoryLoading = false
         selectedID = nil
         editor.startNew()
         isEditorOpen = true
@@ -176,20 +183,44 @@ final class AppModel: ObservableObject {
 
     func openMemory(_ id: String) async {
         guard let api else { return }
-        do {
-            let memory = try await api.getMemory(id)
-            selectedID = memory.id
-            editor.load(memory)
-            isEditorOpen = true
-        } catch {
-            setStatus("Error: \(error.localizedDescription)", isError: true)
+        memoryLoadTask?.cancel()
+
+        let loadID = UUID()
+        memoryLoadID = loadID
+        selectedID = id
+        showSettings = false
+        isEditorOpen = true
+        isMemoryLoading = true
+
+        let task = Task { [weak self] in
+            do {
+                let memory = try await api.getMemory(id)
+                try Task.checkCancellation()
+                guard let self, self.memoryLoadID == loadID, self.selectedID == id else { return }
+                self.editor.load(memory)
+            } catch is CancellationError {
+                // A newer selection owns the editor now.
+            } catch {
+                guard let self, self.memoryLoadID == loadID else { return }
+                self.setStatus("Error: \(error.localizedDescription)", isError: true)
+            }
+
+            guard let self, self.memoryLoadID == loadID else { return }
+            self.isMemoryLoading = false
+            self.memoryLoadTask = nil
         }
+        memoryLoadTask = task
+        await task.value
     }
 
     func deleteSelected() async {
         guard let api, let id = selectedID else { return }
+        memoryLoadTask?.cancel()
         do {
             try await api.deleteMemory(id)
+            memoryLoadTask = nil
+            memoryLoadID = nil
+            isMemoryLoading = false
             selectedID = nil
             isEditorOpen = false
             await refreshList()

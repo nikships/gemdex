@@ -8,10 +8,8 @@ import UniformTypeIdentifiers
 /// (image / audio / video / PDF), and remove. Mirrors the web editor's
 /// attachments panel.
 struct AttachmentsSection: View {
-    @EnvironmentObject var model: AppModel
+    @ObservedObject var editor: EditorModel
     @State private var isTargeted = false
-
-    private var editor: EditorModel { model.editor }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -60,7 +58,10 @@ struct AttachmentsSection: View {
                 .padding(.vertical, 30)
             } else {
                 ForEach(editor.attachments) { attachment in
-                    AttachmentCard(attachment: attachment)
+                    AttachmentCard(
+                        editor: editor,
+                        attachment: attachment
+                    )
                 }
             }
         }
@@ -112,10 +113,8 @@ struct AttachmentsSection: View {
 
 /// One attachment card: media preview, name/size, caption field, and actions.
 struct AttachmentCard: View {
-    @EnvironmentObject var model: AppModel
+    @ObservedObject var editor: EditorModel
     let attachment: EditorAttachment
-
-    private var editor: EditorModel { model.editor }
 
     private var binding: Binding<EditorAttachment>? {
         guard editor.attachments.contains(where: { $0.id == attachment.id }) else { return nil }
@@ -171,13 +170,9 @@ struct AttachmentCard: View {
     }
 }
 
-/// Renders an attachment's preview based on its kind. Fetches its own bytes
-/// into local `@State` (lazily for existing attachments) so it re-renders once
-/// the data lands, independent of the editor model's publishing.
+/// Renders an attachment's preview from bytes cached by `EditorModel`.
 struct AttachmentPreview: View {
-    @EnvironmentObject var model: AppModel
     let attachment: EditorAttachment
-    @State private var data: Data?
     /// Temp file for AVPlayer (audio/video), written off the main thread.
     @State private var mediaURL: URL?
 
@@ -185,7 +180,7 @@ struct AttachmentPreview: View {
         Group {
             switch attachment.kind {
             case .image:
-                if let data, let image = NSImage(data: data) {
+                if let data = attachment.data, let image = NSImage(data: data) {
                     Image(nsImage: image).resizable().scaledToFill()
                 } else { placeholder("photo") }
             case .video:
@@ -197,27 +192,20 @@ struct AttachmentPreview: View {
                     MediaPlayerView(url: mediaURL)
                 } else { placeholder("waveform") }
             case .pdf:
-                if let data {
+                if let data = attachment.data {
                     PDFThumbnail(data: data)
                 } else { placeholder("doc.richtext") }
             }
         }
         .background(Color(nsColor: .controlColor))
-        .task(id: attachment.id) { await loadData() }
-    }
-
-    private func loadData() async {
-        var bytes = attachment.data
-        if bytes == nil {
-            guard case let .existing(attachmentId) = attachment.source,
-                  let memoryID = model.selectedID, let api = model.api else { return }
-            bytes = try? await api.attachmentBytes(memoryId: memoryID, attachmentId: attachmentId).data
-        }
-        guard let bytes else { return }
-        data = bytes
-        // AVPlayer needs a file URL; materialize it off the main thread.
-        if attachment.kind == .video || attachment.kind == .audio {
-            mediaURL = await Self.writeTempFile(bytes, id: attachment.id, mimeType: attachment.mimeType)
+        .task(id: attachment.data?.count) {
+            guard let data = attachment.data,
+                  attachment.kind == .video || attachment.kind == .audio else { return }
+            mediaURL = await Self.writeTempFile(
+                data,
+                id: attachment.id,
+                mimeType: attachment.mimeType
+            )
         }
     }
 
