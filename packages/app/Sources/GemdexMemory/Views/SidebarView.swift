@@ -75,12 +75,7 @@ struct SidebarView: View {
             set: { newID in if let newID { Task { await model.openMemory(newID) } } }
         )) {
             ForEach(items) { memory in
-                MemoryRow(
-                    memory: memory,
-                    isSelected: memory.id == model.selectedID,
-                    api: model.api
-                )
-                    .equatable()
+                MemoryRow(memory: memory, isSelected: memory.id == model.selectedID)
                     .tag(memory.id)
                     .listRowSeparator(.hidden)
                     .listRowBackground(Color.clear)
@@ -142,14 +137,10 @@ struct SidebarView: View {
 
 /// One row in the sidebar: optional image thumbnail, title, preview, date, and
 /// an attachment-count chip.
-struct MemoryRow: View, Equatable {
+struct MemoryRow: View {
+    @EnvironmentObject var model: AppModel
     let memory: MemorySummary
     var isSelected: Bool = false
-    let api: APIClient?
-
-    static func == (lhs: MemoryRow, rhs: MemoryRow) -> Bool {
-        lhs.memory == rhs.memory && lhs.isSelected == rhs.isSelected
-    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 11) {
@@ -188,7 +179,7 @@ struct MemoryRow: View, Equatable {
     @ViewBuilder
     private var thumbnail: some View {
         if let image = memory.firstImage {
-            ThumbnailView(memoryID: memory.id, attachmentID: image.id, api: api)
+            ThumbnailView(memoryID: memory.id, attachmentID: image.id)
                 .frame(width: 46, height: 46)
                 .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                 .overlay(
@@ -222,9 +213,9 @@ struct MemoryRow: View, Equatable {
 
 /// Lazily fetches a small image attachment for a sidebar thumbnail.
 struct ThumbnailView: View {
+    @EnvironmentObject var model: AppModel
     let memoryID: String
     let attachmentID: String
-    let api: APIClient?
     @State private var image: NSImage?
 
     var body: some View {
@@ -238,7 +229,7 @@ struct ThumbnailView: View {
             }
         }
         .task(id: attachmentID) {
-            guard image == nil, let api else { return }
+            guard image == nil, let api = model.api else { return }
             if let bytes = try? await api.attachmentBytes(memoryId: memoryID, attachmentId: attachmentID),
                let nsImage = NSImage(data: bytes.data) {
                 image = nsImage

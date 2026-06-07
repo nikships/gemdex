@@ -70,6 +70,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        center.addObserver(
+            forName: NSWindow.didUpdateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            if let window = notification.object as? NSWindow {
+                self?.configureWindow(window)
+            }
+        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {

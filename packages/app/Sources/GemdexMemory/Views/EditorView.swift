@@ -5,8 +5,9 @@ import UniformTypeIdentifiers
 /// The memory editor: title, content, attachments, and footer actions.
 struct EditorView: View {
     @EnvironmentObject var model: AppModel
-    @ObservedObject var editor: EditorModel
     @State private var showDeleteConfirm = false
+
+    private var editor: EditorModel { model.editor }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -18,7 +19,7 @@ struct EditorView: View {
 
                     ContentTextEditor(text: contentBinding)
 
-                    AttachmentsSection(editor: editor)
+                    AttachmentsSection()
                 }
                 .padding(28)
             }
@@ -148,41 +149,18 @@ struct AutoExpandingTextViewRepresentable: NSViewRepresentable {
 }
 
 class AutoGrowingTextView: NSTextView {
-    private var cachedHeight: CGFloat?
-    private var measuredWidth: CGFloat = 0
-
     override var intrinsicContentSize: NSSize {
-        let width = bounds.width
-        if abs(width - measuredWidth) > 0.5 {
-            measuredWidth = width
-            cachedHeight = nil
-        }
-        if let cachedHeight {
-            return NSSize(width: NSView.noIntrinsicMetric, height: cachedHeight)
-        }
         guard let layoutManager = textContainer?.layoutManager,
               let textContainer = textContainer else {
             return super.intrinsicContentSize
         }
         layoutManager.ensureLayout(for: textContainer)
         let size = layoutManager.usedRect(for: textContainer).size
-        let height = max(ceil(size.height + (textContainerInset.height * 2)), 220)
-        cachedHeight = height
-        return NSSize(width: NSView.noIntrinsicMetric, height: height)
-    }
-
-    override func setFrameSize(_ newSize: NSSize) {
-        let widthChanged = abs(newSize.width - frame.size.width) > 0.5
-        super.setFrameSize(newSize)
-        if widthChanged {
-            cachedHeight = nil
-            invalidateIntrinsicContentSize()
-        }
+        return NSSize(width: NSView.noIntrinsicMetric, height: max(size.height, 220))
     }
 
     override func didChangeText() {
         super.didChangeText()
-        cachedHeight = nil
-        invalidateIntrinsicContentSize()
+        self.invalidateIntrinsicContentSize()
     }
 }

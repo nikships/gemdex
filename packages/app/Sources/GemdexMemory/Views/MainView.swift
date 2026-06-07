@@ -9,15 +9,11 @@ struct MainView: View {
     @EnvironmentObject var model: AppModel
 
     var body: some View {
-        ZStack {
-            BrandBackdrop()
-
-            NavigationSplitView {
-                SidebarView()
-                    .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 420)
-            } detail: {
-                DetailPane()
-            }
+        NavigationSplitView {
+            SidebarView()
+                .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 420)
+        } detail: {
+            DetailPane()
         }
         .navigationTitle("Gemdex Memory")
         .navigationSubtitle(model.statusText)

@@ -40,46 +40,12 @@ private enum AttachmentChange { case none, captionOnly, structural }
 /// set and the save logic (create / structural update / caption-only fast path).
 @MainActor
 final class EditorModel: ObservableObject {
-    private struct State {
-        var title = ""
-        var content = ""
-        var attachments: [EditorAttachment] = []
-        var attachError: String?
-        var attachProgress: String?
-        var isSaving = false
-    }
-
-    @Published private var state = State()
-
-    var title: String {
-        get { state.title }
-        set { state.title = newValue }
-    }
-
-    var content: String {
-        get { state.content }
-        set { state.content = newValue }
-    }
-
-    var attachments: [EditorAttachment] {
-        get { state.attachments }
-        set { state.attachments = newValue }
-    }
-
-    var attachError: String? {
-        get { state.attachError }
-        set { state.attachError = newValue }
-    }
-
-    var attachProgress: String? {
-        get { state.attachProgress }
-        set { state.attachProgress = newValue }
-    }
-
-    var isSaving: Bool {
-        get { state.isSaving }
-        set { state.isSaving = newValue }
-    }
+    @Published var title: String = ""
+    @Published var content: String = ""
+    @Published var attachments: [EditorAttachment] = []
+    @Published var attachError: String?
+    @Published var attachProgress: String?
+    @Published var isSaving = false
 
     /// nil while composing a brand-new memory.
     private(set) var memoryID: String?
@@ -102,18 +68,26 @@ final class EditorModel: ObservableObject {
 
     func startNew() {
         memoryID = nil
+        title = ""
+        content = ""
+        attachments = []
         originalExisting = [:]
         createdAt = 0
         updatedAt = 0
-        state = State()
+        attachError = nil
+        attachProgress = nil
     }
 
     func load(_ memory: Memory) {
         memoryID = memory.id
+        title = memory.title
+        content = memory.content
         createdAt = memory.createdAt
         updatedAt = memory.updatedAt
+        attachError = nil
+        attachProgress = nil
         originalExisting = [:]
-        let loadedAttachments = memory.attachments.map { a in
+        attachments = memory.attachments.map { a in
             originalExisting[a.id] = a.caption ?? ""
             return EditorAttachment(
                 source: .existing(attachmentId: a.id),
@@ -124,11 +98,6 @@ final class EditorModel: ObservableObject {
                 data: nil
             )
         }
-        state = State(
-            title: memory.title,
-            content: memory.content,
-            attachments: loadedAttachments
-        )
     }
 
     // MARK: - Adding / removing files
@@ -274,15 +243,11 @@ final class EditorModel: ObservableObject {
     static func fmt(_ ms: Double) -> String {
         guard ms > 0 else { return "" }
         let date = Date(timeIntervalSince1970: ms / 1000)
-        return dateFormatter.string(from: date)
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .short
+        return f.string(from: date)
     }
-
-    private static let dateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .short
-        return formatter
-    }()
 
     static func humanSize(_ bytes: Int) -> String {
         ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
