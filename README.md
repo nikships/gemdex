@@ -138,7 +138,9 @@ durable memory store shared across every repo and session. EXPLICIT ONLY:
 - `recall(query, limit?)` when the user points at memory ("check your memory
   layer", "how do we usually do X", "where are the … credentials"). Returns
   full memories, never fragments.
-- `update_memory(id, content, title?)` to revise a stored memory.
+- `update_memory(id, content?, edits?, title?)` to revise a stored memory —
+  `edits` for a targeted find-and-replace (change part of a large memory without
+  resending it), or `content` for a full rewrite.
 
 Never auto-capture a session and never recall unprompted. There's no delete
 tool — deletion is a human action in the Gemdex desktop app. If these tools
@@ -157,7 +159,7 @@ snippet into your client's root instructions file (conventionally `AGENTS.md`).
 |------|-------|---------|-------------------------|
 | `save_memory` | `content` and/or `attachments`, `title` (optional) | new `id` + resolved title | only when told to remember/save |
 | `recall` | `query` and/or `attachments` (at least one required), `limit` (optional, ~10) | full memories ranked by relevance | only when pointed at memory |
-| `update_memory` | `id` (required); `content`, `title`, `attachments` (optional — at least one required) | updated `id` + title | to revise a stored memory |
+| `update_memory` | `id` (required); `content` **or** `edits`, `title`, `attachments` (optional — at least one required) | updated `id` + title | to revise a stored memory (`edits` = partial find-and-replace; `content` = full rewrite) |
 
 Deletion is intentionally **not** an agent tool — it's a deliberate human action
 in the desktop app. All three tools embed via Gemini. Local mode requires

@@ -15,6 +15,7 @@ test, and style rules live in the root `AGENTS.md` — they are not repeated her
 |------|-------------|------|
 | `memory/memory-store.ts` | `MemoryStore` | The engine. Chunking, embedding orchestration, save/recall/update/import, parent-document resolution. The single source of memory behavior. |
 | `memory/chunker.ts` | `chunkMemory`, `deriveTitle`, `DEFAULT_CHUNK_SIZE=1500`, `DEFAULT_CHUNK_OVERLAP=200` | Splits content into retrieval chunks; derives a title when none is given. |
+| `memory/content-edits.ts` | `applyContentEdits`, `ContentEdit` | Pure literal find-and-replace over memory text (str-replace/MultiEdit semantics). Used by the MCP `update_memory` `edits` path; not part of the storage layer. |
 | `memory/backend.ts` | `MemoryBackend`, `LocalMemoryBackend` | The storage boundary interface + the embedded adapter wrapping `MemoryStore`. |
 | `memory/remote-backend.ts` | `RemoteMemoryBackend`, `RemoteMemoryError` | HTTP client implementing the same `MemoryBackend`; talks to a Gemdex Server (server owns embedding). |
 | `memory/blob-store.ts` | `BlobStore`, `FileBlobStore` (default `~/.gemdex/blobs`), `S3BlobStore` | Raw attachment bytes, addressed by opaque `blobRef`; kept out of the vector table. |

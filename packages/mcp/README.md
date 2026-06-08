@@ -104,7 +104,10 @@ deployment, TLS, storage, backup/restore, upgrades, and troubleshooting.
 - `save_memory(content, title?)` — persist a new memory; returns its `id`.
 - `recall(query, limit?)` — retrieve full memories by natural language (hybrid
   semantic + BM25), ranked by relevance. Never returns fragments.
-- `update_memory(id, content, title?)` — revise an existing memory in place.
+- `update_memory(id, content?, edits?, title?)` — revise an existing memory in
+  place. `edits` is a targeted find-and-replace (`{ oldText, newText, replaceAll? }`)
+  so you can change part of a large memory without resending it; `content` is a
+  full rewrite. The two are mutually exclusive.
 
 Deletion is intentionally **not** an agent tool — it's a human action in the
 Gemdex desktop app.

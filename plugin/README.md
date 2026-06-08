@@ -38,7 +38,9 @@ from `userConfig`. The server exposes three tools to Claude:
 
 - `save_memory(content, title?)` — persist a new memory; returns its `id`.
 - `recall(query, limit?)` — retrieve full memories by natural language.
-- `update_memory(id, content, title?)` — revise an existing memory in place.
+- `update_memory(id, content?, edits?, title?)` — revise an existing memory in
+  place. Use `edits` (find-and-replace) for partial changes to large memories,
+  or `content` for a full rewrite.
 
 Deletion is intentionally **not** an agent tool — it's a human action in the
 Gemdex desktop app.

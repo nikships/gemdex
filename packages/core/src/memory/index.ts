@@ -1,5 +1,6 @@
 export * from './types';
 export * from './chunker';
+export * from './content-edits';
 export * from './blob-store';
 export * from './attachment-validator';
 export { MemoryStore, MemoryStoreConfig } from './memory-store';
