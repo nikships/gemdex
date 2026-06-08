@@ -118,7 +118,7 @@ more. **Handlers never throw to the protocol** — on failure they return
 |------|----------|----------|---------|
 | `save_memory` | `content` **OR** ≥1 attachment | `content`, `title`, `attachments` | `Saved memory.` + `id:` + `title:` (+ `attachments:` count) |
 | `recall` | `query` **OR** ≥1 attachment | `query`, `limit` (default 10, clamped to 50), `attachments` | Header + each **full** memory with `id:` and a `Scores: fused=… · dense=… · bm25=…` line |
-| `update_memory` | `id` + ≥1 of `content`/`title`/`attachments` | `title`, `attachments` | `Updated memory.` + `id:` + `title:` |
+| `update_memory` | `id` + ≥1 of `content`/`edits`/`title`/`attachments` | `content`, `edits`, `title`, `attachments` | `Updated memory.` + `id:` + `title:` |
 
 Invariants:
 - **No delete tool — by design.** Deletion is a deliberate human action in the
@@ -128,6 +128,14 @@ Invariants:
   fused in core); `limit` is clamped to 50, defaults to 10.
 - `update_memory` preserves omitted fields; **`attachments:[]` clears** media,
   while omitting `attachments` keeps existing media.
+- **`edits` is the partial-update path, applied client-side in `handlers.ts`.**
+  `update_memory` accepts either `content` (full replacement) or `edits` (an
+  array of `{ oldText, newText, replaceAll? }`), never both. For `edits` the
+  handler does `get(id)` → `applyContentEdits` (from `gemdex-core`) → the normal
+  `update(id, { content })`, so the agent sends only the changed snippets and the
+  HTTP/storage layers are unchanged. `oldText` must match exactly and be unique
+  unless `replaceAll` is set. This read-modify-write is **last-write-wins**: a
+  concurrent edit landing between the `get` and the `update` is overwritten.
 - Attachments are either a local file `path` (preferred — `resolveAttachmentInputs`
   reads + base64-encodes the bytes so no megabytes ride in tool-call args) or
   inline `data`+`mimeType`. Media requires the **`gemini-embedding-2`** model.

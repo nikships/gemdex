@@ -67,11 +67,20 @@ Revise an existing memory in place, identified by its id.
 ("the notarization step changed — update that memory"). Get the id from a prior
 save_memory or recall result.
 
-Behavior: re-chunks and re-embeds the new content under the same id. Omitted
-fields are preserved — leave out \`content\` to keep the prior text, leave out
-\`attachments\` to keep the prior media (pass \`attachments: []\` to clear it).
-Each attachment is either a local file \`path\` (preferred) or inline base64
-\`data\`. There is no delete via MCP — deletion is a human action in the desktop app.
+Two ways to change the text:
+- \`edits\`: targeted find-and-replace — preferred for large memories. Pass an
+  array of \`{ oldText, newText, replaceAll? }\`; you emit only the changed
+  snippets instead of resending the whole note. Each \`oldText\` must match
+  exactly and be unique (set \`replaceAll: true\` to change every occurrence).
+- \`content\`: full replacement of the text. Use for small memories or rewrites.
+\`content\` and \`edits\` are mutually exclusive.
+
+Behavior: re-chunks and re-embeds the resulting content under the same id.
+Omitted fields are preserved — leave out \`content\`/\`edits\` to keep the prior
+text, leave out \`attachments\` to keep the prior media (pass \`attachments: []\`
+to clear it). Each attachment is either a local file \`path\` (preferred) or
+inline base64 \`data\`. There is no delete via MCP — deletion is a human action
+in the desktop app.
 `;
 
 // JSON-schema fragment for the optional media array shared by save_memory /
@@ -183,7 +192,30 @@ class GemdexMemoryServer {
                             },
                             content: {
                                 type: "string",
-                                description: "Replacement content. Omit to keep the existing text.",
+                                description: "Full replacement text. Omit to keep the existing text. Mutually exclusive with 'edits'; prefer 'edits' for large memories.",
+                            },
+                            edits: {
+                                type: "array",
+                                description:
+                                    "Targeted find-and-replace edits applied to the current content — the preferred way to change part of a large memory without resending the whole note. Applied in order. Mutually exclusive with 'content'.",
+                                items: {
+                                    type: "object",
+                                    properties: {
+                                        oldText: {
+                                            type: "string",
+                                            description: "Exact substring to find (literal, not regex). Must be unique unless 'replaceAll' is true.",
+                                        },
+                                        newText: {
+                                            type: "string",
+                                            description: "Text to replace 'oldText' with. Must differ from 'oldText'.",
+                                        },
+                                        replaceAll: {
+                                            type: "boolean",
+                                            description: "Replace every occurrence of 'oldText'. Defaults to false (requires a unique match).",
+                                        },
+                                    },
+                                    required: ["oldText", "newText"],
+                                },
                             },
                             title: {
                                 type: "string",

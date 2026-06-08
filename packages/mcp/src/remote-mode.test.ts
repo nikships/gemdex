@@ -70,6 +70,16 @@ async function startFakeRemote(): Promise<{
             res.end(JSON.stringify({ results: memory ? [{ ...memory, score: 1 }] : [] }));
             return;
         }
+        if (req.method === 'GET' && req.url === '/v1/memories/remote-1') {
+            if (!memory) {
+                res.writeHead(404, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Not found' }));
+                return;
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ memory }));
+            return;
+        }
         if (req.method === 'PUT' && req.url === '/v1/memories/remote-1' && memory) {
             memory = {
                 ...memory,
@@ -144,6 +154,19 @@ test('remote-mode MCP handlers save, media-recall, and update through HTTP', asy
         assert.match(updated.content[0].text, /Updated memory/);
         assert.equal(remote.requests[2].body.content, 'updated remote parent');
         assert.equal(remote.requests[2].body.attachments[0].path, undefined);
+
+        // Partial edit: handler fetches the memory (GET), applies the
+        // find-and-replace client-side, then PUTs the reconstructed content.
+        const edited = await handlers.handleUpdateMemory({
+            id: 'remote-1',
+            edits: [{ oldText: 'updated', newText: 'partially edited' }],
+        });
+        assert.equal(edited.isError, undefined);
+        assert.match(edited.content[0].text, /Updated memory/);
+        const getReq = remote.requests.find((r) => r.method === 'GET' && r.path === '/v1/memories/remote-1');
+        assert.ok(getReq, 'expected a GET to fetch current content before applying edits');
+        const lastPut = remote.requests.filter((r) => r.method === 'PUT').at(-1);
+        assert.equal(lastPut?.body.content, 'partially edited remote parent');
     } finally {
         await remote.close();
         await fs.rm(tmpDir, { recursive: true, force: true });

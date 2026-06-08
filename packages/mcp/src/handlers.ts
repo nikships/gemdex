@@ -1,4 +1,4 @@
-import { MemoryBackend } from "gemdex-core";
+import { MemoryBackend, applyContentEdits, ContentEdit } from "gemdex-core";
 import { resolveAttachmentInputs } from "./attachment-path.js";
 import { errorMessage } from "./errors.js";
 
@@ -21,6 +21,39 @@ function parseAttachments(value: unknown): ParsedAttachments {
         return { error: textResult("Error: 'attachments' must be an array.", true) };
     }
     return { attachments: value };
+}
+
+/**
+ * Validate the optional `edits` argument of update_memory. Returns the typed
+ * edit list (or undefined when absent), or an error ToolResult when the shape
+ * is wrong. Find-and-replace semantics themselves are enforced later by
+ * `applyContentEdits`.
+ */
+type ParsedEdits = { edits?: ContentEdit[] } | { error: ToolResult };
+
+function parseEdits(value: unknown): ParsedEdits {
+    if (value === undefined) return {};
+    if (!Array.isArray(value)) {
+        return { error: textResult("Error: 'edits' must be an array.", true) };
+    }
+    if (value.length === 0) {
+        return { error: textResult("Error: 'edits' must contain at least one edit.", true) };
+    }
+    const edits: ContentEdit[] = [];
+    for (const item of value) {
+        if (!item || typeof item !== 'object') {
+            return { error: textResult("Error: each edit must be an object with 'oldText' and 'newText'.", true) };
+        }
+        const { oldText, newText, replaceAll } = item as Record<string, unknown>;
+        if (typeof oldText !== 'string' || typeof newText !== 'string') {
+            return { error: textResult("Error: each edit requires string 'oldText' and 'newText'.", true) };
+        }
+        if (replaceAll !== undefined && typeof replaceAll !== 'boolean') {
+            return { error: textResult("Error: 'replaceAll' must be a boolean when provided.", true) };
+        }
+        edits.push({ oldText, newText, ...(replaceAll !== undefined && { replaceAll }) });
+    }
+    return { edits };
 }
 
 /** Render one fused-search branch, e.g. `dense=#3 (d=0.1234)` or `bm25=—`. */
@@ -126,15 +159,36 @@ export class MemoryToolHandlers {
         const parsed = parseAttachments(args?.attachments);
         if ('error' in parsed) return parsed.error;
         const attachments = parsed.attachments;
-        if (!hasContent && title === undefined && attachments === undefined) {
-            return textResult("Error: provide at least one of 'content', 'title', or 'attachments' to update.", true);
+        const parsedEdits = parseEdits(args?.edits);
+        if ('error' in parsedEdits) return parsedEdits.error;
+        const edits = parsedEdits.edits;
+        if (hasContent && edits !== undefined) {
+            return textResult("Error: provide either 'content' or 'edits', not both.", true);
+        }
+        if (!hasContent && edits === undefined && title === undefined && attachments === undefined) {
+            return textResult("Error: provide at least one of 'content', 'edits', 'title', or 'attachments' to update.", true);
         }
         // Only include provided fields so the store preserves the rest in place.
         const input: { content?: string; title?: string; attachments?: any[] } = {};
         if (hasContent) input.content = args.content;
         if (title !== undefined) input.title = title;
         try {
+            // Resolve attachments first (reads + base64-encodes files off disk)
+            // so the slow I/O happens BEFORE the get(id) below — keeping the
+            // read-modify-write window for `edits` as small as possible.
             if (attachments !== undefined) input.attachments = await resolveAttachmentInputs(attachments);
+            // `edits` are applied client-side against the current content, then
+            // persisted via the normal full-content update path. The agent only
+            // emits the changed snippets — no need to resend a whole large note.
+            // Note: read-modify-write is last-write-wins; a concurrent edit
+            // between this fetch and the update is overwritten.
+            if (edits !== undefined) {
+                const current = await this.store.get(id);
+                if (!current) {
+                    return textResult(`Failed to update memory: Memory not found: ${id}`, true);
+                }
+                input.content = applyContentEdits(current.content, edits);
+            }
             const memory = await this.store.update(id, input);
             return textResult(formatMemoryResult('Updated', memory));
         } catch (error) {

@@ -17,8 +17,10 @@ isn't connected — don't bring it up unless asked.
 - `save_memory(content, title?, attachments?)` — persist a new memory. Returns its `id`.
 - `recall(query, limit?, attachments?)` — retrieve full memories by natural
   language (and/or media), ranked by relevance. Default `limit` ~10.
-- `update_memory(id, content?, title?, attachments?)` — replace an existing
-  memory in place under the same `id`.
+- `update_memory(id, content?, edits?, title?, attachments?)` — revise an
+  existing memory in place under the same `id`. Use `edits` (targeted
+  find-and-replace) to change part of a large memory without resending it;
+  use `content` for a full rewrite. `content` and `edits` are mutually exclusive.
 
 There is **no delete tool** — deletion is a deliberate human action in the
 Gemdex desktop app. The agent saves, recalls, and edits; the human manages.
@@ -54,7 +56,10 @@ This is the most important rule. Act only when the user clearly points at memory
 
 **Update** when the user asks to revise a stored memory:
 > "The notarization step changed — update that memory."
-→ get the `id` (from a prior save/recall), then `update_memory(id, content=<revised>)`.
+→ get the `id` (from a prior save/recall), then for a small change to a large
+memory use `update_memory(id, edits=[{ oldText: <old step>, newText: <new step> }])`
+— you send only the changed lines. For a full rewrite, use
+`update_memory(id, content=<revised>)`.
 
 ## Do NOT
 
