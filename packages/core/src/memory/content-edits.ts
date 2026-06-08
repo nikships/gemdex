@@ -22,6 +22,8 @@ export interface ContentEdit {
 
 /** Count non-overlapping occurrences of `needle` in `haystack`. */
 function countOccurrences(haystack: string, needle: string): number {
+    // Guard: an empty needle would never advance `from`, looping forever.
+    if (needle.length === 0) return 0;
     let count = 0;
     let from = 0;
     for (;;) {

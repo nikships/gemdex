@@ -173,6 +173,10 @@ export class MemoryToolHandlers {
         if (hasContent) input.content = args.content;
         if (title !== undefined) input.title = title;
         try {
+            // Resolve attachments first (reads + base64-encodes files off disk)
+            // so the slow I/O happens BEFORE the get(id) below — keeping the
+            // read-modify-write window for `edits` as small as possible.
+            if (attachments !== undefined) input.attachments = await resolveAttachmentInputs(attachments);
             // `edits` are applied client-side against the current content, then
             // persisted via the normal full-content update path. The agent only
             // emits the changed snippets — no need to resend a whole large note.
@@ -185,7 +189,6 @@ export class MemoryToolHandlers {
                 }
                 input.content = applyContentEdits(current.content, edits);
             }
-            if (attachments !== undefined) input.attachments = await resolveAttachmentInputs(attachments);
             const memory = await this.store.update(id, input);
             return textResult(formatMemoryResult('Updated', memory));
         } catch (error) {

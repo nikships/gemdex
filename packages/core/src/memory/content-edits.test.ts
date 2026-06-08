@@ -46,7 +46,7 @@ describe('applyContentEdits', () => {
             .toThrow(/at least one edit is required/);
     });
 
-    it('throws on an empty oldText', () => {
+    it('throws on an empty oldText (does not hang)', () => {
         expect(() => applyContentEdits('content', [{ oldText: '', newText: 'x' }]))
             .toThrow(/'oldText' must not be empty/);
     });
