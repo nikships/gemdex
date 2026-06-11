@@ -18,6 +18,9 @@ struct MainView: View {
         .navigationTitle("Gemdex Memory")
         .navigationSubtitle(model.statusText)
         .toolbar { toolbarContent }
+        .sheet(isPresented: $model.showIngest) {
+            IngestView().environmentObject(model)
+        }
     }
 
     @ToolbarContentBuilder
@@ -30,6 +33,10 @@ struct MainView: View {
             Button { model.showSettings = true } label: {
                 Label("Storage", systemImage: "externaldrive")
             }
+            Button { model.showIngest = true } label: {
+                Label("Ingest Chat History", systemImage: "tray.and.arrow.down")
+            }
+            .help("Ingest coding-agent chat history as memories")
             Button(action: exportMemories) {
                 Label("Export", systemImage: "square.and.arrow.up")
             }

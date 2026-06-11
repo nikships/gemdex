@@ -41,6 +41,9 @@ struct GemdexMemoryApp: App {
                 }
                 .keyboardShortcut("r", modifiers: .command)
                 .disabled(model.screen != .ready)
+                Button("Ingest Chat History…") { model.showIngest = true }
+                    .keyboardShortcut("i", modifiers: [.command, .option])
+                    .disabled(model.screen != .ready)
             }
         }
 

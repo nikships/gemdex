@@ -182,6 +182,91 @@ struct ExportAttachment: Codable, Sendable {
     let caption: String?
 }
 
+// MARK: - Chat-history ingestion (`/ingest/*`)
+
+/// One scannable session folder (`GET /ingest/sources` presets/customFolders).
+struct IngestFolderSummary: Codable, Identifiable, Hashable, Sendable {
+    var id: String { path }
+    let source: String
+    let path: String
+    let exists: Bool
+    let sessionCount: Int
+}
+
+/// A selectable digest model with its standard-tier pricing.
+struct IngestModelInfo: Codable, Identifiable, Hashable, Sendable {
+    var id: String { model }
+    let model: String
+    let description: String
+    let inputUsdPerMTok: Double
+    let outputUsdPerMTok: Double
+    let isDefault: Bool
+}
+
+/// `GET /ingest/sources` response.
+struct IngestSources: Codable, Sendable {
+    let presets: [IngestFolderSummary]
+    let customFolders: [IngestFolderSummary]
+    let models: [IngestModelInfo]
+    let pricingAsOf: String
+    let ingestReady: Bool
+}
+
+/// Per-model cost estimate (standard vs. Batch API pricing).
+struct IngestCostEstimate: Codable, Identifiable, Hashable, Sendable {
+    var id: String { model }
+    let model: String
+    let standardUsd: Double
+    let batchUsd: Double
+}
+
+/// `POST /ingest/scan` response.
+struct IngestScanSummary: Codable, Sendable {
+    struct Buckets: Codable, Sendable {
+        let newFiles: [IngestSessionFile]
+        let changedFiles: [IngestSessionFile]
+        let upToDate: [IngestSessionFile]
+        let skippedActive: [IngestSessionFile]
+    }
+    let buckets: Buckets
+    let pendingCount: Int
+    let estimatedInputTokens: Int
+    let estimatedOutputTokens: Int
+    let estimates: [IngestCostEstimate]
+}
+
+struct IngestSessionFile: Codable, Hashable, Sendable {
+    let source: String
+    let filePath: String
+}
+
+/// `GET /ingest/status` response.
+struct IngestStatus: Codable, Sendable {
+    struct PendingBatch: Codable, Sendable {
+        let jobName: String
+        let model: String
+        let submittedAt: Double
+        let requestCount: Int
+    }
+    let state: String
+    let processed: Int
+    let failed: Int
+    let skipped: Int
+    let total: Int
+    let currentFile: String?
+    let error: String?
+    let pendingBatch: PendingBatch?
+}
+
+/// `POST /ingest/collect` response.
+struct IngestCollectResult: Codable, Sendable {
+    let state: String
+    let jobState: String?
+    let ingested: Int?
+    let failed: Int?
+    let error: String?
+}
+
 /// Inline attachment payload for create/update (base64 `data`).
 struct AttachmentInput: Codable, Sendable {
     let mimeType: String

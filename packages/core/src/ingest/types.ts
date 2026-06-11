@@ -1,0 +1,147 @@
+/**
+ * Shared types for the chat-history ingestion pipeline: scanning coding-agent
+ * session stores (Claude Code, Factory CLI, custom folders), distilling each
+ * session into a digest memory, and tracking what has already been ingested.
+ */
+
+/** Where a session file came from. Drives the deterministic memory id prefix. */
+export type IngestSource = 'claude' | 'factory' | 'custom';
+
+/** A folder to scan for `*.jsonl` session transcripts. */
+export interface IngestSourceFolder {
+    source: IngestSource;
+    /** Absolute path of the folder to scan recursively. */
+    path: string;
+}
+
+/** One discovered session file with the metadata the scanner needs. */
+export interface SessionFile {
+    source: IngestSource;
+    /** Absolute path to the `.jsonl` transcript. */
+    filePath: string;
+    /** Last-modified time in epoch milliseconds. */
+    mtimeMs: number;
+    /** File size in bytes. */
+    size: number;
+}
+
+/** Scanner output: discovered files bucketed against the ingest ledger. */
+export interface ScanBuckets {
+    /** Never ingested before. */
+    newFiles: SessionFile[];
+    /** Ingested before but the file changed since (mtime or size differ). */
+    changedFiles: SessionFile[];
+    /** Already ingested and unchanged. */
+    upToDate: SessionFile[];
+    /** Modified too recently — likely an active session; skipped this run. */
+    skippedActive: SessionFile[];
+}
+
+/** Per-file ledger entry recording a completed ingestion. */
+export interface IngestLedgerEntry {
+    mtimeMs: number;
+    size: number;
+    memoryId: string;
+    model: string;
+    /** Epoch milliseconds when the digest was saved. */
+    ingestedAt: number;
+}
+
+/** A pending Gemini Batch API job, persisted so collection survives restarts. */
+export interface PendingBatchJob {
+    /** Gemini batch job resource name, e.g. `batches/123`. */
+    jobName: string;
+    model: string;
+    /** Epoch milliseconds when the job was submitted. */
+    submittedAt: number;
+    /** Maps each request key to the session file it digests. */
+    requests: Record<string, PendingBatchRequest>;
+}
+
+export interface PendingBatchRequest {
+    source: IngestSource;
+    filePath: string;
+    mtimeMs: number;
+    size: number;
+    sessionId: string;
+    /** Pre-rendered header/footer context so collection doesn't re-parse. */
+    sessionMeta: SessionMeta;
+}
+
+/** The on-disk ledger shape (`~/.gemdex/ingest.json`). */
+export interface IngestLedger {
+    version: 1;
+    /** Keyed by absolute file path. */
+    files: Record<string, IngestLedgerEntry>;
+    pendingBatch?: PendingBatchJob;
+}
+
+/** One conversational turn extracted from a transcript. */
+export interface SessionTurn {
+    role: 'user' | 'assistant';
+    text: string;
+}
+
+/** Metadata about a parsed session used for digest headers and provenance. */
+export interface SessionMeta {
+    sessionId: string;
+    source: IngestSource;
+    filePath: string;
+    cwd?: string;
+    gitBranch?: string;
+    title?: string;
+    /** Epoch milliseconds of the first/last events, when present. */
+    firstTs?: number;
+    lastTs?: number;
+}
+
+/** A normalized session transcript, independent of the on-disk dialect. */
+export interface ParsedSession extends SessionMeta {
+    turns: SessionTurn[];
+}
+
+/** Structured digest produced by the LLM. */
+export interface SessionDigest {
+    title: string;
+    whatWasDone: string;
+    howToReproduce: string[];
+    toolsAndServices: string[];
+    credentialsAndConfig: string[];
+    gotchas: string[];
+}
+
+/** Cost estimate for one model at standard and batch pricing. */
+export interface ModelCostEstimate {
+    model: string;
+    /** USD, standard interactive pricing. */
+    standardUsd: number;
+    /** USD, Batch API pricing (50% of standard). */
+    batchUsd: number;
+}
+
+/** Result of scanning sources without running ingestion. */
+export interface IngestScanResult {
+    buckets: ScanBuckets;
+    /** Files that would be processed (new + changed). */
+    pendingCount: number;
+    /** Estimated input tokens across pending files. */
+    estimatedInputTokens: number;
+    /** Estimated output tokens across pending files. */
+    estimatedOutputTokens: number;
+    estimates: ModelCostEstimate[];
+}
+
+export type IngestRunState = 'idle' | 'running' | 'batchPending' | 'done' | 'failed' | 'cancelled';
+
+/** Live progress for an in-flight (or finished) ingestion run. */
+export interface IngestProgress {
+    state: IngestRunState;
+    processed: number;
+    failed: number;
+    skipped: number;
+    total: number;
+    currentFile?: string;
+    error?: string;
+    /** Set when a batch job was submitted and is awaiting collection. */
+    pendingBatch?: { jobName: string; model: string; submittedAt: number; requestCount: number };
+}

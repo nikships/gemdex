@@ -1,8 +1,17 @@
+import * as fs from 'node:fs';
 import {
+    DEFAULT_DIGEST_MODEL,
+    DIGEST_MODELS,
+    DIGEST_PRICING_AS_OF,
+    IngestManager,
+    IngestSourceFolder,
     MemoryBackend,
     RemoteMemoryBackend,
     ServerVersionInfo,
     checkServerCompatibility,
+    claudePresetFolder,
+    envManager,
+    factoryPresetFolder,
 } from 'gemdex-core';
 import { ClientConfigStore, StoredRemote, tokenEnvVarForRemote } from './cli-config.js';
 import { createConfig } from './config.js';
@@ -21,6 +30,9 @@ interface CliDependencies {
     fetch?: typeof fetch;
     createLocalBackend?: () => MemoryBackend;
     createRemoteBackend?: (remote: StoredRemote, token: string) => MemoryBackend;
+    /** Backend for the active mode (local or remote), used by ingest-history. */
+    createActiveBackend?: () => MemoryBackend;
+    createIngestManager?: () => IngestManager;
 }
 
 const defaultIo: CliIo = {
@@ -42,11 +54,19 @@ Usage:
   gemdex mode remote <name>
   gemdex status
   gemdex import-local-to-remote [name]
+  gemdex ingest-history [--source claude|factory|PATH]... [--model MODEL]
+                        [--batch] [--dry-run] [--collect]
 
 init-remote is the one-shot client setup for a BYOI server: it stores the
 remote + token, verifies the server is reachable, authenticated, and version-
 compatible, switches Gemdex into remote mode, optionally imports your local
 memories (--import-local), and prints the exact agent command to run.
+
+ingest-history distills coding-agent chat transcripts (Claude Code, Factory
+CLI, or any folder of .jsonl sessions) into one memory per session. Defaults
+to both presets when detected. --dry-run prints the scan + cost estimate;
+--batch submits a Gemini Batch API job (50% cost, results within ~24h) that
+you collect later with --collect. Needs a local GEMINI_API_KEY.
 `;
 }
 
@@ -220,7 +240,7 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
     });
 
     const [command, subcommand] = args;
-    const CLI_COMMANDS = ['remote', 'mode', 'status', 'init-remote', 'import-local-to-remote'];
+    const CLI_COMMANDS = ['remote', 'mode', 'status', 'init-remote', 'import-local-to-remote', 'ingest-history'];
     if (!CLI_COMMANDS.includes(command)) return null;
 
     try {
@@ -369,6 +389,10 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
             return 0;
         }
 
+        if (command === 'ingest-history') {
+            return await runIngestHistory(args.slice(1), io, dependencies);
+        }
+
         if (command === 'import-local-to-remote') {
             const selected = resolveRemote(store, args[1]);
             const local = createLocalBackend();
@@ -384,5 +408,116 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
     } catch (error) {
         io.stderr(`Error: ${errorMessage(error)}\n`);
         return 1;
+    }
+}
+
+/** Collect every `--source` value: presets by name, anything else as a custom path. */
+function parseIngestSources(args: string[]): IngestSourceFolder[] {
+    const folders: IngestSourceFolder[] = [];
+    for (let i = 0; i < args.length; i++) {
+        if (args[i] !== '--source') continue;
+        const value = requireArg(args, i + 1, '--source value');
+        if (value === 'claude') {
+            folders.push(claudePresetFolder());
+        } else if (value === 'factory') {
+            folders.push(factoryPresetFolder());
+        } else {
+            folders.push({ source: 'custom', path: value });
+        }
+    }
+    if (folders.length > 0) return folders;
+    // Default: both presets, when their folders exist.
+    const presets = [claudePresetFolder(), factoryPresetFolder()].filter((preset) => fs.existsSync(preset.path));
+    if (presets.length === 0) {
+        throw new Error('No session folders found. Pass --source claude|factory|<path>.');
+    }
+    return presets;
+}
+
+function formatUsd(value: number): string {
+    return `$${value.toFixed(2)}`;
+}
+
+async function runIngestHistory(args: string[], io: CliIo, dependencies: CliDependencies): Promise<number> {
+    const model = optionValue(args, '--model') ?? DEFAULT_DIGEST_MODEL;
+    if (!DIGEST_MODELS[model]) {
+        throw new Error(`Unsupported model "${model}". Supported: ${Object.keys(DIGEST_MODELS).join(', ')}`);
+    }
+    const batch = args.includes('--batch');
+    const dryRun = args.includes('--dry-run');
+    const collect = args.includes('--collect');
+
+    const apiKey = envManager.get('GEMINI_API_KEY');
+    if (!apiKey) {
+        throw new Error('Chat-history ingestion needs a local GEMINI_API_KEY (digests are generated client-side).');
+    }
+    const manager = dependencies.createIngestManager?.() ?? new IngestManager({
+        apiKey,
+        geminiBaseUrl: envManager.get('GEMINI_BASE_URL'),
+    });
+    const createBackend = dependencies.createActiveBackend ?? (() => createMemoryBackend(createConfig()));
+
+    if (collect) {
+        const result = await manager.collect(createBackend());
+        if (result.state === 'none') {
+            io.stdout('No pending batch job.\n');
+            return 0;
+        }
+        if (result.state === 'pending') {
+            io.stdout(`Batch job still ${result.jobState}. Try again later.\n`);
+            return 0;
+        }
+        if (result.state === 'failed') {
+            io.stderr(`Batch job failed: ${result.error}\n`);
+            return 1;
+        }
+        io.stdout(`Collected batch results — Ingested: ${result.ingested}, Failed: ${result.failed}.\n`);
+        return (result.failed ?? 0) === 0 ? 0 : 1;
+    }
+
+    const folders = parseIngestSources(args);
+    const scan = manager.scan(folders);
+    io.stdout(
+        `Sessions — new: ${scan.buckets.newFiles.length}, changed: ${scan.buckets.changedFiles.length}, ` +
+        `up-to-date: ${scan.buckets.upToDate.length}, active (skipped): ${scan.buckets.skippedActive.length}\n`,
+    );
+    if (scan.pendingCount === 0) {
+        io.stdout('Nothing to ingest.\n');
+        return 0;
+    }
+    io.stdout(`Estimated input tokens: ~${scan.estimatedInputTokens.toLocaleString()}\n`);
+    io.stdout(`Cost estimates (pricing as of ${DIGEST_PRICING_AS_OF}):\n`);
+    for (const estimate of scan.estimates) {
+        const marker = estimate.model === model ? '*' : ' ';
+        io.stdout(
+            `  ${marker} ${estimate.model.padEnd(24)} standard ${formatUsd(estimate.standardUsd)}` +
+            `  batch ${formatUsd(estimate.batchUsd)}\n`,
+        );
+    }
+    if (dryRun) return 0;
+
+    const backend = createBackend();
+    if (batch) {
+        const progress = await manager.run({ folders, model, mode: 'batch' }, backend);
+        const jobName = progress.pendingBatch?.jobName ?? '(unknown)';
+        io.stdout(`Submitted batch job ${jobName} (${progress.total} sessions).\n`);
+        io.stdout('Collect results later with: gemdex ingest-history --collect\n');
+        return 0;
+    }
+
+    const ticker = setInterval(() => {
+        const progress = manager.getProgress();
+        io.stderr(`\r[ingest] ${progress.processed + progress.failed}/${progress.total} (failed: ${progress.failed})  `);
+    }, 1000);
+    try {
+        const progress = await manager.run({ folders, model, mode: 'standard' }, backend);
+        io.stderr('\n');
+        io.stdout(
+            `Done — Ingested: ${progress.processed}, Failed: ${progress.failed}, ` +
+            `Skipped (trivial): ${progress.skipped}.\n`,
+        );
+        return progress.failed === 0 ? 0 : 1;
+    } finally {
+        clearInterval(ticker);
     }
 }

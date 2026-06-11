@@ -237,6 +237,54 @@ actor APIClient {
         return try decode(MigrationResult.self, from: data)
     }
 
+    // MARK: - Chat-history ingestion
+
+    func ingestSources() async throws -> IngestSources {
+        let (data, _) = try await send(makeRequest("GET", "/ingest/sources"))
+        return try decode(IngestSources.self, from: data)
+    }
+
+    @discardableResult
+    func addIngestFolder(_ path: String) async throws -> IngestSources {
+        let body = try JSONSerialization.data(withJSONObject: ["path": path])
+        let (data, _) = try await send(makeRequest("POST", "/ingest/folders", body: body))
+        return try decode(IngestSources.self, from: data)
+    }
+
+    @discardableResult
+    func removeIngestFolder(_ path: String) async throws -> IngestSources {
+        let body = try JSONSerialization.data(withJSONObject: ["path": path])
+        let (data, _) = try await send(makeRequest("DELETE", "/ingest/folders", body: body))
+        return try decode(IngestSources.self, from: data)
+    }
+
+    /// `sources` is a list of `{source: claude|factory|custom, path?}` entries.
+    func ingestScan(sources: [[String: Any]]) async throws -> IngestScanSummary {
+        let body = try JSONSerialization.data(withJSONObject: ["sources": sources])
+        let (data, _) = try await send(makeRequest("POST", "/ingest/scan", body: body))
+        return try decode(IngestScanSummary.self, from: data)
+    }
+
+    func ingestStart(sources: [[String: Any]], model: String, mode: String) async throws {
+        let payload: [String: Any] = ["sources": sources, "model": model, "mode": mode]
+        let body = try JSONSerialization.data(withJSONObject: payload)
+        _ = try await send(makeRequest("POST", "/ingest/start", body: body))
+    }
+
+    func ingestStatus() async throws -> IngestStatus {
+        let (data, _) = try await send(makeRequest("GET", "/ingest/status"))
+        return try decode(IngestStatus.self, from: data)
+    }
+
+    func ingestCollect() async throws -> IngestCollectResult {
+        let (data, _) = try await send(makeRequest("POST", "/ingest/collect"))
+        return try decode(IngestCollectResult.self, from: data)
+    }
+
+    func ingestCancel() async throws {
+        _ = try await send(makeRequest("POST", "/ingest/cancel"))
+    }
+
     // MARK: - Helpers
 
     private func encodeAttachment(_ a: AttachmentInput) -> [String: Any] {

@@ -90,6 +90,14 @@ Usage:
   npx gemdex mode remote <name>    Use a configured remote backend.
   npx gemdex import-local-to-remote [name]
                                    Copy local memories to a remote by id.
+  npx gemdex ingest-history [--source claude|factory|PATH]... [--model MODEL]
+                            [--batch] [--dry-run] [--collect]
+                                   Distill coding-agent chat history (Claude
+                                   Code / Factory CLI session .jsonl files)
+                                   into one searchable memory per session.
+                                   --dry-run shows the scan + cost estimate;
+                                   --batch uses the Gemini Batch API (50%
+                                   cost), collected later via --collect.
 
 Optional:
   GEMDEX_MODE             local (default) or remote.

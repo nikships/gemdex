@@ -1,7 +1,20 @@
 import * as http from "http";
 import * as crypto from "crypto";
-import { MemoryBackend, RemoteMemoryBackend, envManager } from "gemdex-core";
-import { buildCorsHeaders, handleMemoryApiRequest, readBody, sendJson } from "gemdex-core";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { IngestManager, IngestSourceFolder, MemoryBackend, RemoteMemoryBackend, envManager } from "gemdex-core";
+import {
+    DIGEST_MODELS,
+    DEFAULT_DIGEST_MODEL,
+    DIGEST_PRICING_AS_OF,
+    buildCorsHeaders,
+    claudePresetFolder,
+    discoverSessionFiles,
+    factoryPresetFolder,
+    handleMemoryApiRequest,
+    readBody,
+    sendJson,
+} from "gemdex-core";
 import { ClientConfigStore, StoredRemote, tokenEnvVarForRemote } from "./cli-config.js";
 import { createConfig, GemdexConfig } from "./config.js";
 import { errorMessage } from "./errors.js";
@@ -40,6 +53,10 @@ export interface ServeContext {
      */
     allowedOrigin?: string;
     token?: string;
+    /** Lazily created chat-history ingestion orchestrator. */
+    ingestManager?: IngestManager;
+    /** The Gemini key the current ingest manager was built with. */
+    ingestManagerKey?: string;
 }
 
 function buildStore(
@@ -58,6 +75,9 @@ function configureApiKey(ctx: ServeContext, apiKey: string): void {
         ...ctx.config,
         geminiApiKey: apiKey,
     };
+    // The ingest manager is rebuilt lazily when its recorded key goes stale
+    // (see ingestManager()), so an in-flight run keeps its manager while any
+    // later run picks up the new key.
     if (ctx.config.mode === 'local') {
         ctx.store = buildStore(ctx.config, ctx.createBackend);
     }
@@ -234,6 +254,93 @@ async function migrateLocalToRemote(
         }
     }
     return { created, updated, skipped };
+}
+
+/**
+ * The Gemini key used for digesting transcripts. Digestion always runs
+ * client-side (the BYOI server only embeds), so ingestion needs a local key
+ * even when the memory backend is remote.
+ */
+function ingestApiKey(ctx: ServeContext): string {
+    const key = ctx.config.geminiApiKey ?? envManager.get('GEMINI_API_KEY');
+    if (!key) {
+        throw new Error('Chat-history ingestion needs a local GEMINI_API_KEY (digests are generated client-side).');
+    }
+    return key;
+}
+
+function ingestManager(ctx: ServeContext): IngestManager {
+    const key = ingestApiKey(ctx);
+    // Rebuild on key change, but never yank the manager out from under a
+    // live run — that run already holds its digester.
+    if (ctx.ingestManager && ctx.ingestManagerKey !== key && !ctx.ingestManager.isRunning()) {
+        ctx.ingestManager = undefined;
+    }
+    if (!ctx.ingestManager) {
+        ctx.ingestManager = new IngestManager({
+            apiKey: key,
+            geminiBaseUrl: ctx.config.geminiBaseUrl,
+        });
+        ctx.ingestManagerKey = key;
+    }
+    return ctx.ingestManager;
+}
+
+/**
+ * Resolve the request's `sources` array into scan folders. Presets resolve to
+ * their well-known dot-folders; custom entries must carry an absolute path.
+ */
+function resolveIngestFolders(ctx: ServeContext, sources: unknown): IngestSourceFolder[] {
+    if (!Array.isArray(sources) || sources.length === 0) {
+        throw new Error("'sources' must be a non-empty array.");
+    }
+    const folders: IngestSourceFolder[] = [];
+    for (const entry of sources) {
+        const record = (entry && typeof entry === 'object' ? entry : {}) as Record<string, unknown>;
+        const source = record.source;
+        if (source === 'claude') {
+            folders.push(claudePresetFolder());
+        } else if (source === 'factory') {
+            folders.push(factoryPresetFolder());
+        } else if (source === 'custom') {
+            const folderPath = trimmedString(record.path);
+            if (!folderPath || !path.isAbsolute(folderPath)) {
+                throw new Error("Custom sources require an absolute 'path'.");
+            }
+            folders.push({ source: 'custom', path: folderPath });
+        } else {
+            throw new Error("Each source must be 'claude', 'factory', or 'custom'.");
+        }
+    }
+    return folders;
+}
+
+function folderSummary(folder: IngestSourceFolder): { source: string; path: string; exists: boolean; sessionCount: number } {
+    const exists = fs.existsSync(folder.path);
+    return {
+        source: folder.source,
+        path: folder.path,
+        exists,
+        sessionCount: exists ? discoverSessionFiles([folder]).length : 0,
+    };
+}
+
+function ingestSourcesSummary(ctx: ServeContext): unknown {
+    const configStore = clientConfigStore(ctx);
+    return {
+        presets: [claudePresetFolder(), factoryPresetFolder()].map(folderSummary),
+        customFolders: configStore.listIngestFolders()
+            .map((folderPath) => folderSummary({ source: 'custom', path: folderPath })),
+        models: Object.entries(DIGEST_MODELS).map(([model, info]) => ({
+            model,
+            description: info.description,
+            inputUsdPerMTok: info.inputUsdPerMTok,
+            outputUsdPerMTok: info.outputUsdPerMTok,
+            isDefault: model === DEFAULT_DIGEST_MODEL,
+        })),
+        pricingAsOf: DIGEST_PRICING_AS_OF,
+        ingestReady: Boolean(ctx.config.geminiApiKey ?? envManager.get('GEMINI_API_KEY')),
+    };
 }
 
 /**
@@ -496,6 +603,104 @@ export function createServer(ctx: ServeContext): http.Server {
             // key is configured, tell the app to prompt for one.
             if (ctx.store === null) {
                 sendJson(res, 503, { error: 'GEMINI_API_KEY not configured', needsKey: true }, corsHeaders);
+                return;
+            }
+
+            if (method === 'GET' && pathname === '/ingest/sources') {
+                sendJson(res, 200, ingestSourcesSummary(ctx), corsHeaders);
+                return;
+            }
+
+            if (method === 'POST' && pathname === '/ingest/folders') {
+                const body = await readBody(req);
+                const folderPath = trimmedString(body?.path);
+                try {
+                    if (!folderPath) throw new Error("'path' is required");
+                    clientConfigStore(ctx).addIngestFolder(folderPath);
+                    sendJson(res, 200, ingestSourcesSummary(ctx), corsHeaders);
+                } catch (error) {
+                    sendJson(res, 400, { error: errorMessage(error) }, corsHeaders);
+                }
+                return;
+            }
+
+            if (method === 'DELETE' && pathname === '/ingest/folders') {
+                const body = await readBody(req);
+                const folderPath = trimmedString(body?.path);
+                if (!folderPath) {
+                    sendJson(res, 400, { error: "'path' is required" }, corsHeaders);
+                    return;
+                }
+                clientConfigStore(ctx).removeIngestFolder(folderPath);
+                sendJson(res, 200, ingestSourcesSummary(ctx), corsHeaders);
+                return;
+            }
+
+            if (method === 'POST' && pathname === '/ingest/scan') {
+                const body = await readBody(req);
+                try {
+                    const folders = resolveIngestFolders(ctx, body?.sources);
+                    sendJson(res, 200, ingestManager(ctx).scan(folders), corsHeaders);
+                } catch (error) {
+                    sendJson(res, 400, { error: errorMessage(error) }, corsHeaders);
+                }
+                return;
+            }
+
+            if (method === 'POST' && pathname === '/ingest/start') {
+                const body = await readBody(req);
+                try {
+                    const folders = resolveIngestFolders(ctx, body?.sources);
+                    const model = trimmedString(body?.model) || undefined;
+                    const mode = trimmedString(body?.mode) === 'batch' ? 'batch' as const : 'standard' as const;
+                    const manager = ingestManager(ctx);
+                    if (manager.isRunning()) {
+                        sendJson(res, 409, { error: 'An ingestion run is already in progress.' }, corsHeaders);
+                        return;
+                    }
+                    const store = ctx.store;
+                    // Fire and forget: the run is polled via GET /ingest/status.
+                    // Errors are captured in the manager's progress state.
+                    void manager.run({ folders, model, mode }, store).catch(() => undefined);
+                    sendJson(res, 200, { started: true }, corsHeaders);
+                } catch (error) {
+                    sendJson(res, 400, { error: errorMessage(error) }, corsHeaders);
+                }
+                return;
+            }
+
+            if (method === 'GET' && pathname === '/ingest/status') {
+                try {
+                    sendJson(res, 200, ingestManager(ctx).getProgress(), corsHeaders);
+                } catch {
+                    // No local key (remote mode) — nothing can be running.
+                    sendJson(res, 200, { state: 'idle', processed: 0, failed: 0, skipped: 0, total: 0 }, corsHeaders);
+                }
+                return;
+            }
+
+            if (method === 'POST' && pathname === '/ingest/collect') {
+                try {
+                    sendJson(res, 200, await ingestManager(ctx).collect(ctx.store), corsHeaders);
+                } catch (error) {
+                    sendJson(res, 400, { error: errorMessage(error) }, corsHeaders);
+                }
+                return;
+            }
+
+            if (method === 'POST' && pathname === '/ingest/cancel') {
+                try {
+                    const manager = ingestManager(ctx);
+                    if (manager.isRunning()) {
+                        manager.cancel();
+                        sendJson(res, 200, { cancelled: 'run' }, corsHeaders);
+                        return;
+                    }
+                    const cancelledBatch = await manager.cancelBatch();
+                    sendJson(res, 200, { cancelled: cancelledBatch ? 'batch' : 'none' }, corsHeaders);
+                } catch (error) {
+                    sendJson(res, 400, { error: errorMessage(error) }, corsHeaders);
+                }
                 return;
             }
 

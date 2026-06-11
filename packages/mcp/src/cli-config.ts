@@ -11,6 +11,8 @@ export interface StoredRemote {
 export interface StoredClientConfig {
     version: 1;
     remotes: Record<string, StoredRemote>;
+    /** Custom folders the user added for chat-history ingestion (absolute paths). */
+    ingestFolders?: string[];
 }
 
 export interface ClientConfigStoreOptions {
@@ -63,7 +65,10 @@ function parseConfig(value: unknown): StoredClientConfig {
             tokenEnvVar: remote.tokenEnvVar,
         };
     }
-    return { version: 1, remotes };
+    const ingestFolders = Array.isArray(candidate.ingestFolders)
+        ? candidate.ingestFolders.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0)
+        : undefined;
+    return { version: 1, remotes, ...(ingestFolders?.length && { ingestFolders }) };
 }
 
 export function tokenEnvVarForRemote(name: string): string {
@@ -133,6 +138,35 @@ export class ClientConfigStore {
             this.setEnv('GEMDEX_MODE', 'local');
         }
         return true;
+    }
+
+    listIngestFolders(): string[] {
+        return this.load().ingestFolders ?? [];
+    }
+
+    addIngestFolder(folderPath: string): string[] {
+        const normalized = folderPath.trim().replace(/\/+$/, '');
+        if (!normalized || !path.isAbsolute(normalized)) {
+            throw new Error('Ingest folder must be an absolute path.');
+        }
+        const config = this.load();
+        const folders = config.ingestFolders ?? [];
+        if (!folders.includes(normalized)) folders.push(normalized);
+        config.ingestFolders = folders;
+        this.writeConfig(config);
+        return folders;
+    }
+
+    removeIngestFolder(folderPath: string): string[] {
+        const config = this.load();
+        const folders = (config.ingestFolders ?? []).filter((entry) => entry !== folderPath);
+        if (folders.length > 0) {
+            config.ingestFolders = folders;
+        } else {
+            delete config.ingestFolders;
+        }
+        this.writeConfig(config);
+        return folders;
     }
 
     activateLocal(): void {
