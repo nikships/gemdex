@@ -138,7 +138,6 @@ struct SidebarView: View {
 /// One row in the sidebar: optional image thumbnail, title, preview, date, and
 /// an attachment-count chip.
 struct MemoryRow: View {
-    @EnvironmentObject var model: AppModel
     let memory: MemorySummary
     var isSelected: Bool = false
 
