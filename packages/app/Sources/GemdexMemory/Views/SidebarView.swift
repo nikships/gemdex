@@ -76,9 +76,12 @@ struct SidebarView: View {
         )) {
             ForEach(items) { memory in
                 MemoryRow(memory: memory, isSelected: memory.id == model.selectedID)
+                    .equatable()
                     .tag(memory.id)
+                    .frame(height: 74)
                     .listRowSeparator(.hidden)
                     .listRowBackground(Color.clear)
+                    .listRowInsets(EdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8))
                     .contextMenu {
                         Button("Open") { Task { await model.openMemory(memory.id) } }
                         Button("Delete", role: .destructive) {
@@ -92,7 +95,6 @@ struct SidebarView: View {
         }
         .listStyle(.sidebar)
         .scrollContentBackground(.hidden)
-        .softScrollEdges()
     }
 
     private func statusState(systemImage: String?, title: String, detail: String?, showSpinner: Bool) -> some View {
@@ -137,7 +139,7 @@ struct SidebarView: View {
 
 /// One row in the sidebar: optional image thumbnail, title, preview, date, and
 /// an attachment-count chip.
-struct MemoryRow: View {
+struct MemoryRow: View, Equatable {
     let memory: MemorySummary
     var isSelected: Bool = false
 
@@ -155,7 +157,7 @@ struct MemoryRow: View {
                         .lineLimit(2)
                 }
                 HStack(spacing: 7) {
-                    Text(EditorModel.fmt(memory.updatedAt))
+                    Text(memory.updatedLabel)
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                     if !memory.attachments.isEmpty {
@@ -169,7 +171,7 @@ struct MemoryRow: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(.vertical, 7)
+        .padding(.vertical, 6)
         .padding(.horizontal, 9)
         .background(selectionBackground)
         .contentShape(RoundedRectangle(cornerRadius: Metric.radiusControl, style: .continuous))
@@ -202,10 +204,6 @@ struct MemoryRow: View {
         if isSelected {
             RoundedRectangle(cornerRadius: Metric.radiusControl, style: .continuous)
                 .fill(Brand.gold.opacity(0.16))
-                .overlay(
-                    RoundedRectangle(cornerRadius: Metric.radiusControl, style: .continuous)
-                        .strokeBorder(Brand.gold.opacity(0.45), lineWidth: 1)
-                )
         }
     }
 }

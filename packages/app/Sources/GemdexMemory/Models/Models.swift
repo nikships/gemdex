@@ -54,6 +54,9 @@ struct MemorySummary: Codable, Identifiable, Hashable, Sendable {
     let attachments: [Attachment]
     let createdAt: Double
     let updatedAt: Double
+    let displayTitle: String
+    let searchTitle: String
+    let updatedLabel: String
 
     private enum CodingKeys: String, CodingKey {
         case id, title, preview, attachments, createdAt, updatedAt
@@ -67,10 +70,26 @@ struct MemorySummary: Codable, Identifiable, Hashable, Sendable {
         attachments = (try? c.decode([Attachment].self, forKey: .attachments)) ?? []
         createdAt = (try? c.decode(Double.self, forKey: .createdAt)) ?? 0
         updatedAt = (try? c.decode(Double.self, forKey: .updatedAt)) ?? 0
+        displayTitle = title.isEmpty ? "Untitled memory" : title
+        searchTitle = displayTitle.lowercased()
+        updatedLabel = Self.formatDate(updatedAt)
     }
 
-    var displayTitle: String { title.isEmpty ? "Untitled memory" : title }
     var firstImage: Attachment? { attachments.first { $0.kind == .image } }
+
+    /// Precomputed once during JSON decoding. Sidebar rows reuse this while
+    /// scrolling instead of formatting dates during every body recomputation.
+    nonisolated private static let dateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .short
+        return f
+    }()
+
+    nonisolated private static func formatDate(_ ms: Double) -> String {
+        guard ms > 0 else { return "" }
+        return dateFormatter.string(from: Date(timeIntervalSince1970: ms / 1000))
+    }
 }
 
 /// A full memory (`GET /memories/:id`).

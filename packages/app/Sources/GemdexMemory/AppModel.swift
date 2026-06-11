@@ -65,7 +65,7 @@ final class AppModel: ObservableObject {
         guard !query.isEmpty else { return memories }
         // Match displayTitle so empty-title memories ("Untitled memory") filter
         // consistently with how they render.
-        return memories.filter { $0.displayTitle.lowercased().contains(query) }
+        return memories.filter { $0.searchTitle.contains(query) }
     }
 
     /// Recall hits joined back to loaded summaries, preserving recall order so
