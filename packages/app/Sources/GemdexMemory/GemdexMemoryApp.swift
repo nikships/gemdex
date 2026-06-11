@@ -91,6 +91,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func configureWindow(_ window: NSWindow) {
+        let windowClassName = String(describing: type(of: window))
+        if windowClassName.hasPrefix("SU") || windowClassName.hasPrefix("SPU") || windowClassName.contains("Sparkle") {
+            return
+        }
+        if let controller = window.windowController {
+            let controllerClassName = String(describing: type(of: controller))
+            if controllerClassName.hasPrefix("SU") || controllerClassName.hasPrefix("SPU") || controllerClassName.contains("Sparkle") {
+                return
+            }
+        }
+        
         guard window.styleMask.contains(.titled) else { return }
         guard !(window is NSPanel) else { return }
         
