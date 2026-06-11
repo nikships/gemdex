@@ -176,6 +176,8 @@ final class AppModel: ObservableObject {
     func openNew() {
         selectedID = nil
         editor.startNew()
+        showSettings = false
+        showIngest = false
         isEditorOpen = true
     }
 
@@ -185,6 +187,8 @@ final class AppModel: ObservableObject {
             let memory = try await api.getMemory(id)
             selectedID = memory.id
             editor.load(memory)
+            showSettings = false
+            showIngest = false
             isEditorOpen = true
         } catch {
             setStatus("Error: \(error.localizedDescription)", isError: true)

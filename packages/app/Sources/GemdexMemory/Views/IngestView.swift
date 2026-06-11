@@ -10,6 +10,7 @@ import AppKit
 struct IngestView: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.dismiss) private var dismiss
+    var isEmbedded: Bool = false
 
     private enum Step {
         case sources
@@ -48,8 +49,9 @@ struct IngestView: View {
             Divider()
             footer
         }
-        .frame(width: 620, height: 600)
-        .background(BrandBackdrop())
+        .frame(width: isEmbedded ? nil : 620, height: isEmbedded ? nil : 600)
+        .frame(maxWidth: isEmbedded ? 600 : .infinity)
+        .background(isEmbedded ? nil : BrandBackdrop())
         .task { await loadSources() }
     }
 
@@ -65,7 +67,7 @@ struct IngestView: View {
             }
             Spacer()
             Button {
-                dismiss()
+                close()
             } label: {
                 Image(systemName: "xmark")
                     .font(.callout.weight(.semibold))
@@ -106,7 +108,7 @@ struct IngestView: View {
                     .buttonStyle(BrandButtonStyle())
                     .disabled(busy)
             case .done:
-                Button("Done") { dismiss() }
+                Button("Done") { close() }
                     .buttonStyle(BrandButtonStyle())
             }
         }
@@ -370,6 +372,14 @@ struct IngestView: View {
     }
 
     // MARK: - Actions
+
+    private func close() {
+        if isEmbedded {
+            model.showIngest = false
+        } else {
+            dismiss()
+        }
+    }
 
     private func loadSources() async {
         guard let api = model.api else { return }

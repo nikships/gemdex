@@ -12,6 +12,9 @@ struct DetailPane: View {
             if model.showSettings {
                 StorageSettingsView(isEmbedded: true)
                     .transition(.opacity.combined(with: .move(edge: .trailing)))
+            } else if model.showIngest {
+                IngestView(isEmbedded: true)
+                    .transition(.opacity.combined(with: .move(edge: .trailing)))
             } else if model.isEditorOpen {
                 EditorView()
                     .transition(.opacity.combined(with: .move(edge: .trailing)))
@@ -21,7 +24,7 @@ struct DetailPane: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: model.showSettings || model.isEditorOpen)
+        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: model.showSettings || model.showIngest || model.isEditorOpen)
     }
 
     private var placeholder: some View {
