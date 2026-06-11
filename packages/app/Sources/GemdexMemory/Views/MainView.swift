@@ -90,9 +90,13 @@ struct MainView: View {
         }
     }
 
-    static var today: String {
+    private static let todayFormatter: DateFormatter = {
         let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"
-        return f.string(from: Date())
+        return f
+    }()
+
+    static var today: String {
+        todayFormatter.string(from: Date())
     }
 }
 

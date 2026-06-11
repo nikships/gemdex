@@ -56,6 +56,7 @@ final class AppModel: ObservableObject {
 
     let editor = EditorModel()
     let sidecar = SidecarManager()
+    let thumbnails = ThumbnailLoader()
     private(set) var api: APIClient?
     private var cancellables = Set<AnyCancellable>()
 
@@ -76,6 +77,7 @@ final class AppModel: ObservableObject {
 
     init() {
         editor.appModel = self
+        thumbnails.appModel = self
         sidecar.$phase
             .receive(on: RunLoop.main)
             .sink { [weak self] phase in

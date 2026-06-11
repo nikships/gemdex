@@ -211,12 +211,18 @@ struct MemoryRow: View {
     }
 }
 
-/// Lazily fetches a small image attachment for a sidebar thumbnail.
+/// Lazily fetches a small image attachment for a sidebar thumbnail. Renders
+/// synchronously from the shared `ThumbnailLoader` cache when possible, so
+/// recycled rows don't flash a placeholder or re-fetch on scroll-back.
 struct ThumbnailView: View {
     @EnvironmentObject var model: AppModel
     let memoryID: String
     let attachmentID: String
-    @State private var image: NSImage?
+    @State private var loaded: NSImage?
+
+    private var image: NSImage? {
+        loaded ?? model.thumbnails.cached(memoryID: memoryID, attachmentID: attachmentID)
+    }
 
     var body: some View {
         Group {
@@ -229,11 +235,8 @@ struct ThumbnailView: View {
             }
         }
         .task(id: attachmentID) {
-            guard image == nil, let api = model.api else { return }
-            if let bytes = try? await api.attachmentBytes(memoryId: memoryID, attachmentId: attachmentID),
-               let nsImage = NSImage(data: bytes.data) {
-                image = nsImage
-            }
+            guard image == nil else { return }
+            loaded = await model.thumbnails.thumbnail(memoryID: memoryID, attachmentID: attachmentID)
         }
     }
 }

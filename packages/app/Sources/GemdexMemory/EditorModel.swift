@@ -242,13 +242,19 @@ final class EditorModel: ObservableObject {
 
     // MARK: - Formatting helpers
 
-    static func fmt(_ ms: Double) -> String {
-        guard ms > 0 else { return "" }
-        let date = Date(timeIntervalSince1970: ms / 1000)
+    /// Cached: sidebar rows call this on every render, and constructing a
+    /// DateFormatter per call is expensive enough to stutter scrolling.
+    /// Main-actor only, so the non-thread-safe formatter is fine.
+    private static let dateFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateStyle = .medium
         f.timeStyle = .short
-        return f.string(from: date)
+        return f
+    }()
+
+    static func fmt(_ ms: Double) -> String {
+        guard ms > 0 else { return "" }
+        return dateFormatter.string(from: Date(timeIntervalSince1970: ms / 1000))
     }
 
     static func humanSize(_ bytes: Int) -> String {
