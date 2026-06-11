@@ -362,6 +362,9 @@ export class IngestManager {
     private async digestWithRetry(digester: SessionDigester, session: ParsedSession): Promise<SessionDigest> {
         let lastError: unknown;
         for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            if (this.cancelRequested) {
+                throw new Error('Ingestion cancelled');
+            }
             try {
                 return await digester.digest(session);
             } catch (error) {

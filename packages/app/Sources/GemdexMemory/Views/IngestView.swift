@@ -6,6 +6,7 @@ import AppKit
 /// live progress (or submit a Batch API job) → done summary. The heavy lifting
 /// lives in gemdex-core's IngestManager behind the sidecar's `/ingest/*`
 /// routes; this view is a thin polling client.
+@MainActor
 struct IngestView: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.dismiss) private var dismiss
