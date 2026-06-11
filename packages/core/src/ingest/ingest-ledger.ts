@@ -59,7 +59,7 @@ export class IngestLedgerStore {
 
     private write(ledger: IngestLedger): void {
         fs.mkdirSync(path.dirname(this.ledgerPath), { recursive: true, mode: 0o700 });
-        const temporaryPath = `${this.ledgerPath}.${process.pid}.tmp`;
+        const temporaryPath = `${this.ledgerPath}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
         fs.writeFileSync(temporaryPath, `${JSON.stringify(ledger, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
         fs.renameSync(temporaryPath, this.ledgerPath);
     }

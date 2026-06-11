@@ -239,7 +239,7 @@ export class IngestManager {
             return { state: 'failed', jobState, error: 'Batch job succeeded but returned no result file.' };
         }
 
-        const downloadPath = path.join(os.tmpdir(), `gemdex-batch-results-${process.pid}.jsonl`);
+        const downloadPath = path.join(os.tmpdir(), `gemdex-batch-results-${process.pid}-${Math.random().toString(36).slice(2)}.jsonl`);
         let content: string;
         try {
             await client.files.download({ file: resultFileName, downloadPath });
@@ -425,7 +425,7 @@ export class IngestManager {
             lines.push(JSON.stringify({ key, request: digestBatchRequest(item.session) }));
         });
 
-        const uploadPath = path.join(os.tmpdir(), `gemdex-batch-input-${process.pid}.jsonl`);
+        const uploadPath = path.join(os.tmpdir(), `gemdex-batch-input-${process.pid}-${Math.random().toString(36).slice(2)}.jsonl`);
         let uploadedName: string | undefined;
         try {
             fs.writeFileSync(uploadPath, `${lines.join('\n')}\n`, 'utf8');

@@ -1,6 +1,7 @@
 import * as http from "http";
 import * as crypto from "crypto";
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { IngestManager, IngestSourceFolder, MemoryBackend, RemoteMemoryBackend, envManager } from "gemdex-core";
 import {
     DIGEST_MODELS,
@@ -54,6 +55,8 @@ export interface ServeContext {
     token?: string;
     /** Lazily created chat-history ingestion orchestrator. */
     ingestManager?: IngestManager;
+    /** The Gemini key the current ingest manager was built with. */
+    ingestManagerKey?: string;
 }
 
 function buildStore(
@@ -72,10 +75,9 @@ function configureApiKey(ctx: ServeContext, apiKey: string): void {
         ...ctx.config,
         geminiApiKey: apiKey,
     };
-    // Rebuild the ingest manager on next use so it picks up the new key.
-    if (ctx.ingestManager && !ctx.ingestManager.isRunning()) {
-        ctx.ingestManager = undefined;
-    }
+    // The ingest manager is rebuilt lazily when its recorded key goes stale
+    // (see ingestManager()), so an in-flight run keeps its manager while any
+    // later run picks up the new key.
     if (ctx.config.mode === 'local') {
         ctx.store = buildStore(ctx.config, ctx.createBackend);
     }
@@ -268,10 +270,19 @@ function ingestApiKey(ctx: ServeContext): string {
 }
 
 function ingestManager(ctx: ServeContext): IngestManager {
-    ctx.ingestManager ??= new IngestManager({
-        apiKey: ingestApiKey(ctx),
-        geminiBaseUrl: ctx.config.geminiBaseUrl,
-    });
+    const key = ingestApiKey(ctx);
+    // Rebuild on key change, but never yank the manager out from under a
+    // live run — that run already holds its digester.
+    if (ctx.ingestManager && ctx.ingestManagerKey !== key && !ctx.ingestManager.isRunning()) {
+        ctx.ingestManager = undefined;
+    }
+    if (!ctx.ingestManager) {
+        ctx.ingestManager = new IngestManager({
+            apiKey: key,
+            geminiBaseUrl: ctx.config.geminiBaseUrl,
+        });
+        ctx.ingestManagerKey = key;
+    }
     return ctx.ingestManager;
 }
 
@@ -293,7 +304,9 @@ function resolveIngestFolders(ctx: ServeContext, sources: unknown): IngestSource
             folders.push(factoryPresetFolder());
         } else if (source === 'custom') {
             const folderPath = trimmedString(record.path);
-            if (!folderPath) throw new Error("Custom sources require a 'path'.");
+            if (!folderPath || !path.isAbsolute(folderPath)) {
+                throw new Error("Custom sources require an absolute 'path'.");
+            }
             folders.push({ source: 'custom', path: folderPath });
         } else {
             throw new Error("Each source must be 'claude', 'factory', or 'custom'.");

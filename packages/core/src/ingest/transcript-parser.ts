@@ -179,8 +179,8 @@ export function parseSessionFile(filePath: string, source: IngestSource): Parsed
 
         const ts = parseTimestamp(record.timestamp);
         if (ts !== undefined) {
-            parsed.firstTs ??= ts;
-            parsed.lastTs = ts;
+            parsed.firstTs = parsed.firstTs === undefined ? ts : Math.min(parsed.firstTs, ts);
+            parsed.lastTs = parsed.lastTs === undefined ? ts : Math.max(parsed.lastTs, ts);
         }
 
         const text = contentToText(message.content, role);

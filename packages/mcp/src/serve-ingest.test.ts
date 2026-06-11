@@ -85,6 +85,8 @@ before(async () => {
         token: TOKEN,
         clientConfigStore: new ClientConfigStore({ rootDir: tmpDir }),
         ingestManager: fakeManager,
+        // Matches config.geminiApiKey so the key-staleness check keeps the fake.
+        ingestManagerKey: "local-key",
     };
     server = createServer(ctx);
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
