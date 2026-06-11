@@ -14,6 +14,13 @@ struct SetupView: View {
             VStack(spacing: 26) {
                 header
 
+                if let notice = model.setupNotice {
+                    Label(notice, systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout)
+                        .foregroundStyle(Brand.terracotta)
+                        .frame(maxWidth: 720, alignment: .leading)
+                }
+
                 HStack(alignment: .top, spacing: 18) {
                     localCard
                     remoteCard

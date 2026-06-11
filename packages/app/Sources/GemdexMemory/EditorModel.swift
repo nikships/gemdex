@@ -192,7 +192,9 @@ final class EditorModel: ObservableObject {
             }
             appModel.setStatus("Saved.")
         } catch {
-            appModel.setStatus("Error: \(error.localizedDescription)", isError: true)
+            let message = (error as? APIError)?.message ?? error.localizedDescription
+            if appModel.handlePossibleInvalidKey(message) { return }
+            appModel.setStatus("Error: \(message)", isError: true)
         }
     }
 

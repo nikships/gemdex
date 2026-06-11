@@ -392,7 +392,9 @@ struct IngestView: View {
             }
             await model.refreshPendingIngestBatch()
         } catch {
-            self.error = error.localizedDescription
+            let message = (error as? APIError)?.message ?? error.localizedDescription
+            if model.handlePossibleInvalidKey(message) { return }
+            self.error = message
         }
     }
 
@@ -514,7 +516,9 @@ struct IngestView: View {
         do {
             try await work()
         } catch {
-            self.error = error.localizedDescription
+            let message = (error as? APIError)?.message ?? error.localizedDescription
+            if model.handlePossibleInvalidKey(message) { return }
+            self.error = message
         }
     }
 

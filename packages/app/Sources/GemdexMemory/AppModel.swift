@@ -40,6 +40,10 @@ final class AppModel: ObservableObject {
     @Published var config: ConfigSummary?
     @Published var settings: SettingsSummary?
 
+    /// Shown on the setup screen when we send the user back to re-enter a key
+    /// (e.g. the configured Gemini key was rejected by Google at embed time).
+    @Published var setupNotice: String?
+
     @Published var isEditorOpen = false
     @Published var showSettings = false
     @Published var showIngest = false
@@ -227,6 +231,10 @@ final class AppModel: ObservableObject {
             guard filterText.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
             searchState = .results(results)
         } catch let err as APIError {
+            if handlePossibleInvalidKey(err.message) {
+                searchState = .idle
+                return
+            }
             searchState = .failed(err.message)
             setStatus("Search failed: \(err.message)", isError: true)
         } catch {
@@ -309,7 +317,34 @@ final class AppModel: ObservableObject {
         guard let api else { throw APIError(status: -1, message: "Sidecar not ready", needsKey: false) }
         let configured = try await api.setApiKey(key)
         guard configured else { throw APIError(status: -1, message: "Key was not accepted.", needsKey: false) }
+        setupNotice = nil
         await syncConfigGate()
+    }
+
+    /// Detect Gemini's "API key not valid" failure (the key is configured but
+    /// rejected by Google at embed time) so callers can route the user back to
+    /// key entry instead of surfacing raw Google JSON.
+    static func isInvalidKeyError(_ message: String) -> Bool {
+        let m = message.lowercased()
+        return m.contains("api_key_invalid")
+            || m.contains("api key not valid")
+            || m.contains("invalid_argument") && m.contains("api key")
+    }
+
+    /// If `message` indicates an invalid Gemini key, send the user back to the
+    /// setup screen with a clear prompt and return `true`. Local mode only —
+    /// remote backends own their own key.
+    @discardableResult
+    func handlePossibleInvalidKey(_ message: String) -> Bool {
+        guard config?.mode != "remote", Self.isInvalidKeyError(message) else { return false }
+        setupNotice = "Your Gemini API key was rejected. Please enter a valid key."
+        showSettings = false
+        showIngest = false
+        isEditorOpen = false
+        screen = .setup
+        statusText = "API key required"
+        statusIsError = true
+        return true
     }
 
     // MARK: - Config / settings helpers
