@@ -1,0 +1,521 @@
+import SwiftUI
+import AppKit
+
+/// Ingest coding-agent chat history as memories. Four-step flow:
+/// pick sources → scan (buckets + cost estimate + model choice) → run with
+/// live progress (or submit a Batch API job) → done summary. The heavy lifting
+/// lives in gemdex-core's IngestManager behind the sidecar's `/ingest/*`
+/// routes; this view is a thin polling client.
+struct IngestView: View {
+    @EnvironmentObject var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+
+    private enum Step {
+        case sources
+        case scanned
+        case running
+        case batchSubmitted
+        case done
+    }
+
+    @State private var step: Step = .sources
+    @State private var sources: IngestSources?
+    @State private var selectedPresets: Set<String> = []
+    @State private var selectedCustom: Set<String> = []
+    @State private var scan: IngestScanSummary?
+    @State private var selectedModel = ""
+    @State private var useBatch = false
+    @State private var status: IngestStatus?
+    @State private var collectResult: IngestCollectResult?
+    @State private var busy = false
+    @State private var error: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    content
+                    if let error {
+                        Text(error).font(.callout).foregroundStyle(Brand.terracotta)
+                            .textSelection(.enabled)
+                    }
+                }
+                .padding(20)
+            }
+            Divider()
+            footer
+        }
+        .frame(width: 620, height: 600)
+        .background(BrandBackdrop())
+        .task { await loadSources() }
+    }
+
+    // MARK: - Header / footer
+
+    private var header: some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 4) {
+                Label("Ingest chat history", systemImage: "tray.and.arrow.down")
+                    .font(.title3.bold())
+                Text("Distill coding-agent sessions into memories — one digest per session, with a pointer back to the raw transcript.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 26, height: 26)
+                    .glassSurfaceInteractive(cornerRadius: 999)
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut(.cancelAction)
+            .accessibilityLabel("Close")
+        }
+        .padding(20)
+    }
+
+    @ViewBuilder
+    private var footer: some View {
+        HStack {
+            if step == .sources, model.pendingIngestBatch != nil {
+                Button("Collect Pending Batch") { Task { await collect() } }
+                    .disabled(busy)
+            }
+            Spacer()
+            switch step {
+            case .sources:
+                Button("Scan") { Task { await runScan() } }
+                    .buttonStyle(BrandButtonStyle())
+                    .disabled(busy || !hasSelection)
+            case .scanned:
+                Button("Back") { step = .sources; scan = nil; error = nil }
+                Button(useBatch ? "Submit Batch Job" : "Start Ingestion") { Task { await start() } }
+                    .buttonStyle(BrandButtonStyle())
+                    .disabled(busy || (scan?.pendingCount ?? 0) == 0)
+            case .running:
+                Button("Cancel") { Task { await cancel() } }
+                    .disabled(busy)
+            case .batchSubmitted:
+                Button("Collect Results") { Task { await collect() } }
+                    .buttonStyle(BrandButtonStyle())
+                    .disabled(busy)
+            case .done:
+                Button("Done") { dismiss() }
+                    .buttonStyle(BrandButtonStyle())
+            }
+        }
+        .padding(16)
+    }
+
+    // MARK: - Step content
+
+    @ViewBuilder
+    private var content: some View {
+        switch step {
+        case .sources: sourcesStep
+        case .scanned: scannedStep
+        case .running: runningStep
+        case .batchSubmitted: batchSubmittedStep
+        case .done: doneStep
+        }
+    }
+
+    @ViewBuilder
+    private var sourcesStep: some View {
+        if let sources {
+            VStack(alignment: .leading, spacing: 14) {
+                if !sources.ingestReady {
+                    Label("Ingestion digests transcripts locally with Gemini and needs a GEMINI_API_KEY (Storage settings).",
+                          systemImage: "exclamationmark.triangle")
+                        .font(.callout)
+                        .foregroundStyle(Brand.terracotta)
+                }
+                Text("Session folders").font(.headline)
+                ForEach(sources.presets) { preset in
+                    folderRow(preset,
+                              checked: selectedPresets.contains(preset.source),
+                              toggle: { togglePreset(preset) },
+                              removable: false)
+                }
+                ForEach(sources.customFolders) { folder in
+                    folderRow(folder,
+                              checked: selectedCustom.contains(folder.path),
+                              toggle: { toggleCustom(folder) },
+                              removable: true)
+                }
+                Button {
+                    addFolder()
+                } label: {
+                    Label("Add Folder…", systemImage: "plus")
+                }
+                .disabled(busy)
+                if let pending = model.pendingIngestBatch {
+                    pendingBatchCard(pending)
+                }
+            }
+        } else {
+            ProgressView("Loading sources…")
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.vertical, 40)
+        }
+    }
+
+    private func folderRow(
+        _ folder: IngestFolderSummary,
+        checked: Bool,
+        toggle: @escaping () -> Void,
+        removable: Bool
+    ) -> some View {
+        HStack(spacing: 10) {
+            Toggle(isOn: Binding(get: { checked }, set: { _ in toggle() })) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(folderTitle(folder)).font(.body.weight(.medium))
+                    Text(folder.path).font(.caption).foregroundStyle(.secondary)
+                        .lineLimit(1).truncationMode(.middle)
+                }
+            }
+            .toggleStyle(.checkbox)
+            .disabled(!folder.exists)
+            Spacer()
+            Text(folder.exists ? "\(folder.sessionCount) sessions" : "not found")
+                .font(.caption)
+                .foregroundStyle(folder.exists ? Color.secondary : Brand.terracotta)
+            if removable {
+                Button {
+                    Task { await removeFolder(folder.path) }
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Remove folder")
+            }
+        }
+        .padding(10)
+        .glassSurface(cornerRadius: Metric.radiusCard)
+    }
+
+    private func folderTitle(_ folder: IngestFolderSummary) -> String {
+        switch folder.source {
+        case "claude": return "Claude Code"
+        case "factory": return "Factory CLI"
+        default: return (folder.path as NSString).lastPathComponent
+        }
+    }
+
+    @ViewBuilder
+    private var scannedStep: some View {
+        if let scan {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Scan results").font(.headline)
+                Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
+                    GridRow {
+                        Text("New sessions"); Text("\(scan.buckets.newFiles.count)").bold()
+                    }
+                    GridRow {
+                        Text("Changed since last ingest"); Text("\(scan.buckets.changedFiles.count)").bold()
+                    }
+                    GridRow {
+                        Text("Already up to date"); Text("\(scan.buckets.upToDate.count)").foregroundStyle(.secondary)
+                    }
+                    GridRow {
+                        Text("Skipped (active in last 10 min)"); Text("\(scan.buckets.skippedActive.count)").foregroundStyle(.secondary)
+                    }
+                }
+                .font(.callout)
+
+                if scan.pendingCount == 0 {
+                    Label("Everything is already ingested — nothing to do.", systemImage: "checkmark.circle")
+                        .foregroundStyle(Brand.sage)
+                } else {
+                    Divider()
+                    Text("Model & cost").font(.headline)
+                    Text("≈ \(formatTokens(scan.estimatedInputTokens)) input tokens across \(scan.pendingCount) sessions. Pricing as of \(sources?.pricingAsOf ?? "—").")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Picker("Model", selection: $selectedModel) {
+                        ForEach(sources?.models ?? []) { info in
+                            Text("\(info.model) — \(info.description)").tag(info.model)
+                        }
+                    }
+                    costTable(scan.estimates)
+                    Toggle(isOn: $useBatch) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Use Batch API (half price)")
+                            Text("Submits an async job; results are collected later (usually well under 24 h).")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func costTable(_ estimates: [IngestCostEstimate]) -> some View {
+        Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 4) {
+            GridRow {
+                Text("Model").font(.caption.bold())
+                Text("Standard").font(.caption.bold())
+                Text("Batch").font(.caption.bold())
+            }
+            ForEach(estimates) { estimate in
+                GridRow {
+                    Text(estimate.model)
+                        .font(.caption.monospaced())
+                        .fontWeight(estimate.model == selectedModel ? .bold : .regular)
+                    Text(formatUsd(estimate.standardUsd)).font(.caption.monospaced())
+                    Text(formatUsd(estimate.batchUsd)).font(.caption.monospaced())
+                }
+            }
+        }
+        .padding(10)
+        .glassSurface(cornerRadius: Metric.radiusCard)
+    }
+
+    private var runningStep: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Ingesting…").font(.headline)
+            let processed = (status?.processed ?? 0) + (status?.failed ?? 0)
+            ProgressView(value: Double(processed), total: Double(max(status?.total ?? 1, 1)))
+            HStack {
+                Text("\(status?.processed ?? 0) ingested · \(status?.failed ?? 0) failed · \(status?.total ?? 0) total")
+                    .font(.callout).foregroundStyle(.secondary)
+                Spacer()
+            }
+            if let current = status?.currentFile {
+                Text(current).font(.caption.monospaced()).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.middle)
+            }
+        }
+        .task { await pollStatus() }
+    }
+
+    private var batchSubmittedStep: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label("Batch job submitted", systemImage: "paperplane")
+                .font(.headline)
+            if let pending = status?.pendingBatch ?? model.pendingIngestBatch {
+                pendingBatchCard(pending)
+            }
+            Text("You can close this window — the job runs on Google's side. Come back any time and press “Collect Results” (also available from the sources screen).")
+                .font(.callout).foregroundStyle(.secondary)
+            if let collectResult, collectResult.state == "pending" {
+                Label("Still processing (\(collectResult.jobState ?? "running")). Try again later.",
+                      systemImage: "clock")
+                    .font(.callout)
+            }
+        }
+    }
+
+    private func pendingBatchCard(_ pending: IngestStatus.PendingBatch) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Pending batch job").font(.callout.bold())
+            Text("\(pending.jobName) · \(pending.requestCount) sessions · \(pending.model)")
+                .font(.caption.monospaced()).foregroundStyle(.secondary)
+            Text("Submitted \(Date(timeIntervalSince1970: pending.submittedAt / 1000).formatted(date: .abbreviated, time: .shortened))")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .glassSurface(cornerRadius: Metric.radiusCard, tint: Brand.gold)
+    }
+
+    private var doneStep: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            let failed = collectResult?.failed ?? status?.failed ?? 0
+            Label(failed == 0 ? "Ingestion complete" : "Ingestion finished with failures",
+                  systemImage: failed == 0 ? "checkmark.circle" : "exclamationmark.triangle")
+                .font(.headline)
+                .foregroundStyle(failed == 0 ? Brand.sage : Brand.terracotta)
+            let ingested = collectResult?.ingested ?? status?.processed ?? 0
+            Text("\(ingested) memories saved" + (failed > 0 ? " · \(failed) sessions failed" : ""))
+                .font(.callout)
+            if let err = collectResult?.error ?? status?.error {
+                Text(err).font(.caption).foregroundStyle(Brand.terracotta).textSelection(.enabled)
+            }
+            Text("Each memory ends with a provenance line pointing at the raw transcript on disk, so agents can recall the digest and open the full session when needed.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: - Selection helpers
+
+    private var hasSelection: Bool { !selectedPresets.isEmpty || !selectedCustom.isEmpty }
+
+    private var selectedSourcePayload: [[String: Any]] {
+        var payload: [[String: Any]] = selectedPresets.sorted().map { ["source": $0] }
+        payload += selectedCustom.sorted().map { ["source": "custom", "path": $0] }
+        return payload
+    }
+
+    private func togglePreset(_ preset: IngestFolderSummary) {
+        if selectedPresets.contains(preset.source) {
+            selectedPresets.remove(preset.source)
+        } else {
+            selectedPresets.insert(preset.source)
+        }
+    }
+
+    private func toggleCustom(_ folder: IngestFolderSummary) {
+        if selectedCustom.contains(folder.path) {
+            selectedCustom.remove(folder.path)
+        } else {
+            selectedCustom.insert(folder.path)
+        }
+    }
+
+    // MARK: - Actions
+
+    private func loadSources() async {
+        guard let api = model.api else { return }
+        do {
+            let loaded = try await api.ingestSources()
+            apply(sources: loaded)
+            // Preselect presets that exist and have sessions.
+            for preset in loaded.presets where preset.exists && preset.sessionCount > 0 {
+                selectedPresets.insert(preset.source)
+            }
+            await model.refreshPendingIngestBatch()
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    private func apply(sources loaded: IngestSources) {
+        sources = loaded
+        if selectedModel.isEmpty {
+            selectedModel = loaded.models.first(where: { $0.isDefault })?.model
+                ?? loaded.models.first?.model ?? ""
+        }
+        // Drop selections for folders that no longer exist.
+        let knownCustom = Set(loaded.customFolders.map(\.path))
+        selectedCustom.formIntersection(knownCustom)
+    }
+
+    private func addFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose a folder containing .jsonl session transcripts"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task {
+            await withBusy {
+                let loaded = try await model.api?.addIngestFolder(url.path)
+                if let loaded {
+                    apply(sources: loaded)
+                    selectedCustom.insert(url.path)
+                }
+            }
+        }
+    }
+
+    private func removeFolder(_ path: String) async {
+        await withBusy {
+            if let loaded = try await model.api?.removeIngestFolder(path) {
+                apply(sources: loaded)
+            }
+        }
+    }
+
+    private func runScan() async {
+        await withBusy {
+            guard let api = model.api else { return }
+            scan = try await api.ingestScan(sources: selectedSourcePayload)
+            step = .scanned
+        }
+    }
+
+    private func start() async {
+        await withBusy {
+            guard let api = model.api else { return }
+            try await api.ingestStart(
+                sources: selectedSourcePayload,
+                model: selectedModel,
+                mode: useBatch ? "batch" : "standard"
+            )
+            status = nil
+            step = .running
+        }
+    }
+
+    /// Poll `/ingest/status` while the run step is visible. SwiftUI cancels
+    /// this task automatically when the view leaves the hierarchy.
+    private func pollStatus() async {
+        guard let api = model.api else { return }
+        while !Task.isCancelled, step == .running {
+            if let latest = try? await api.ingestStatus() {
+                status = latest
+                switch latest.state {
+                case "done", "failed", "cancelled":
+                    await finishRun()
+                    return
+                case "batchPending":
+                    model.pendingIngestBatch = latest.pendingBatch
+                    step = .batchSubmitted
+                    return
+                default:
+                    break
+                }
+            }
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+    }
+
+    private func finishRun() async {
+        step = .done
+        await model.refreshList()
+        await model.refreshPendingIngestBatch()
+    }
+
+    private func collect() async {
+        await withBusy {
+            guard let api = model.api else { return }
+            let result = try await api.ingestCollect()
+            collectResult = result
+            switch result.state {
+            case "collected", "failed":
+                await finishRun()
+            case "pending":
+                step = .batchSubmitted
+            case "none":
+                model.pendingIngestBatch = nil
+            default:
+                break
+            }
+        }
+    }
+
+    private func cancel() async {
+        await withBusy {
+            try await model.api?.ingestCancel()
+        }
+    }
+
+    private func withBusy(_ work: () async throws -> Void) async {
+        busy = true
+        error = nil
+        defer { busy = false }
+        do {
+            try await work()
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    // MARK: - Formatting
+
+    private func formatTokens(_ tokens: Int) -> String {
+        if tokens >= 1_000_000 { return String(format: "%.1fM", Double(tokens) / 1_000_000) }
+        if tokens >= 1_000 { return String(format: "%.0fk", Double(tokens) / 1_000) }
+        return "\(tokens)"
+    }
+
+    private func formatUsd(_ value: Double) -> String {
+        value < 0.01 && value > 0 ? "<$0.01" : String(format: "$%.2f", value)
+    }
+}

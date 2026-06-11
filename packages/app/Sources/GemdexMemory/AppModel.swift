@@ -42,6 +42,10 @@ final class AppModel: ObservableObject {
 
     @Published var isEditorOpen = false
     @Published var showSettings = false
+    @Published var showIngest = false
+    /// Set when a Gemini Batch ingestion job is awaiting collection, so the
+    /// UI can re-surface a "Collect" affordance across launches.
+    @Published var pendingIngestBatch: IngestStatus.PendingBatch?
 
     /// Semantic free-text search state (`.idle` = local title filter).
     @Published var searchState: SearchState = .idle
@@ -146,6 +150,7 @@ final class AppModel: ObservableObject {
             self.memories = list
             screen = .ready
             setStatus(Self.countLabel(list.count))
+            await refreshPendingIngestBatch()
         } catch let err as APIError {
             if config?.mode == "remote" {
                 screen = .remoteUnavailable(detail: err.message)
@@ -282,6 +287,16 @@ final class AppModel: ObservableObject {
             guard !t.isEmpty else { return nil }
             return try JSONSerialization.jsonObject(with: Data(t.utf8))
         }
+    }
+
+    // MARK: - Chat-history ingestion
+
+    /// Check for a previously submitted Batch API job awaiting collection.
+    /// Local mode only — ingestion always digests with a local Gemini key, and
+    /// the status route reports idle when no key/manager is available.
+    func refreshPendingIngestBatch() async {
+        guard let api else { return }
+        pendingIngestBatch = (try? await api.ingestStatus())?.pendingBatch
     }
 
     // MARK: - Setup

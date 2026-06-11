@@ -1,0 +1,491 @@
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import type { MemoryBackend } from '../memory/backend';
+import type { MemoryExportRecord } from '../memory/types';
+import {
+    SessionDigester,
+    buildDigestPrompt,
+    digestBatchRequest,
+    estimateCost,
+    estimateTokensForChars,
+    memoryIdForSession,
+    parseDigestResponse,
+    renderDigestMemory,
+    ESTIMATED_OUTPUT_TOKENS_PER_SESSION,
+} from './digester';
+import { IngestLedgerStore } from './ingest-ledger';
+import { bucketSessionFiles, discoverSessionFiles } from './session-scanner';
+import { parseSessionFile } from './transcript-parser';
+import {
+    IngestProgress,
+    IngestScanResult,
+    IngestSourceFolder,
+    ParsedSession,
+    PendingBatchJob,
+    PendingBatchRequest,
+    SessionDigest,
+    SessionFile,
+} from './types';
+
+export type IngestMode = 'standard' | 'batch';
+
+export interface IngestRunOptions {
+    folders: IngestSourceFolder[];
+    model?: string;
+    mode?: IngestMode;
+}
+
+export interface IngestManagerConfig {
+    apiKey: string;
+    geminiBaseUrl?: string;
+    ledger?: IngestLedgerStore;
+    /** Injectable for tests. */
+    createDigester?: (model: string | undefined) => SessionDigester;
+}
+
+/** Concurrent digest requests in standard mode. */
+const STANDARD_CONCURRENCY = 4;
+/** Retry attempts per session in standard mode. */
+const MAX_ATTEMPTS = 3;
+const RETRY_BASE_DELAY_MS = 2_000;
+
+const BATCH_TERMINAL_STATES = new Set([
+    'JOB_STATE_SUCCEEDED',
+    'JOB_STATE_FAILED',
+    'JOB_STATE_CANCELLED',
+    'JOB_STATE_EXPIRED',
+]);
+
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+interface PendingSession {
+    file: SessionFile;
+    session: ParsedSession;
+    promptChars: number;
+}
+
+export interface CollectResult {
+    state: 'none' | 'pending' | 'collected' | 'failed';
+    jobState?: string;
+    ingested?: number;
+    failed?: number;
+    error?: string;
+}
+
+/**
+ * Orchestrates chat-history ingestion: scan source folders against the
+ * ledger, digest each pending session via Gemini (standard or Batch API),
+ * and upsert one memory per session into the active MemoryBackend with the
+ * deterministic id `chat:<source>:<sessionId>`.
+ *
+ * One run at a time; progress is polled via {@link getProgress}.
+ */
+export class IngestManager {
+    private readonly config: IngestManagerConfig;
+    private readonly ledger: IngestLedgerStore;
+    private progress: IngestProgress = { state: 'idle', processed: 0, failed: 0, skipped: 0, total: 0 };
+    private cancelRequested = false;
+    private running = false;
+
+    constructor(config: IngestManagerConfig) {
+        this.config = config;
+        this.ledger = config.ledger ?? new IngestLedgerStore();
+    }
+
+    getProgress(): IngestProgress {
+        const pending = this.ledger.getPendingBatch();
+        if (!this.running && pending) {
+            return {
+                ...this.progress,
+                state: 'batchPending',
+                pendingBatch: {
+                    jobName: pending.jobName,
+                    model: pending.model,
+                    submittedAt: pending.submittedAt,
+                    requestCount: Object.keys(pending.requests).length,
+                },
+            };
+        }
+        return { ...this.progress };
+    }
+
+    isRunning(): boolean {
+        return this.running;
+    }
+
+    cancel(): void {
+        this.cancelRequested = true;
+    }
+
+    /**
+     * Scan source folders, bucket against the ledger, and estimate cost.
+     * Pending (new + changed) files are parsed to size the digest prompts;
+     * trivial sessions are excluded from estimates but still counted in the
+     * buckets they fall into.
+     */
+    scan(folders: IngestSourceFolder[]): IngestScanResult {
+        const files = discoverSessionFiles(folders);
+        const buckets = bucketSessionFiles(files, this.ledger);
+        const pending = [...buckets.newFiles, ...buckets.changedFiles];
+
+        let inputChars = 0;
+        let sessions = 0;
+        for (const file of pending) {
+            const session = this.tryParse(file);
+            if (!session) continue;
+            sessions += 1;
+            inputChars += buildDigestPrompt(session).length;
+        }
+        const estimatedInputTokens = estimateTokensForChars(inputChars);
+        const estimatedOutputTokens = sessions * ESTIMATED_OUTPUT_TOKENS_PER_SESSION;
+        return {
+            buckets,
+            pendingCount: pending.length,
+            estimatedInputTokens,
+            estimatedOutputTokens,
+            estimates: estimateCost(estimatedInputTokens, estimatedOutputTokens),
+        };
+    }
+
+    /**
+     * Run ingestion over the pending files in `folders`. Resolves when the
+     * run completes (standard) or the batch job has been submitted (batch).
+     */
+    async run(options: IngestRunOptions, backend: MemoryBackend): Promise<IngestProgress> {
+        if (this.running) throw new Error('An ingestion run is already in progress.');
+        if (this.ledger.getPendingBatch()) {
+            throw new Error('A batch ingestion job is pending. Collect or cancel it first.');
+        }
+        this.running = true;
+        this.cancelRequested = false;
+        try {
+            const files = discoverSessionFiles(options.folders);
+            const buckets = bucketSessionFiles(files, this.ledger);
+            const pendingFiles = [...buckets.newFiles, ...buckets.changedFiles];
+
+            const sessions: PendingSession[] = [];
+            let skippedTrivial = 0;
+            for (const file of pendingFiles) {
+                const session = this.tryParse(file);
+                if (!session) {
+                    skippedTrivial += 1;
+                    continue;
+                }
+                sessions.push({ file, session, promptChars: 0 });
+            }
+
+            this.progress = {
+                state: 'running',
+                processed: 0,
+                failed: 0,
+                skipped: skippedTrivial,
+                total: sessions.length,
+            };
+
+            if (sessions.length === 0) {
+                this.progress.state = 'done';
+                return this.getProgress();
+            }
+
+            if ((options.mode ?? 'standard') === 'batch') {
+                await this.submitBatch(sessions, options.model);
+            } else {
+                await this.runStandard(sessions, options.model, backend);
+            }
+            return this.getProgress();
+        } catch (error) {
+            this.progress = {
+                ...this.progress,
+                state: 'failed',
+                error: error instanceof Error ? error.message : String(error),
+            };
+            throw error;
+        } finally {
+            this.running = false;
+        }
+    }
+
+    /**
+     * Poll a pending batch job and, when complete, download its results and
+     * save the digests. Safe to call repeatedly; returns `pending` until the
+     * job reaches a terminal state.
+     */
+    async collect(backend: MemoryBackend): Promise<CollectResult> {
+        const pending = this.ledger.getPendingBatch();
+        if (!pending) return { state: 'none' };
+
+        const digester = this.createDigester(pending.model);
+        const client = digester.getClient();
+        const job = await client.batches.get({ name: pending.jobName });
+        const jobState = String(job.state ?? 'JOB_STATE_PENDING');
+        if (!BATCH_TERMINAL_STATES.has(jobState)) {
+            return { state: 'pending', jobState };
+        }
+        if (jobState !== 'JOB_STATE_SUCCEEDED') {
+            this.ledger.setPendingBatch(undefined);
+            return {
+                state: 'failed',
+                jobState,
+                error: job.error ? JSON.stringify(job.error) : `Batch job ended in ${jobState}`,
+            };
+        }
+
+        const resultFileName = job.dest?.fileName;
+        if (!resultFileName) {
+            this.ledger.setPendingBatch(undefined);
+            return { state: 'failed', jobState, error: 'Batch job succeeded but returned no result file.' };
+        }
+
+        const downloadPath = path.join(os.tmpdir(), `gemdex-batch-results-${process.pid}.jsonl`);
+        let content: string;
+        try {
+            await client.files.download({ file: resultFileName, downloadPath });
+            content = fs.readFileSync(downloadPath, 'utf8');
+        } finally {
+            fs.rmSync(downloadPath, { force: true });
+        }
+
+        let ingested = 0;
+        let failed = 0;
+        for (const line of content.split('\n')) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            let parsed: any;
+            try {
+                parsed = JSON.parse(trimmed);
+            } catch {
+                failed += 1;
+                continue;
+            }
+            const key = typeof parsed?.key === 'string' ? parsed.key : undefined;
+            const request = key ? pending.requests[key] : undefined;
+            if (!request) {
+                failed += 1;
+                continue;
+            }
+            const text = extractResponseText(parsed?.response);
+            if (!text) {
+                failed += 1;
+                continue;
+            }
+            try {
+                const digest = parseDigestResponse(text);
+                await this.saveDigest(digest, request, backend, pending.model);
+                ingested += 1;
+            } catch {
+                failed += 1;
+            }
+        }
+        this.ledger.setPendingBatch(undefined);
+        this.progress = {
+            state: 'done',
+            processed: ingested,
+            failed,
+            skipped: 0,
+            total: Object.keys(pending.requests).length,
+        };
+        return { state: 'collected', jobState, ingested, failed };
+    }
+
+    /** Cancel a pending batch job (best-effort server-side) and clear it locally. */
+    async cancelBatch(): Promise<boolean> {
+        const pending = this.ledger.getPendingBatch();
+        if (!pending) return false;
+        try {
+            const digester = this.createDigester(pending.model);
+            await digester.getClient().batches.cancel({ name: pending.jobName });
+        } catch {
+            // Job may already be terminal; clearing the local record is what matters.
+        }
+        this.ledger.setPendingBatch(undefined);
+        return true;
+    }
+
+    private createDigester(model: string | undefined): SessionDigester {
+        if (this.config.createDigester) return this.config.createDigester(model);
+        return new SessionDigester({
+            apiKey: this.config.apiKey,
+            model,
+            baseURL: this.config.geminiBaseUrl,
+        });
+    }
+
+    private tryParse(file: SessionFile): ParsedSession | null {
+        try {
+            return parseSessionFile(file.filePath, file.source);
+        } catch {
+            return null;
+        }
+    }
+
+    private async runStandard(
+        sessions: PendingSession[],
+        model: string | undefined,
+        backend: MemoryBackend,
+    ): Promise<void> {
+        const digester = this.createDigester(model);
+        const queue = [...sessions];
+        const workers = Array.from({ length: Math.min(STANDARD_CONCURRENCY, queue.length) }, async () => {
+            for (;;) {
+                if (this.cancelRequested) return;
+                const item = queue.shift();
+                if (!item) return;
+                this.progress.currentFile = item.file.filePath;
+                try {
+                    const digest = await this.digestWithRetry(digester, item.session);
+                    await this.saveDigest(digest, {
+                        source: item.file.source,
+                        filePath: item.file.filePath,
+                        mtimeMs: item.file.mtimeMs,
+                        size: item.file.size,
+                        sessionId: item.session.sessionId,
+                        sessionMeta: toSessionMeta(item.session),
+                    }, backend, digester.model);
+                    this.progress.processed += 1;
+                } catch (error) {
+                    this.progress.failed += 1;
+                    console.error(
+                        `[ingest] failed to digest ${item.file.filePath}: ` +
+                        (error instanceof Error ? error.message : String(error)),
+                    );
+                }
+            }
+        });
+        await Promise.all(workers);
+        delete this.progress.currentFile;
+        this.progress.state = this.cancelRequested ? 'cancelled' : 'done';
+    }
+
+    private async digestWithRetry(digester: SessionDigester, session: ParsedSession): Promise<SessionDigest> {
+        let lastError: unknown;
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            try {
+                return await digester.digest(session);
+            } catch (error) {
+                lastError = error;
+                if (attempt < MAX_ATTEMPTS && !this.cancelRequested) {
+                    await sleep(RETRY_BASE_DELAY_MS * attempt);
+                }
+            }
+        }
+        throw lastError;
+    }
+
+    private async saveDigest(
+        digest: SessionDigest,
+        request: PendingBatchRequest,
+        backend: MemoryBackend,
+        model: string,
+    ): Promise<void> {
+        const meta = request.sessionMeta;
+        const memoryId = memoryIdForSession(meta);
+        const now = Date.now();
+        const record: MemoryExportRecord = {
+            id: memoryId,
+            title: digest.title,
+            content: renderDigestMemory(digest, meta),
+            createdAt: meta.firstTs ?? now,
+            updatedAt: meta.lastTs ?? now,
+        };
+        const result = await backend.importRecords([record]);
+        if (result.imported !== 1) {
+            throw new Error(`Backend did not import digest for ${meta.filePath}`);
+        }
+        this.ledger.recordIngested(request.filePath, {
+            mtimeMs: request.mtimeMs,
+            size: request.size,
+            memoryId,
+            model,
+            ingestedAt: now,
+        });
+    }
+
+    private async submitBatch(sessions: PendingSession[], model: string | undefined): Promise<void> {
+        const digester = this.createDigester(model);
+        const client = digester.getClient();
+
+        const requests: Record<string, PendingBatchRequest> = {};
+        const lines: string[] = [];
+        sessions.forEach((item, index) => {
+            const key = `session-${index}`;
+            requests[key] = {
+                source: item.file.source,
+                filePath: item.file.filePath,
+                mtimeMs: item.file.mtimeMs,
+                size: item.file.size,
+                sessionId: item.session.sessionId,
+                sessionMeta: toSessionMeta(item.session),
+            };
+            lines.push(JSON.stringify({ key, request: digestBatchRequest(item.session) }));
+        });
+
+        const uploadPath = path.join(os.tmpdir(), `gemdex-batch-input-${process.pid}.jsonl`);
+        let uploadedName: string | undefined;
+        try {
+            fs.writeFileSync(uploadPath, `${lines.join('\n')}\n`, 'utf8');
+            const uploaded = await client.files.upload({
+                file: uploadPath,
+                config: { displayName: 'gemdex-chat-history-ingest', mimeType: 'jsonl' },
+            });
+            uploadedName = uploaded.name ?? undefined;
+        } finally {
+            fs.rmSync(uploadPath, { force: true });
+        }
+        if (!uploadedName) {
+            throw new Error('File upload for the batch job returned no file name.');
+        }
+
+        const job = await client.batches.create({
+            model: digester.model,
+            src: uploadedName,
+            config: { displayName: 'gemdex-chat-history-ingest' },
+        });
+        if (!job.name) {
+            throw new Error('Batch job creation returned no job name.');
+        }
+
+        const pending: PendingBatchJob = {
+            jobName: job.name,
+            model: digester.model,
+            submittedAt: Date.now(),
+            requests,
+        };
+        this.ledger.setPendingBatch(pending);
+        this.progress = {
+            state: 'batchPending',
+            processed: 0,
+            failed: 0,
+            skipped: this.progress.skipped,
+            total: sessions.length,
+            pendingBatch: {
+                jobName: pending.jobName,
+                model: pending.model,
+                submittedAt: pending.submittedAt,
+                requestCount: sessions.length,
+            },
+        };
+    }
+}
+
+function toSessionMeta(session: ParsedSession) {
+    const { turns: _turns, ...meta } = session;
+    return meta;
+}
+
+/** Pull the text payload out of a (JSON-decoded) GenerateContentResponse. */
+export function extractResponseText(response: unknown): string | null {
+    if (!response || typeof response !== 'object') return null;
+    const candidates = (response as Record<string, unknown>).candidates;
+    if (!Array.isArray(candidates) || candidates.length === 0) return null;
+    const content = (candidates[0] as Record<string, unknown> | undefined)?.content;
+    const parts = (content as Record<string, unknown> | undefined)?.parts;
+    if (!Array.isArray(parts)) return null;
+    const text = parts
+        .map((part) => (part && typeof part === 'object' ? (part as Record<string, unknown>).text : undefined))
+        .filter((value): value is string => typeof value === 'string')
+        .join('');
+    return text || null;
+}
