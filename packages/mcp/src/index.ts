@@ -58,6 +58,12 @@ memories (never fragments). A query attachment is either a local file \`path\`
 (preferred — the server reads + encodes the bytes) or inline base64 \`data\`.
 Either \`query\` or at least one attachment is required; recall-by-media requires
 the gemini-embedding-2 model.
+
+If a recalled memory includes a "Full transcript:" path (often a .jsonl session
+log) and the summary does not answer the user's question with enough detail,
+read that transcript directly before concluding. Treat transcript paths as
+supporting evidence for the memory, especially when the user asks for exact
+prior code, commands, comparisons, or session details.
 `;
 
 const UPDATE_MEMORY_DESCRIPTION = `
