@@ -122,7 +122,11 @@ export interface ModelCostEstimate {
 /** Result of scanning sources without running ingestion. */
 export interface IngestScanResult {
     buckets: ScanBuckets;
-    /** Files that would be processed (new + changed). */
+    /** Pending files that parse into non-trivial sessions and would be processed. */
+    processableBuckets: Pick<ScanBuckets, 'newFiles' | 'changedFiles'>;
+    /** Pending files skipped because they did not contain enough real conversation. */
+    skippedTrivialFiles: SessionFile[];
+    /** Non-trivial sessions that would be processed (processable new + changed). */
     pendingCount: number;
     /** Estimated input tokens across pending files. */
     estimatedInputTokens: number;

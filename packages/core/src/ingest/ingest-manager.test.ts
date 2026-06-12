@@ -51,6 +51,20 @@ function writeSession(name: string, sessionId: string): string {
     return filePath;
 }
 
+function writeTrivialSession(name: string): string {
+    const filePath = path.join(dir, 'sessions', name);
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, JSON.stringify({
+        type: 'session_start',
+        id: path.basename(name, '.jsonl'),
+        title: 'New Session',
+        cwd: '/repo',
+    }), 'utf8');
+    const old = (Date.now() - ACTIVE_SESSION_WINDOW_MS - 60_000) / 1000;
+    fs.utimesSync(filePath, old, old);
+    return filePath;
+}
+
 function fakeBackend(): MemoryBackend & { imported: MemoryExportRecord[] } {
     const imported: MemoryExportRecord[] = [];
     return {
@@ -100,9 +114,24 @@ describe('IngestManager.scan', () => {
         const result = manager(fakeDigester()).scan(folders());
         expect(result.pendingCount).toBe(2);
         expect(result.buckets.newFiles).toHaveLength(2);
+        expect(result.processableBuckets.newFiles).toHaveLength(2);
+        expect(result.skippedTrivialFiles).toHaveLength(0);
         expect(result.estimatedInputTokens).toBeGreaterThan(0);
         expect(result.estimates.length).toBeGreaterThan(0);
         expect(result.estimates[0].batchUsd).toBeLessThanOrEqual(result.estimates[0].standardUsd);
+    });
+
+    it('excludes trivial session stubs from pending counts and estimates', () => {
+        writeSession('real.jsonl', 'real');
+        const trivialPath = writeTrivialSession('stub.jsonl');
+
+        const result = manager(fakeDigester()).scan(folders());
+
+        expect(result.buckets.newFiles).toHaveLength(2);
+        expect(result.processableBuckets.newFiles).toHaveLength(1);
+        expect(result.pendingCount).toBe(1);
+        expect(result.skippedTrivialFiles.map((file) => file.filePath)).toEqual([trivialPath]);
+        expect(result.estimatedOutputTokens).toBeGreaterThan(0);
     });
 });
 

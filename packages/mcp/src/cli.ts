@@ -478,9 +478,13 @@ async function runIngestHistory(args: string[], io: CliIo, dependencies: CliDepe
     const folders = parseIngestSources(args);
     const scan = manager.scan(folders);
     io.stdout(
-        `Sessions — new: ${scan.buckets.newFiles.length}, changed: ${scan.buckets.changedFiles.length}, ` +
+        `Sessions — new: ${scan.processableBuckets.newFiles.length}, ` +
+        `changed: ${scan.processableBuckets.changedFiles.length}, ` +
         `up-to-date: ${scan.buckets.upToDate.length}, active (skipped): ${scan.buckets.skippedActive.length}\n`,
     );
+    if (scan.skippedTrivialFiles.length > 0) {
+        io.stdout(`Skipped trivial candidates: ${scan.skippedTrivialFiles.length}\n`);
+    }
     if (scan.pendingCount === 0) {
         io.stdout('Nothing to ingest.\n');
         return 0;

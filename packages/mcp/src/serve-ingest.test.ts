@@ -32,6 +32,8 @@ const fakeManager = {
         calls.scans.push(folders);
         return {
             buckets: { newFiles: [], changedFiles: [], upToDate: [], skippedActive: [] },
+            processableBuckets: { newFiles: [], changedFiles: [] },
+            skippedTrivialFiles: [],
             pendingCount: 0,
             estimatedInputTokens: 0,
             estimatedOutputTokens: 0,

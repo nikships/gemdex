@@ -47,6 +47,16 @@ function makeState(pendingCount: number): FakeManagerState {
                 upToDate: [],
                 skippedActive: [],
             },
+            processableBuckets: {
+                newFiles: Array.from({ length: pendingCount }, (_, index) => ({
+                    source: 'claude' as const,
+                    filePath: `/s/${index}.jsonl`,
+                    mtimeMs: 1,
+                    size: 1,
+                })),
+                changedFiles: [],
+            },
+            skippedTrivialFiles: [],
             pendingCount,
             estimatedInputTokens: 1000,
             estimatedOutputTokens: 800,
@@ -108,6 +118,28 @@ test('ingest-history --dry-run prints the scan and cost table without running', 
     assert.match(result.stdout, /new: 3/);
     assert.match(result.stdout, /gemini-3\.5-flash\s+standard \$1\.23\s+batch \$0\.62/);
     assert.equal(state.runs.length, 0);
+});
+
+test('ingest-history --dry-run reports trivial candidates separately', async () => {
+    const state = makeState(1);
+    state.scanResult.buckets.newFiles.push({
+        source: 'factory',
+        filePath: '/s/stub.jsonl',
+        mtimeMs: 1,
+        size: 236,
+    });
+    state.scanResult.skippedTrivialFiles.push({
+        source: 'factory',
+        filePath: '/s/stub.jsonl',
+        mtimeMs: 1,
+        size: 236,
+    });
+
+    const result = await run(['ingest-history', '--dry-run', '--source', rootDir], state);
+
+    assert.equal(result.code, 0);
+    assert.match(result.stdout, /Sessions — new: 1, changed: 0/);
+    assert.match(result.stdout, /Skipped trivial candidates: 1/);
 });
 
 test('ingest-history runs standard mode and reports the summary', async () => {

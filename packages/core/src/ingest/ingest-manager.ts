@@ -129,21 +129,28 @@ export class IngestManager {
     scan(folders: IngestSourceFolder[]): IngestScanResult {
         const files = discoverSessionFiles(folders);
         const buckets = bucketSessionFiles(files, this.ledger);
-        const pending = [...buckets.newFiles, ...buckets.changedFiles];
-
         let inputChars = 0;
-        let sessions = 0;
-        for (const file of pending) {
+        const processableBuckets = { newFiles: [] as SessionFile[], changedFiles: [] as SessionFile[] };
+        const skippedTrivialFiles: SessionFile[] = [];
+        const collectEstimate = (file: SessionFile, kind: 'newFiles' | 'changedFiles') => {
             const session = this.tryParse(file);
-            if (!session) continue;
-            sessions += 1;
+            if (!session) {
+                skippedTrivialFiles.push(file);
+                return;
+            }
+            processableBuckets[kind].push(file);
             inputChars += buildDigestPrompt(session).length;
-        }
+        };
+        for (const file of buckets.newFiles) collectEstimate(file, 'newFiles');
+        for (const file of buckets.changedFiles) collectEstimate(file, 'changedFiles');
+        const pendingCount = processableBuckets.newFiles.length + processableBuckets.changedFiles.length;
         const estimatedInputTokens = estimateTokensForChars(inputChars);
-        const estimatedOutputTokens = sessions * ESTIMATED_OUTPUT_TOKENS_PER_SESSION;
+        const estimatedOutputTokens = pendingCount * ESTIMATED_OUTPUT_TOKENS_PER_SESSION;
         return {
             buckets,
-            pendingCount: pending.length,
+            processableBuckets,
+            skippedTrivialFiles,
+            pendingCount,
             estimatedInputTokens,
             estimatedOutputTokens,
             estimates: estimateCost(estimatedInputTokens, estimatedOutputTokens),
