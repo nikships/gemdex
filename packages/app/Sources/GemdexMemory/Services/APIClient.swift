@@ -258,7 +258,7 @@ actor APIClient {
         return try decode(IngestSources.self, from: data)
     }
 
-    /// `sources` is a list of `{source: claude|factory|custom, path?}` entries.
+    /// `sources` is a list of `{source: claude|factory|codex|antigravity|custom, path?}` entries.
     func ingestScan(sources: [[String: Any]]) async throws -> IngestScanSummary {
         let body = try JSONSerialization.data(withJSONObject: ["sources": sources])
         let (data, _) = try await send(makeRequest("POST", "/ingest/scan", body: body))

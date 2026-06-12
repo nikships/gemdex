@@ -207,6 +207,8 @@ struct IngestView: View {
         switch folder.source {
         case "claude": return "Claude Code"
         case "factory": return "Factory CLI"
+        case "codex": return "Codex"
+        case "antigravity": return "Antigravity"
         default: return (folder.path as NSString).lastPathComponent
         }
     }

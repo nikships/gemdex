@@ -11,7 +11,7 @@ const MAX_COMMAND_CHARS = 300;
 const MAX_ERROR_CHARS = 200;
 
 /** Tools whose invocation is a shell command — the reproducibility payload. */
-const COMMAND_TOOLS = new Set(['Bash', 'Execute']);
+const COMMAND_TOOLS = new Set(['Bash', 'Execute', 'exec_command']);
 /** Tools that write files; reduced to `edit: <path>` so paths stay searchable. */
 const WRITE_TOOLS = new Set(['Edit', 'Write', 'Create', 'MultiEdit', 'NotebookEdit', 'ApplyPatch']);
 
@@ -32,8 +32,9 @@ export function stripSystemReminders(text: string): string {
 function toolUseToLine(name: unknown, input: unknown): string | null {
     if (typeof name !== 'string') return null;
     const args = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
-    if (COMMAND_TOOLS.has(name) && typeof args.command === 'string' && args.command.trim()) {
-        return `$ ${truncate(args.command.trim().replace(/\s*\n\s*/g, ' '), MAX_COMMAND_CHARS)}`;
+    const command = typeof args.command === 'string' ? args.command : typeof args.cmd === 'string' ? args.cmd : '';
+    if (COMMAND_TOOLS.has(name) && command.trim()) {
+        return `$ ${truncate(command.trim().replace(/\s*\n\s*/g, ' '), MAX_COMMAND_CHARS)}`;
     }
     if (WRITE_TOOLS.has(name) && typeof args.file_path === 'string' && args.file_path.trim()) {
         return `edit: ${args.file_path.trim()}`;
@@ -73,7 +74,7 @@ function contentToText(content: unknown, role: 'user' | 'assistant'): string {
     for (const part of content) {
         if (!part || typeof part !== 'object') continue;
         const p = part as Record<string, unknown>;
-        if (p.type === 'text' && typeof p.text === 'string') {
+        if ((p.type === 'text' || p.type === 'input_text' || p.type === 'output_text') && typeof p.text === 'string') {
             const text = role === 'user' ? stripSystemReminders(p.text) : p.text.trim();
             if (text) lines.push(text);
         } else if (p.type === 'tool_use') {
@@ -94,7 +95,7 @@ function parseTimestamp(value: unknown): number | undefined {
 }
 
 function sessionIdFromFile(filePath: string): string {
-    return path.basename(filePath, '.jsonl');
+    return path.basename(filePath).replace(/\.(jsonl|pb|db)$/i, '');
 }
 
 interface RawLine {
@@ -131,6 +132,10 @@ function readJsonlRecords(filePath: string): RawLine[] {
  * (< {@link MIN_SESSION_CHARS} chars of real text).
  */
 export function parseSessionFile(filePath: string, source: IngestSource): ParsedSession | null {
+    if (source === 'antigravity' && (filePath.endsWith('.db') || filePath.endsWith('.pb'))) {
+        return parseAntigravityBinarySession(filePath);
+    }
+    if (!filePath.endsWith('.jsonl')) return null;
     const records = readJsonlRecords(filePath);
     if (records.length === 0) return null;
 
@@ -155,6 +160,19 @@ export function parseSessionFile(filePath: string, source: IngestSource): Parsed
         let role: 'user' | 'assistant' | null = null;
         let message: Record<string, unknown> | null = null;
 
+        if (type === 'session_meta') {
+            const payload = (record.payload && typeof record.payload === 'object'
+                ? record.payload : null) as Record<string, unknown> | null;
+            if (typeof payload?.id === 'string' && payload.id) parsed.sessionId = payload.id;
+            if (typeof payload?.cwd === 'string' && payload.cwd) parsed.cwd ??= payload.cwd;
+            const ts = parseTimestamp(payload?.timestamp);
+            if (ts !== undefined) {
+                parsed.firstTs = parsed.firstTs === undefined ? ts : Math.min(parsed.firstTs, ts);
+                parsed.lastTs = parsed.lastTs === undefined ? ts : Math.max(parsed.lastTs, ts);
+            }
+            continue;
+        }
+
         if (type === 'user' || type === 'assistant') {
             // Claude dialect. Skip subagent sidechains — they aren't the user's
             // conversation and routinely dwarf it.
@@ -171,6 +189,27 @@ export function parseSessionFile(filePath: string, source: IngestSource): Parsed
                 ? record.message : null) as Record<string, unknown> | null;
             const messageRole = message?.role;
             if (messageRole === 'user' || messageRole === 'assistant') role = messageRole;
+        } else if (type === 'response_item') {
+            const payload = (record.payload && typeof record.payload === 'object'
+                ? record.payload : null) as Record<string, unknown> | null;
+            if (payload?.type === 'message') {
+                const payloadRole = payload.role;
+                if (payloadRole === 'user' || payloadRole === 'assistant') {
+                    role = payloadRole;
+                    message = payload;
+                }
+            } else if (payload?.type === 'function_call') {
+                const ts = parseTimestamp(record.timestamp);
+                if (ts !== undefined) {
+                    parsed.firstTs = parsed.firstTs === undefined ? ts : Math.min(parsed.firstTs, ts);
+                    parsed.lastTs = parsed.lastTs === undefined ? ts : Math.max(parsed.lastTs, ts);
+                }
+                const line = toolUseToLine(payload.name, parseFunctionCallArguments(payload.arguments));
+                if (line) parsed.turns.push({ role: 'assistant', text: line });
+                continue;
+            } else {
+                continue;
+            }
         } else {
             continue; // queue-operation, attachment, last-prompt, settings, …
         }
@@ -191,6 +230,82 @@ export function parseSessionFile(filePath: string, source: IngestSource): Parsed
     const totalChars = parsed.turns.reduce((sum, turn) => sum + turn.text.length, 0);
     if (totalChars < MIN_SESSION_CHARS) return null;
     return parsed;
+}
+
+function parseAntigravityBinarySession(filePath: string): ParsedSession | null {
+    let bytes: Buffer;
+    try {
+        bytes = fs.readFileSync(filePath);
+    } catch {
+        return null;
+    }
+    const strings = extractPrintableStrings(bytes)
+        .map((line) => line.trim())
+        .filter((line) => isUsefulAntigravityLine(line));
+    const uniqueLines = [...new Set(strings)];
+    const text = uniqueLines.join('\n');
+    if (text.length < MIN_SESSION_CHARS) return null;
+
+    let stat: fs.Stats | undefined;
+    try {
+        stat = fs.statSync(filePath);
+    } catch {
+        stat = undefined;
+    }
+    const cwd = uniqueLines
+        .map(fileUrlToPath)
+        .find((line): line is string => typeof line === 'string' && line.length > 0);
+    const title = uniqueLines.find((line) => line.length >= 8 && line.length <= 100 && !line.includes('/'));
+    return {
+        sessionId: sessionIdFromFile(filePath),
+        source: 'antigravity',
+        filePath,
+        ...(cwd && { cwd }),
+        ...(title && { title }),
+        ...(stat && { firstTs: stat.mtimeMs, lastTs: stat.mtimeMs }),
+        turns: [{ role: 'user', text }],
+    };
+}
+
+function extractPrintableStrings(bytes: Buffer): string[] {
+    const lines: string[] = [];
+    let current = '';
+    for (const byte of bytes) {
+        if (byte === 9 || byte === 10 || byte === 13 || (byte >= 32 && byte <= 126)) {
+            current += String.fromCharCode(byte);
+            continue;
+        }
+        if (current.length >= 12) lines.push(current);
+        current = '';
+    }
+    if (current.length >= 12) lines.push(current);
+    return lines;
+}
+
+function fileUrlToPath(value: string): string | undefined {
+    if (!value.startsWith('file://')) return undefined;
+    try {
+        return decodeURIComponent(value.slice('file://'.length));
+    } catch {
+        return value.slice('file://'.length);
+    }
+}
+
+function isUsefulAntigravityLine(value: string): boolean {
+    if (value.length < 8) return false;
+    if (/^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(value)) return false;
+    if (/^[A-Za-z0-9+/=]{80,}$/.test(value)) return false;
+    return /[A-Za-z]/.test(value);
+}
+
+function parseFunctionCallArguments(value: unknown): unknown {
+    if (!value || typeof value !== 'string') return {};
+    try {
+        const parsed = JSON.parse(value);
+        return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+        return {};
+    }
 }
 
 /** Default per-session transcript budget handed to the digest model (~75k tokens). */

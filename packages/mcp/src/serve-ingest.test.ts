@@ -110,8 +110,8 @@ test("GET /ingest/sources lists presets, custom folders, and models", async () =
     const res = await authed(`${base}/ingest/sources`);
     assert.equal(res.status, 200);
     const body = (await res.json()) as any;
-    assert.equal(body.presets.length, 2);
-    assert.deepEqual(body.presets.map((p: any) => p.source), ["claude", "factory"]);
+    assert.equal(body.presets.length, 4);
+    assert.deepEqual(body.presets.map((p: any) => p.source), ["claude", "factory", "codex", "antigravity"]);
     assert.ok(Array.isArray(body.customFolders));
     assert.ok(body.models.some((m: any) => m.isDefault));
     assert.equal(body.ingestReady, true);
@@ -157,14 +157,25 @@ test("POST /ingest/scan validates sources and delegates to the manager", async (
 
     const ok = await authed(`${base}/ingest/scan`, {
         method: "POST",
-        body: JSON.stringify({ sources: [{ source: "claude" }, { source: "custom", path: tmpDir }] }),
+        body: JSON.stringify({
+            sources: [
+                { source: "claude" },
+                { source: "codex" },
+                { source: "antigravity" },
+                { source: "custom", path: tmpDir },
+            ],
+        }),
     });
     assert.equal(ok.status, 200);
     const folders = calls.scans.at(-1) as Array<{ source: string; path: string }>;
-    assert.equal(folders.length, 2);
+    assert.equal(folders.length, 4);
     assert.equal(folders[0].source, "claude");
     assert.ok(folders[0].path.endsWith(path.join(".claude", "projects")));
-    assert.deepEqual(folders[1], { source: "custom", path: tmpDir });
+    assert.equal(folders[1].source, "codex");
+    assert.ok(folders[1].path.endsWith(path.join(".codex", "sessions")));
+    assert.equal(folders[2].source, "antigravity");
+    assert.ok(folders[2].path.endsWith(path.join(".gemini", "antigravity-cli", "conversations")));
+    assert.deepEqual(folders[3], { source: "custom", path: tmpDir });
 });
 
 test("POST /ingest/start kicks off a run and /ingest/status reports it", async () => {

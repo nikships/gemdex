@@ -7,8 +7,10 @@ import {
     DIGEST_MODELS,
     DEFAULT_DIGEST_MODEL,
     DIGEST_PRICING_AS_OF,
+    antigravityPresetFolder,
     buildCorsHeaders,
     claudePresetFolder,
+    codexPresetFolder,
     discoverSessionFiles,
     factoryPresetFolder,
     handleMemoryApiRequest,
@@ -302,6 +304,10 @@ function resolveIngestFolders(ctx: ServeContext, sources: unknown): IngestSource
             folders.push(claudePresetFolder());
         } else if (source === 'factory') {
             folders.push(factoryPresetFolder());
+        } else if (source === 'codex') {
+            folders.push(codexPresetFolder());
+        } else if (source === 'antigravity') {
+            folders.push(antigravityPresetFolder());
         } else if (source === 'custom') {
             const folderPath = trimmedString(record.path);
             if (!folderPath || !path.isAbsolute(folderPath)) {
@@ -309,7 +315,7 @@ function resolveIngestFolders(ctx: ServeContext, sources: unknown): IngestSource
             }
             folders.push({ source: 'custom', path: folderPath });
         } else {
-            throw new Error("Each source must be 'claude', 'factory', or 'custom'.");
+            throw new Error("Each source must be 'claude', 'factory', 'codex', 'antigravity', or 'custom'.");
         }
     }
     return folders;
@@ -328,7 +334,8 @@ function folderSummary(folder: IngestSourceFolder): { source: string; path: stri
 function ingestSourcesSummary(ctx: ServeContext): unknown {
     const configStore = clientConfigStore(ctx);
     return {
-        presets: [claudePresetFolder(), factoryPresetFolder()].map(folderSummary),
+        presets: [claudePresetFolder(), factoryPresetFolder(), codexPresetFolder(), antigravityPresetFolder()]
+            .map(folderSummary),
         customFolders: configStore.listIngestFolders()
             .map((folderPath) => folderSummary({ source: 'custom', path: folderPath })),
         models: Object.entries(DIGEST_MODELS).map(([model, info]) => ({

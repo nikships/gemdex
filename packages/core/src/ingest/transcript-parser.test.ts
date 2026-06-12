@@ -133,6 +133,91 @@ describe('parseSessionFile — Factory dialect', () => {
     });
 });
 
+describe('parseSessionFile — Codex dialect', () => {
+    it('reads session metadata, user/assistant messages, and command calls', () => {
+        const filePath = writeJsonl('rollout-2026-06-11T22-20-09-codex-id.jsonl', [
+            {
+                type: 'session_meta',
+                timestamp: '2026-06-12T02:20:55.207Z',
+                payload: {
+                    id: 'codex-id',
+                    timestamp: '2026-06-12T02:20:09.087Z',
+                    cwd: '/Users/me/repo',
+                },
+            },
+            {
+                type: 'response_item',
+                timestamp: '2026-06-12T02:20:55.211Z',
+                payload: {
+                    type: 'message',
+                    role: 'user',
+                    content: [{ type: 'input_text', text: `Fix the failing build. ${FILLER}` }],
+                },
+            },
+            {
+                type: 'response_item',
+                timestamp: '2026-06-12T02:21:03.481Z',
+                payload: {
+                    type: 'message',
+                    role: 'assistant',
+                    content: [{ type: 'output_text', text: 'I will inspect the test output.' }],
+                },
+            },
+            {
+                type: 'response_item',
+                timestamp: '2026-06-12T02:21:03.522Z',
+                payload: {
+                    type: 'function_call',
+                    name: 'exec_command',
+                    arguments: JSON.stringify({ cmd: 'pnpm --filter gemdex-core test' }),
+                },
+            },
+            {
+                type: 'response_item',
+                payload: {
+                    type: 'message',
+                    role: 'developer',
+                    content: [{ type: 'input_text', text: 'internal instructions' }],
+                },
+            },
+        ]);
+
+        const parsed = parseSessionFile(filePath, 'codex');
+        expect(parsed).not.toBeNull();
+        expect(parsed!.sessionId).toBe('codex-id');
+        expect(parsed!.cwd).toBe('/Users/me/repo');
+        expect(parsed!.firstTs).toBe(Date.parse('2026-06-12T02:20:09.087Z'));
+        expect(parsed!.lastTs).toBe(Date.parse('2026-06-12T02:21:03.522Z'));
+        expect(parsed!.turns).toHaveLength(3);
+        expect(parsed!.turns[0].text).toContain('Fix the failing build.');
+        expect(parsed!.turns[1].text).toContain('inspect the test output');
+        expect(parsed!.turns[2].text).toBe('$ pnpm --filter gemdex-core test');
+    });
+});
+
+describe('parseSessionFile — Antigravity dialect', () => {
+    it('extracts useful transcript strings from binary conversation files', () => {
+        const filePath = path.join(dir, 'antigravity-session.db');
+        const content = [
+            'file:///Users/me/project',
+            'Reviewing payment webhook retries',
+            'User asked to inspect the retry scheduler and preserve idempotency.',
+            '{"CommandLine":"pnpm test -- --runInBand webhook.test.ts"}',
+            'Fixed src/webhook/retry.ts and added regression coverage.',
+        ].join('\0');
+        fs.writeFileSync(filePath, Buffer.from(content, 'utf8'));
+
+        const parsed = parseSessionFile(filePath, 'antigravity');
+        expect(parsed).not.toBeNull();
+        expect(parsed!.sessionId).toBe('antigravity-session');
+        expect(parsed!.cwd).toBe('/Users/me/project');
+        expect(parsed!.title).toBe('Reviewing payment webhook retries');
+        expect(parsed!.turns).toHaveLength(1);
+        expect(parsed!.turns[0].text).toContain('retry scheduler');
+        expect(parsed!.turns[0].text).toContain('pnpm test');
+    });
+});
+
 describe('parseSessionFile — edge cases', () => {
     it('returns null for trivial sessions', () => {
         const filePath = writeJsonl('trivial.jsonl', [

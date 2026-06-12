@@ -8,8 +8,10 @@ import {
     MemoryBackend,
     RemoteMemoryBackend,
     ServerVersionInfo,
+    antigravityPresetFolder,
     checkServerCompatibility,
     claudePresetFolder,
+    codexPresetFolder,
     envManager,
     factoryPresetFolder,
 } from 'gemdex-core';
@@ -54,7 +56,7 @@ Usage:
   gemdex mode remote <name>
   gemdex status
   gemdex import-local-to-remote [name]
-  gemdex ingest-history [--source claude|factory|PATH]... [--model MODEL]
+  gemdex ingest-history [--source claude|factory|codex|antigravity|PATH]... [--model MODEL]
                         [--batch] [--dry-run] [--collect]
 
 init-remote is the one-shot client setup for a BYOI server: it stores the
@@ -63,8 +65,8 @@ compatible, switches Gemdex into remote mode, optionally imports your local
 memories (--import-local), and prints the exact agent command to run.
 
 ingest-history distills coding-agent chat transcripts (Claude Code, Factory
-CLI, or any folder of .jsonl sessions) into one memory per session. Defaults
-to both presets when detected. --dry-run prints the scan + cost estimate;
+CLI, Codex, Antigravity, or any folder of .jsonl sessions) into one memory per
+session. Defaults to detected presets. --dry-run prints the scan + cost estimate;
 --batch submits a Gemini Batch API job (50% cost, results within ~24h) that
 you collect later with --collect. Needs a local GEMINI_API_KEY.
 `;
@@ -421,15 +423,20 @@ function parseIngestSources(args: string[]): IngestSourceFolder[] {
             folders.push(claudePresetFolder());
         } else if (value === 'factory') {
             folders.push(factoryPresetFolder());
+        } else if (value === 'codex') {
+            folders.push(codexPresetFolder());
+        } else if (value === 'antigravity') {
+            folders.push(antigravityPresetFolder());
         } else {
             folders.push({ source: 'custom', path: value });
         }
     }
     if (folders.length > 0) return folders;
-    // Default: both presets, when their folders exist.
-    const presets = [claudePresetFolder(), factoryPresetFolder()].filter((preset) => fs.existsSync(preset.path));
+    // Default: all built-in presets, when their folders exist.
+    const presets = [claudePresetFolder(), factoryPresetFolder(), codexPresetFolder(), antigravityPresetFolder()]
+        .filter((preset) => fs.existsSync(preset.path));
     if (presets.length === 0) {
-        throw new Error('No session folders found. Pass --source claude|factory|<path>.');
+        throw new Error('No session folders found. Pass --source claude|factory|codex|antigravity|<path>.');
     }
     return presets;
 }

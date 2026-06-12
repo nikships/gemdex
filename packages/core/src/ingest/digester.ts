@@ -74,6 +74,8 @@ export function estimateTokensForChars(chars: number): number {
 const SOURCE_LABELS: Record<string, string> = {
     claude: 'Claude Code',
     factory: 'Factory CLI',
+    codex: 'Codex',
+    antigravity: 'Antigravity',
     custom: 'Coding agent',
 };
 

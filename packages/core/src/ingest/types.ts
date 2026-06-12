@@ -1,13 +1,14 @@
 /**
  * Shared types for the chat-history ingestion pipeline: scanning coding-agent
- * session stores (Claude Code, Factory CLI, custom folders), distilling each
- * session into a digest memory, and tracking what has already been ingested.
+ * session stores (Claude Code, Factory CLI, Codex, Antigravity, custom folders),
+ * distilling each session into a digest memory, and tracking what has already
+ * been ingested.
  */
 
 /** Where a session file came from. Drives the deterministic memory id prefix. */
-export type IngestSource = 'claude' | 'factory' | 'custom';
+export type IngestSource = 'claude' | 'factory' | 'codex' | 'antigravity' | 'custom';
 
-/** A folder to scan for `*.jsonl` session transcripts. */
+/** A folder to scan for session transcripts. */
 export interface IngestSourceFolder {
     source: IngestSource;
     /** Absolute path of the folder to scan recursively. */
@@ -17,7 +18,7 @@ export interface IngestSourceFolder {
 /** One discovered session file with the metadata the scanner needs. */
 export interface SessionFile {
     source: IngestSource;
-    /** Absolute path to the `.jsonl` transcript. */
+    /** Absolute path to the transcript. */
     filePath: string;
     /** Last-modified time in epoch milliseconds. */
     mtimeMs: number;

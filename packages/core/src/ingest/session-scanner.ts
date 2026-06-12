@@ -7,7 +7,7 @@ import { IngestSourceFolder, ScanBuckets, SessionFile } from './types';
 /** Files modified within this window are treated as active sessions and skipped. */
 export const ACTIVE_SESSION_WINDOW_MS = 10 * 60 * 1000;
 
-/** Default preset locations for the two supported coding agents. */
+/** Default preset locations for supported coding agents. */
 export function claudePresetFolder(homeDir: string = os.homedir()): IngestSourceFolder {
     return { source: 'claude', path: path.join(homeDir, '.claude', 'projects') };
 }
@@ -16,16 +16,27 @@ export function factoryPresetFolder(homeDir: string = os.homedir()): IngestSourc
     return { source: 'factory', path: path.join(homeDir, '.factory', 'sessions') };
 }
 
+export function codexPresetFolder(homeDir: string = os.homedir()): IngestSourceFolder {
+    return { source: 'codex', path: path.join(homeDir, '.codex', 'sessions') };
+}
+
+export function antigravityPresetFolder(homeDir: string = os.homedir()): IngestSourceFolder {
+    return { source: 'antigravity', path: path.join(homeDir, '.gemini', 'antigravity-cli', 'conversations') };
+}
+
 /**
- * A transcript candidate is any `*.jsonl` file. Factory writes sibling
- * `<id>.settings.json` files which don't match, but guard against any future
- * `*.settings.jsonl` shape too.
+ * A transcript candidate is normally any `*.jsonl` file. Antigravity stores
+ * conversation records as SQLite/protobuf `*.db` and protobuf `*.pb` files
+ * under its conversations folder.
+ * Factory writes sibling `<id>.settings.json` files which don't match, but guard
+ * against any future `*.settings.jsonl` shape too.
  */
-function isSessionFileName(name: string): boolean {
+function isSessionFileName(name: string, source: IngestSourceFolder['source']): boolean {
+    if (source === 'antigravity') return name.endsWith('.db') || name.endsWith('.pb');
     return name.endsWith('.jsonl') && !name.endsWith('.settings.jsonl');
 }
 
-function walk(dir: string, out: string[]): void {
+function walk(dir: string, source: IngestSourceFolder['source'], out: string[]): void {
     let entries: fs.Dirent[];
     try {
         entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -35,8 +46,8 @@ function walk(dir: string, out: string[]): void {
     for (const entry of entries) {
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) {
-            walk(full, out);
-        } else if (entry.isFile() && isSessionFileName(entry.name)) {
+            walk(full, source, out);
+        } else if (entry.isFile() && isSessionFileName(entry.name, source)) {
             out.push(full);
         }
     }
@@ -48,7 +59,7 @@ export function discoverSessionFiles(folders: IngestSourceFolder[]): SessionFile
     const seen = new Set<string>();
     for (const folder of folders) {
         const paths: string[] = [];
-        walk(folder.path, paths);
+        walk(folder.path, folder.source, paths);
         for (const filePath of paths) {
             if (seen.has(filePath)) continue;
             seen.add(filePath);

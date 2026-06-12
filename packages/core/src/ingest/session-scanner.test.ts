@@ -41,6 +41,16 @@ describe('discoverSessionFiles', () => {
         expect(files.every((file) => file.source === 'factory')).toBe(true);
     });
 
+    it('finds Antigravity protobuf conversation files', () => {
+        writeFile('conversations/a.pb');
+        writeFile('conversations/b.db');
+        writeFile('conversations/b.jsonl');
+        writeFile('conversations/nested/c.pb');
+        const files = discoverSessionFiles([{ source: 'antigravity', path: path.join(dir, 'conversations') }]);
+        expect(files.map((file) => path.basename(file.filePath)).sort()).toEqual(['a.pb', 'b.db', 'c.pb']);
+        expect(files.every((file) => file.source === 'antigravity')).toBe(true);
+    });
+
     it('returns empty for a missing folder', () => {
         expect(discoverSessionFiles([{ source: 'claude', path: path.join(dir, 'nope') }])).toEqual([]);
     });
