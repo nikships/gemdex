@@ -10,7 +10,7 @@
         "gemdex": "dist/index.js"
     },
     "scripts": {
-        "build": "pnpm clean && tsc --build --force",
+        "build": "pnpm clean && tsc --build",
         "dev": "tsx --watch src/index.ts",
         "clean": "rimraf dist",
         "lint": "eslint src --ext .ts",

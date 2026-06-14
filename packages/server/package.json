@@ -10,7 +10,7 @@
     },
     "scripts": {
         "init": "bash scripts/init.sh",
-        "build": "pnpm clean && tsc --build --force",
+        "build": "pnpm clean && tsc --build",
         "clean": "rimraf dist",
         "lint": "eslint src --ext .ts",
         "lint:fix": "eslint src --ext .ts --fix",
