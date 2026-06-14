@@ -18,7 +18,7 @@
 </div>
 
 <p align="center">
-  <img src="assets/hero.jpg" alt="A developer writing knowledge into the Gemdex memory layer, recalled across every repo and machine" width="100%" />
+  <img src="assets/gemdex-hyperframes.gif" alt="Gemdex overview: global memory across agents, repos, local storage, parent-document recall, and desktop management" width="100%" />
 </p>
 
 ## Why Gemdex

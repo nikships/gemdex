@@ -120,6 +120,20 @@ h1.hero-h em{font-style:italic;color:var(--rust)}
 @media (prefers-reduced-motion:reduce){.fn1,.fn2,.fn3,.device-art{animation:none}}
 @media (max-width:880px){.device-stage{min-height:300px;margin-top:8px}.device-art{width:min(78%,340px)}}
 
+/* ---------- overview video ---------- */
+.video-section{padding:32px 0 56px}
+.video-card{display:grid;grid-template-columns:.74fr 1.26fr;gap:28px;align-items:center;background:var(--surface);
+  border:1px solid var(--border);border-radius:22px;padding:28px;box-shadow:var(--shadow-lg);overflow:hidden;position:relative}
+.video-card::before{content:"";position:absolute;inset:0;background:
+  radial-gradient(620px 260px at 78% 8%,var(--bloom-rust),transparent 70%),
+  radial-gradient(480px 260px at 12% 102%,var(--bloom-gold),transparent 72%);pointer-events:none}
+.video-copy,.video-frame{position:relative}
+.video-copy p{margin-top:14px;color:var(--muted);font-size:16.5px;line-height:1.55;text-wrap:pretty}
+.video-frame{border-radius:18px;border:1px solid var(--border-strong);background:var(--code-bg);box-shadow:var(--shadow-lg);
+  overflow:hidden;aspect-ratio:16/9}
+.video-frame video{display:block;width:100%;height:100%;object-fit:cover}
+@media (max-width:900px){.video-card{grid-template-columns:1fr;padding:22px}.video-section{padding:20px 0 44px}}
+
 /* ---------- code / terminal ---------- */
 .code{position:relative;background:var(--code-bg);border-radius:13px;border:1px solid color-mix(in srgb,#000 18%,var(--code-bg));
   box-shadow:var(--shadow);overflow:hidden;text-align:left}

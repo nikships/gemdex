@@ -2,6 +2,7 @@ import { ToastProvider } from "./context/ToastContext";
 import { useReveal } from "./hooks/useReveal";
 import { Nav } from "./components/Nav";
 import { Hero } from "./components/Hero";
+import { OverviewVideo } from "./components/OverviewVideo";
 import { QuoteBand } from "./components/QuoteBand";
 import { Workflow } from "./components/Workflow";
 import { Features } from "./components/Features";
@@ -23,6 +24,7 @@ export default function App() {
             <Nav />
             <main id="top">
                 <Hero />
+                <OverviewVideo />
                 <div className="wrap">
                     <div className="divider" />
                 </div>
