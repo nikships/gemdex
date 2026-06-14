@@ -1,0 +1,17 @@
+WEBVTT
+
+00:00:00.000 --> 00:00:03.500
+Meet Gemdex: memory your coding agents can share.
+
+00:00:03.500 --> 00:00:07.300
+Save a playbook once, then recall it from any repo or machine.
+
+00:00:07.300 --> 00:00:12.000
+It searches chunks with Gemini and LanceDB,
+but returns the whole memory.
+
+00:00:12.000 --> 00:00:15.500
+Local by default, remote when needed,
+
+00:00:15.500 --> 00:00:19.651
+and always under your control.

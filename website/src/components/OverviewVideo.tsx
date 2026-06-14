@@ -15,14 +15,19 @@ export function OverviewVideo() {
                     </div>
                     <div className="video-frame" aria-label="Gemdex overview video">
                         <video
-                            autoPlay
-                            loop
-                            muted
+                            controls
                             playsInline
                             poster="./brand/gemdex-hyperframes-poster.jpg"
                             preload="metadata"
                         >
                             <source src="./brand/gemdex-hyperframes.mp4" type="video/mp4" />
+                            <track
+                                kind="captions"
+                                src="./brand/gemdex-hyperframes.vtt"
+                                srcLang="en"
+                                label="English"
+                                default
+                            />
                             <a href="./brand/gemdex-hyperframes.mp4">Download the Gemdex overview video.</a>
                         </video>
                     </div>
