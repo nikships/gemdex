@@ -5,6 +5,10 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Added
+- **`list_memories` MCP tool.** A read-only browse over the global pool: lists stored memories newest-first as compact summaries (title + id + relative age + preview + media counts), with an optional case-insensitive substring `filter` over title/preview and a `limit` (default 50, max 200). Complements `recall` (relevance-ranked, full content) for orienting and for retrieving an exact `id` to pass to `update_memory`. Deletion remains a human-only desktop action.
+- **Richer `recall` output for agents.** Each hit now reports its relative age (`updated: 3d ago`, from `updatedAt`) and an `attachments:` line (kind + stable id + caption) so the agent can judge staleness and knows when media exists (fetch bytes via the sidecar's `GET /memories/:id/attachments/:attachmentId`).
+- **Token-budgeted recall.** `recall` accepts `detail: "summary" | "full"` (default `full`); `summary` returns a ~200-char preview per hit instead of full content, so an agent can scan many results cheaply before pulling the one it needs.
+
 - **Multimodal attachments (backend).** `save_memory` and `update_memory` accept an optional `attachments` array of inline base64 media (PNG/JPEG image, MP3/WAV audio, MP4/MOV video, PDF), embedded via `gemini-embedding-2` and recallable by text query. Each attachment is one embedding unit; its caption (or the memory title) backs the BM25 branch.
 - On-disk blob storage for attachment bytes under `~/.gemdex/blobs` (a `FileBlobStore`), keeping the LanceDB table lean. Attachments round-trip through `export`/`import`.
 - `gemdex serve` now accepts attachments on create/update and streams raw attachment bytes at `GET /memories/:id/attachments/:attachmentId`.

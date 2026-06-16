@@ -106,8 +106,8 @@ async function startFakeRemote(): Promise<{
     };
 }
 
-test('MCP public tool surface remains exactly save_memory, recall, update_memory', () => {
-    assert.deepEqual([...MCP_TOOL_NAMES], ['save_memory', 'recall', 'update_memory']);
+test('MCP public tool surface remains exactly save_memory, recall, update_memory, list_memories', () => {
+    assert.deepEqual([...MCP_TOOL_NAMES], ['save_memory', 'recall', 'update_memory', 'list_memories']);
 });
 
 test('remote-mode MCP handlers save, media-recall, and update through HTTP', async () => {
