@@ -23,7 +23,7 @@ build/test/lint/style rules are repo-wide — see the root `AGENTS.md`.
 | `src/memory.ts` | `createMemoryBackend(config)` — the one place that picks `LocalMemoryBackend` vs `RemoteMemoryBackend`. |
 | `src/cli-config.ts` | `ClientConfigStore` — reads/writes `~/.gemdex/config.json` (named remotes) and `~/.gemdex/.env` (tokens, `0600`). |
 | `src/embedding.ts` | `createEmbeddingInstance` — **throws if no `GEMINI_API_KEY`** in local mode. |
-| `src/tool-names.ts` | The frozen tuple `['save_memory','recall','update_memory']`; indices are referenced positionally in `index.ts`. |
+| `src/tool-names.ts` | The frozen tuple `['save_memory','recall','update_memory','list_memories']`; indices are referenced positionally in `index.ts`. |
 | `integration/byoi.mjs` | End-to-end BYOI harness (real server + built mcp dist + Postgres/pgvector). |
 
 ## One binary, three modes — how `main()` routes

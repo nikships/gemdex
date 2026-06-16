@@ -4,13 +4,13 @@ description: Use the Gemdex memory layer MCP tools (`save_memory`, `recall`, `up
 
 # Gemdex memory layer
 
-`gemdex` MCP exposes three tools that read/write a **global, persistent memory
+`gemdex` MCP exposes four tools that read/write a **global, persistent memory
 layer** stored locally (LanceDB at `~/.gemdex/`). Memory is shared across every
 repo and session, so something saved here is recallable everywhere. Retrieval is
 hybrid semantic + BM25 and always returns **whole memories, never fragments**.
 
-If `save_memory` / `recall` / `update_memory` aren't in your toolset, the MCP
-isn't connected — don't bring it up unless asked.
+If `save_memory` / `recall` / `update_memory` / `list_memories` aren't in your
+toolset, the MCP isn't connected — don't bring it up unless asked.
 
 ## The four tools
 
@@ -83,5 +83,6 @@ memory use `update_memory(id, edits=[{ oldText: <old step>, newText: <new step> 
   relevance score line (`fused=…`), an `attachments:` line when it has media,
   and the full `content`. Use the content directly; cite the `title` when
   helpful, and let the age inform you when a memory may be stale.
-- All three tools embed via Gemini. Local mode requires `GEMINI_API_KEY`;
+- `save_memory` / `recall` / `update_memory` embed via Gemini (`list_memories`
+  is a read-only browse and doesn't). Local mode requires `GEMINI_API_KEY`;
   remote mode delegates embedding to the configured Gemdex Server.
