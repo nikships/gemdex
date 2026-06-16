@@ -56,6 +56,63 @@ function parseEdits(value: unknown): ParsedEdits {
     return { edits };
 }
 
+const PREVIEW_LENGTH = 200;
+
+/** Collapse whitespace and truncate content to a short, single-line preview. */
+function makePreview(content: string, length = PREVIEW_LENGTH): string {
+    const collapsed = (content ?? '').replace(/\s+/g, ' ').trim();
+    if (collapsed.length <= length) return collapsed;
+    return collapsed.slice(0, length).trimEnd() + '…';
+}
+
+/**
+ * Render an epoch-millisecond timestamp as a compact relative age
+ * ("just now", "5m ago", "3d ago", "2y ago") so the agent can judge how
+ * fresh a recalled memory is. Future timestamps (clock skew) read "just now".
+ */
+function formatRelativeAge(timestamp: number, now: number = Date.now()): string {
+    const diffMs = now - timestamp;
+    if (!Number.isFinite(diffMs) || diffMs < 0) return 'just now';
+    const sec = Math.floor(diffMs / 1000);
+    if (sec < 60) return 'just now';
+    const min = Math.floor(sec / 60);
+    if (min < 60) return `${min}m ago`;
+    const hr = Math.floor(min / 60);
+    if (hr < 24) return `${hr}h ago`;
+    const days = Math.floor(hr / 24);
+    if (days < 7) return `${days}d ago`;
+    if (days < 30) return `${Math.floor(days / 7)}w ago`;
+    if (days < 365) return `${Math.floor(days / 30)}mo ago`;
+    return `${Math.floor(days / 365)}y ago`;
+}
+
+/**
+ * Per-hit attachment line for recall output. Surfaces each attachment's kind,
+ * stable id, and caption so the agent knows media exists and can reason about
+ * it (the caption is the human-written description). Returns null when none.
+ */
+function formatAttachmentsLine(
+    attachments: { id: string; kind: string; caption?: string }[] | undefined,
+): string | null {
+    if (!attachments || attachments.length === 0) return null;
+    const parts = attachments.map((a) => {
+        const caption = a.caption ? `: "${a.caption}"` : '';
+        return `${a.kind} (id ${a.id}${caption})`;
+    });
+    return `attachments: ${parts.join(', ')}`;
+}
+
+/** Compact attachment summary for list output, e.g. ` · 1 image, 1 pdf`. */
+function formatAttachmentCounts(
+    attachments: { kind: string }[] | undefined,
+): string {
+    if (!attachments || attachments.length === 0) return '';
+    const counts = new Map<string, number>();
+    for (const a of attachments) counts.set(a.kind, (counts.get(a.kind) ?? 0) + 1);
+    const parts = Array.from(counts.entries()).map(([kind, n]) => `${n} ${kind}${n > 1 ? 's' : ''}`);
+    return ` · ${parts.join(', ')}`;
+}
+
 /** Render one fused-search branch, e.g. `dense=#3 (d=0.1234)` or `bm25=—`. */
 function formatScoreBranch(label: string, rank: number | undefined, detail: string): string {
     if (rank === undefined) return `${label}=—`;
@@ -118,6 +175,7 @@ export class MemoryToolHandlers {
     async handleRecall(args: any): Promise<ToolResult> {
         const query = typeof args?.query === 'string' ? args.query : '';
         const limit = typeof args?.limit === 'number' && args.limit > 0 ? Math.min(args.limit, 50) : 10;
+        const summaryOnly = args?.detail === 'summary';
         const parsed = parseAttachments(args?.attachments);
         if ('error' in parsed) return parsed.error;
         const attachments = parsed.attachments;
@@ -132,20 +190,59 @@ export class MemoryToolHandlers {
             if (results.length === 0) {
                 return textResult(`No memories matched ${label}. Nothing stored yet, or no relevant match.`);
             }
+            const now = Date.now();
             const blocks = results.map((r, i) => {
                 const scoreLine = formatSubScoresLine(r.score, r.subScores);
-                return [
+                const lines = [
                     `### ${i + 1}. ${r.title}`,
                     `id: ${r.id}`,
+                    `updated: ${formatRelativeAge(r.updatedAt, now)}`,
                     scoreLine,
-                    ``,
-                    r.content,
-                ].join('\n');
+                ];
+                const attachmentsLine = formatAttachmentsLine(r.attachments);
+                if (attachmentsLine) lines.push(attachmentsLine);
+                lines.push('', summaryOnly ? makePreview(r.content) : r.content);
+                return lines.join('\n');
             });
-            const header = `Recalled ${results.length} ${results.length === 1 ? 'memory' : 'memories'} for ${label}:\n`;
+            const detailNote = summaryOnly
+                ? ' (summary mode — re-run recall with a tighter query or detail:"full" for complete content)'
+                : '';
+            const header = `Recalled ${results.length} ${results.length === 1 ? 'memory' : 'memories'} for ${label}${detailNote}:\n`;
             return textResult(header + '\n' + blocks.join('\n\n---\n\n'));
         } catch (error) {
             return textResult(`Failed to recall memories: ${errorMessage(error)}`, true);
+        }
+    }
+
+    async handleListMemories(args: any): Promise<ToolResult> {
+        const rawLimit = typeof args?.limit === 'number' && args.limit > 0 ? Math.floor(args.limit) : 50;
+        const limit = Math.min(rawLimit, 200);
+        const filter = typeof args?.filter === 'string' ? args.filter.trim().toLowerCase() : '';
+        try {
+            const all = await this.store.list();
+            const matched = filter.length > 0
+                ? all.filter((m) =>
+                    m.title.toLowerCase().includes(filter) || m.preview.toLowerCase().includes(filter))
+                : all;
+            if (matched.length === 0) {
+                const scope = filter.length > 0 ? ` matching "${filter}"` : '';
+                return textResult(`No memories${scope}. ${all.length === 0 ? 'Nothing stored yet.' : 'Try a different filter or recall with a natural-language query.'}`);
+            }
+            const shown = matched.slice(0, limit);
+            const now = Date.now();
+            const lines = shown.map((m, i) => {
+                const age = formatRelativeAge(m.updatedAt, now);
+                const media = formatAttachmentCounts(m.attachments);
+                return `${i + 1}. ${m.title}\n   id: ${m.id} · updated ${age}${media}\n   ${m.preview}`;
+            });
+            const filterNote = filter.length > 0 ? ` matching "${filter}"` : '';
+            const truncated = matched.length > shown.length
+                ? `\n\n(${matched.length - shown.length} more not shown — raise 'limit' or narrow 'filter')`
+                : '';
+            const header = `${matched.length} ${matched.length === 1 ? 'memory' : 'memories'}${filterNote} (newest first):\n`;
+            return textResult(header + '\n' + lines.join('\n\n') + truncated);
+        } catch (error) {
+            return textResult(`Failed to list memories: ${errorMessage(error)}`, true);
         }
     }
 

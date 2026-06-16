@@ -59,11 +59,33 @@ memories (never fragments). A query attachment is either a local file \`path\`
 Either \`query\` or at least one attachment is required; recall-by-media requires
 the gemini-embedding-2 model.
 
+Each hit reports its relative age (\`updated: …\`) and any attachments
+(\`kind (id …)\`) so you can judge freshness and know media exists; fetch
+attachment bytes from the desktop sidecar at
+\`GET /memories/:id/attachments/:attachmentId\`. Pass \`detail: "summary"\` to
+get title + preview + score only (cheap to scan many hits), then re-run with
+\`detail: "full"\` (the default) for the complete content you need.
+
 If a recalled memory includes a "Full transcript:" path (often a .jsonl session
 log) and the summary does not answer the user's question with enough detail,
 read that transcript directly before concluding. Treat transcript paths as
 supporting evidence for the memory, especially when the user asks for exact
 prior code, commands, comparisons, or session details.
+`;
+
+const LIST_MEMORIES_DESCRIPTION = `
+Browse the user's global memory layer: list stored memories newest-first, each
+as a compact title + id + relative age + preview (no embedding/search).
+
+🎯 **When to use**: when the user wants to see what's stored ("what do you have
+in memory?", "list your memories about deploys") or when you need a memory's
+exact \`id\` to pass to \`update_memory\` and a fuzzy \`recall\` isn't precise.
+Like the other tools, use it only when the user points you at the memory layer.
+
+Behavior: returns lightweight summaries (content truncated to a preview), not
+full content — use \`recall\` for relevance-ranked full memories. Optional
+\`filter\` is a case-insensitive substring matched against title + preview (a
+literal filter, NOT semantic search). \`limit\` defaults to 50 (max 200).
 `;
 
 const UPDATE_MEMORY_DESCRIPTION = `
@@ -181,6 +203,12 @@ class GemdexMemoryServer {
                                 default: 10,
                                 maximum: 50,
                             },
+                            detail: {
+                                type: "string",
+                                enum: ["summary", "full"],
+                                description: "'full' (default) returns each memory's complete content; 'summary' returns only a short preview per hit — cheaper to scan many results before pulling full content.",
+                                default: "full",
+                            },
                             attachments: ATTACHMENTS_SCHEMA,
                         },
                         required: [],
@@ -232,6 +260,26 @@ class GemdexMemoryServer {
                         required: ["id"],
                     },
                 },
+                {
+                    name: MCP_TOOL_NAMES[3],
+                    description: LIST_MEMORIES_DESCRIPTION,
+                    inputSchema: {
+                        type: "object",
+                        properties: {
+                            filter: {
+                                type: "string",
+                                description: "Optional case-insensitive substring matched against each memory's title and preview (literal, not semantic). Omit to list everything.",
+                            },
+                            limit: {
+                                type: "number",
+                                description: "Max number of memories to return.",
+                                default: 50,
+                                maximum: 200,
+                            },
+                        },
+                        required: [],
+                    },
+                },
             ],
         }));
 
@@ -244,6 +292,8 @@ class GemdexMemoryServer {
                     return await this.handlers.handleRecall(args);
                 case MCP_TOOL_NAMES[2]:
                     return await this.handlers.handleUpdateMemory(args);
+                case MCP_TOOL_NAMES[3]:
+                    return await this.handlers.handleListMemories(args);
                 default:
                     throw new Error(`Unknown tool: ${name}`);
             }

@@ -110,22 +110,31 @@ default elsewhere) → `413`; malformed JSON → `400`.
 
 ## MCP tool contract
 
-Schemas/descriptions live in `index.ts`; logic in `handlers.ts`. Three tools, no
-more. **Handlers never throw to the protocol** — on failure they return
+Schemas/descriptions live in `index.ts`; logic in `handlers.ts`. Four tools.
+**Handlers never throw to the protocol** — on failure they return
 `{ content:[…], isError:true }` with a human-readable message.
 
 | Tool | Required | Optional | Returns |
 |------|----------|----------|---------|
 | `save_memory` | `content` **OR** ≥1 attachment | `content`, `title`, `attachments` | `Saved memory.` + `id:` + `title:` (+ `attachments:` count) |
-| `recall` | `query` **OR** ≥1 attachment | `query`, `limit` (default 10, clamped to 50), `attachments` | Header + each **full** memory with `id:` and a `Scores: fused=… · dense=… · bm25=…` line |
+| `recall` | `query` **OR** ≥1 attachment | `query`, `limit` (default 10, clamped to 50), `detail` (`full`\|`summary`), `attachments` | Header + each memory with `id:`, an `updated: <age>` line, a `Scores: fused=… · dense=… · bm25=…` line, an `attachments:` line when present, and the **full** content (or a preview when `detail:"summary"`) |
 | `update_memory` | `id` + ≥1 of `content`/`edits`/`title`/`attachments` | `content`, `edits`, `title`, `attachments` | `Updated memory.` + `id:` + `title:` |
+| `list_memories` | — | `filter` (case-insensitive substring over title+preview), `limit` (default 50, max 200) | Header + each memory as `title`, `id: … · updated <age>` (+ media counts), and a `preview` — read-only browse, **not** semantic search |
 
 Invariants:
 - **No delete tool — by design.** Deletion is a deliberate human action in the
   desktop app; the *sidecar/core* exposes `DELETE /memories/:id`, the MCP surface
   deliberately does not.
 - `recall` returns **whole parent memories, never fragments** (hybrid dense+BM25
-  fused in core); `limit` is clamped to 50, defaults to 10.
+  fused in core); `limit` is clamped to 50, defaults to 10. Each hit also renders
+  a relative-age line (`updated: 3d ago`, derived from `updatedAt`) and an
+  `attachments:` line (kind + stable id + caption) when the memory has media.
+  `detail:"summary"` swaps full content for a ~200-char preview so an agent can
+  scan many hits cheaply, then re-recall for the one it wants.
+- `list_memories` is a **read-only browse** over `backend.list()` (summaries,
+  newest-first), not a search — `filter` is a literal case-insensitive substring
+  over title+preview. Use it to orient or to get an exact `id` for
+  `update_memory`; use `recall` for relevance ranking and full content.
 - `update_memory` preserves omitted fields; **`attachments:[]` clears** media,
   while omitting `attachments` keeps existing media.
 - **`edits` is the partial-update path, applied client-side in `handlers.ts`.**
@@ -172,8 +181,10 @@ independent pools; the local and remote pools never merge.
   server builds the backend at startup, so `createEmbeddingInstance` throws
   `GEMINI_API_KEY is required` and the process exits non-zero. The sidecar instead
   boots with a `null` store and serves `503 {needsKey:true}` until `/config`.
-- **Tool routing is positional**: `index.ts` switches on `MCP_TOOL_NAMES[0..2]`.
-  Reordering `tool-names.ts` silently rewires the handlers.
+- **Tool routing is positional**: `index.ts` switches on `MCP_TOOL_NAMES[0..3]`.
+  Reordering `tool-names.ts` silently rewires the handlers. Adding a tool means
+  appending to the tuple, defining its schema in `index.ts`, adding a `case`, and
+  a `handle*` method in `handlers.ts`.
 - **`runCli` returning `null` means "not mine, fall through to MCP."** A new verb
   that isn't added to `CLI_COMMANDS` will boot the stdio server instead of erroring.
 - **No MCP delete tool**, but `DELETE /memories/:id` exists in the

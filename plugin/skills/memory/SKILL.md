@@ -1,5 +1,5 @@
 ---
-description: Use the Gemdex memory layer MCP tools (`save_memory`, `recall`, `update_memory`) to give the agent durable, global memory across repos and sessions. EXPLICIT ONLY — save when the user says remember/save to memory, recall when the user points at memory ("check your memory layer", "how do we usually do X", "where are the … credentials"), update to revise. Never auto-capture a session and never recall unprompted. Memories are one global pool; embeddings handle disambiguation. Local mode requires GEMINI_API_KEY; remote mode uses the Gemdex Server owner's key. If these tools aren't in your toolset, the MCP isn't connected.
+description: Use the Gemdex memory layer MCP tools (`save_memory`, `recall`, `update_memory`, `list_memories`) to give the agent durable, global memory across repos and sessions. EXPLICIT ONLY — save when the user says remember/save to memory, recall when the user points at memory ("check your memory layer", "how do we usually do X", "where are the … credentials"), update to revise, list to browse what's stored or find an exact id. Never auto-capture a session and never recall unprompted. Memories are one global pool; embeddings handle disambiguation. Local mode requires GEMINI_API_KEY; remote mode uses the Gemdex Server owner's key. If these tools aren't in your toolset, the MCP isn't connected.
 ---
 
 # Gemdex memory layer
@@ -12,18 +12,24 @@ hybrid semantic + BM25 and always returns **whole memories, never fragments**.
 If `save_memory` / `recall` / `update_memory` aren't in your toolset, the MCP
 isn't connected — don't bring it up unless asked.
 
-## The three tools
+## The four tools
 
 - `save_memory(content, title?, attachments?)` — persist a new memory. Returns its `id`.
-- `recall(query, limit?, attachments?)` — retrieve full memories by natural
-  language (and/or media), ranked by relevance. Default `limit` ~10.
+- `recall(query, limit?, detail?, attachments?)` — retrieve full memories by
+  natural language (and/or media), ranked by relevance. Default `limit` ~10.
+  Each hit shows its relative age and any attachments. Pass `detail="summary"`
+  to scan many hits as previews before pulling full content.
 - `update_memory(id, content?, edits?, title?, attachments?)` — revise an
   existing memory in place under the same `id`. Use `edits` (targeted
   find-and-replace) to change part of a large memory without resending it;
   use `content` for a full rewrite. `content` and `edits` are mutually exclusive.
+- `list_memories(filter?, limit?)` — browse stored memories newest-first as
+  compact summaries (title + id + age + preview). A read-only catalog, **not**
+  search: `filter` is a literal substring. Use it to see what's stored or to get
+  an exact `id` for `update_memory` when `recall` isn't precise enough.
 
 There is **no delete tool** — deletion is a deliberate human action in the
-Gemdex desktop app. The agent saves, recalls, and edits; the human manages.
+Gemdex desktop app. The agent saves, recalls, browses, and edits; the human manages.
 
 ### Attaching media (image / audio / video / PDF)
 
@@ -73,8 +79,9 @@ memory use `update_memory(id, edits=[{ oldText: <old step>, newText: <new step> 
 
 - Memories can hold anything the user chooses, including credentials — stored
   in plaintext locally by design. Treat returned content as sensitive.
-- `recall` returns each memory's `id`, `title`, full `content`, and a relevance
-  score line (`fused=…`). Use the content directly; cite the `title` when
-  helpful.
+- `recall` returns each memory's `id`, `title`, an `updated: <age>` line, a
+  relevance score line (`fused=…`), an `attachments:` line when it has media,
+  and the full `content`. Use the content directly; cite the `title` when
+  helpful, and let the age inform you when a memory may be stale.
 - All three tools embed via Gemini. Local mode requires `GEMINI_API_KEY`;
   remote mode delegates embedding to the configured Gemdex Server.

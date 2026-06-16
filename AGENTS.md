@@ -88,12 +88,14 @@ the BYOI operations guide and the remote-mode wire contract.
 - **BYOI wire contract / compat floor** (`/v1`, bearer auth, `minClientVersion`):
   server + [docs/BYOI_REMOTE_MODE.md](docs/BYOI_REMOTE_MODE.md).
 
-## Three tools, no delete
+## Four tools, no delete
 
-The MCP surface is exactly `save_memory`, `recall`, `update_memory`. **There is
-no agent delete tool by design** — deletion is a deliberate human action in the
-desktop app (the sidecar/core `DELETE /memories/:id` route exists; the MCP tools
-deliberately don't expose it).
+The MCP surface is `save_memory`, `recall`, `update_memory`, and the read-only
+`list_memories` (browse summaries newest-first, optional substring filter — for
+orienting and getting exact ids; `recall` remains the relevance-ranked path).
+**There is no agent delete tool by design** — deletion is a deliberate human
+action in the desktop app (the sidecar/core `DELETE /memories/:id` route exists;
+the MCP tools deliberately don't expose it).
 
 ## Conventions (TS packages)
 
