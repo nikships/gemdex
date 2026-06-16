@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Rewrites packages/core, packages/mcp, and packages/server package.json files
-// in-place so they publish under the @anand-92 scope to GitHub Packages. This
+// in-place so they publish under the @nikships scope to GitHub Packages. This
 // is a CI-only transform — the canonical unscoped names (`gemdex-core`,
 // `gemdex-mcp`, `gemdex-server`) on npmjs.org are unchanged on disk and on the
 // published npm registry. The rewrite is applied transiently inside the
@@ -10,7 +10,7 @@
 // GitHub Packages' npm registry only accepts scoped names, hence the rename.
 //
 // Because the rename also changes the *dependency* gemdex-core ->
-// @anand-92/gemdex-core, the already-built dist of the dependents (mcp +
+// @nikships/gemdex-core, the already-built dist of the dependents (mcp +
 // server, which tsc emitted with the unscoped specifier `from "gemdex-core"`)
 // would resolve to a package that no longer exists under that name. So we also
 // rewrite the import specifiers in their built dist. The workflow runs this
@@ -23,7 +23,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const SCOPE = "@anand-92";
+const SCOPE = "@nikships";
 const REGISTRY = "https://npm.pkg.github.com";
 const CORE_OLD = "gemdex-core";
 const CORE_NEW = `${SCOPE}/gemdex-core`;
@@ -73,7 +73,7 @@ function rewriteDistImports(distRelPath) {
 // Retarget the gemdex-core workspace dependency to its scoped name. pnpm
 // rewrites `workspace:*` to the concrete version of the referenced workspace
 // package at publish time, looking the package up by name; since gemdex-core is
-// renamed to @anand-92/gemdex-core in the workspace, every dependent's key has
+// renamed to @nikships/gemdex-core in the workspace, every dependent's key has
 // to track the rename or `pnpm publish` fails to resolve it.
 function retargetCoreDependency(pkg) {
     if (
@@ -93,7 +93,7 @@ rewrite("packages/core/package.json", (pkg) => {
 
 // gemdex-mcp and gemdex-server are both unscoped npm packages that depend on
 // gemdex-core via `workspace:*`; they get the identical scope + dependency +
-// dist-import rewrite so the @anand-92/* graph resolves on GitHub Packages.
+// dist-import rewrite so the @nikships/* graph resolves on GitHub Packages.
 for (const dependent of ["mcp", "server"]) {
     rewrite(`packages/${dependent}/package.json`, (pkg) => {
         pkg.name = `${SCOPE}/gemdex-${dependent}`;

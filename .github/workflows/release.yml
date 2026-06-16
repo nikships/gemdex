@@ -5,7 +5,7 @@ name: Release
 # into every package by scripts/sync-version.mjs) and then releases every
 # artifact at that one version:
 #   • gemdex-core, gemdex-mcp, gemdex-server  → npmjs.org
-#   • @anand-92/{gemdex-core,gemdex-mcp,gemdex-server} → GitHub Packages
+#   • @nikships/{gemdex-core,gemdex-mcp,gemdex-server} → GitHub Packages
 #   • the macOS app → a signed, notarized DMG on a versioned GitHub release
 #     (which is what makes Sparkle actually offer the update).
 #
@@ -116,7 +116,7 @@ jobs:
           done
 
   github-packages:
-    name: Publish to GitHub Packages (@anand-92)
+    name: Publish to GitHub Packages (@nikships)
     needs: [prepare, npm]
     runs-on: ubuntu-latest
     permissions:
@@ -139,7 +139,7 @@ jobs:
           node-version: "20"
           cache: "pnpm"
           registry-url: "https://npm.pkg.github.com"
-          scope: "@anand-92"
+          scope: "@nikships"
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -147,7 +147,7 @@ jobs:
       - name: Build packages
         run: pnpm build
 
-      - name: Rewrite package.json files for the @anand-92 scope
+      - name: Rewrite package.json files for the @nikships scope
         run: node scripts/prepare-gh-packages.mjs
 
       - name: Refresh workspace graph after rename
@@ -170,7 +170,7 @@ jobs:
               # --ignore-scripts: the dist was already built and import-rewritten
               # above. A prepublishOnly rebuild would rimraf dist and recompile
               # with the unscoped `gemdex-core` specifier, which no longer
-              # resolves after the @anand-92 rename — so skip it.
+              # resolves after the @nikships rename — so skip it.
               pnpm --filter "$name" publish --no-git-checks --ignore-scripts
             fi
           done
