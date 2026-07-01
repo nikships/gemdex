@@ -46,6 +46,14 @@ export interface IngestLedgerEntry {
     model: string;
     /** Epoch milliseconds when the digest was saved. */
     ingestedAt: number;
+    /**
+     * SHA-256 of the digest prompt built from the parsed session. When a
+     * file's mtime/size churn (sync tools, CLIs rewriting metadata) but the
+     * digest-relevant content is identical, a matching hash lets the scanner
+     * treat the session as up to date instead of re-ingesting it. Absent on
+     * entries written before this field existed.
+     */
+    promptHash?: string;
 }
 
 /** A pending Gemini Batch API job, persisted so collection survives restarts. */
@@ -65,6 +73,8 @@ export interface PendingBatchRequest {
     mtimeMs: number;
     size: number;
     sessionId: string;
+    /** SHA-256 of the digest prompt, recorded into the ledger on save. Absent on jobs submitted before this field existed. */
+    promptHash?: string;
     /** Pre-rendered header/footer context so collection doesn't re-parse. */
     sessionMeta: SessionMeta;
 }
@@ -120,20 +130,26 @@ export interface ModelCostEstimate {
     batchUsd: number;
 }
 
-/** Result of scanning sources without running ingestion. */
-export interface IngestScanResult {
-    buckets: ScanBuckets;
-    /** Pending files that parse into non-trivial sessions and would be processed. */
-    processableBuckets: Pick<ScanBuckets, 'newFiles' | 'changedFiles'>;
-    /** Pending files skipped because they did not contain enough real conversation. */
-    skippedTrivialFiles: SessionFile[];
-    /** Non-trivial sessions that would be processed (processable new + changed). */
+/** Pending count and cost estimates for one ingestion scope. */
+export interface IngestScanTotals {
+    /** Non-trivial sessions that would be processed. */
     pendingCount: number;
     /** Estimated input tokens across pending files. */
     estimatedInputTokens: number;
     /** Estimated output tokens across pending files. */
     estimatedOutputTokens: number;
     estimates: ModelCostEstimate[];
+}
+
+/** Result of scanning sources without running ingestion. */
+export interface IngestScanResult extends IngestScanTotals {
+    buckets: ScanBuckets;
+    /** Pending files that parse into non-trivial sessions and would be processed. */
+    processableBuckets: Pick<ScanBuckets, 'newFiles' | 'changedFiles'>;
+    /** Pending files skipped because they did not contain enough real conversation. */
+    skippedTrivialFiles: SessionFile[];
+    /** Totals restricted to never-before-ingested sessions (the `newOnly` run option). */
+    newOnly: IngestScanTotals;
 }
 
 export type IngestRunState = 'idle' | 'running' | 'batchPending' | 'done' | 'failed' | 'cancelled';
