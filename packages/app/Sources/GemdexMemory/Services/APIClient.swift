@@ -265,8 +265,8 @@ actor APIClient {
         return try decode(IngestScanSummary.self, from: data)
     }
 
-    func ingestStart(sources: [[String: Any]], model: String, mode: String) async throws {
-        let payload: [String: Any] = ["sources": sources, "model": model, "mode": mode]
+    func ingestStart(sources: [[String: Any]], model: String, mode: String, newOnly: Bool) async throws {
+        let payload: [String: Any] = ["sources": sources, "model": model, "mode": mode, "newOnly": newOnly]
         let body = try JSONSerialization.data(withJSONObject: payload)
         _ = try await send(makeRequest("POST", "/ingest/start", body: body))
     }

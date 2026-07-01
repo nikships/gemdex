@@ -1,3 +1,4 @@
+import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -18,8 +19,10 @@ import { IngestLedgerStore } from './ingest-ledger';
 import { bucketSessionFiles, discoverSessionFiles } from './session-scanner';
 import { parseSessionFile } from './transcript-parser';
 import {
+    IngestLedgerEntry,
     IngestProgress,
     IngestScanResult,
+    IngestScanTotals,
     IngestSourceFolder,
     ParsedSession,
     PendingBatchJob,
@@ -34,6 +37,8 @@ export interface IngestRunOptions {
     folders: IngestSourceFolder[];
     model?: string;
     mode?: IngestMode;
+    /** Ingest never-before-ingested sessions only; skip files flagged as changed. */
+    newOnly?: boolean;
 }
 
 export interface IngestManagerConfig {
@@ -64,7 +69,12 @@ function sleep(ms: number): Promise<void> {
 interface PendingSession {
     file: SessionFile;
     session: ParsedSession;
-    promptChars: number;
+    promptHash: string;
+}
+
+/** Hash of the digest prompt: the exact input the LLM digest depends on. */
+function hashDigestPrompt(prompt: string): string {
+    return crypto.createHash('sha256').update(prompt, 'utf8').digest('hex');
 }
 
 export interface CollectResult {
@@ -124,36 +134,72 @@ export class IngestManager {
      * Scan source folders, bucket against the ledger, and estimate cost.
      * Pending (new + changed) files are parsed to size the digest prompts;
      * trivial sessions are excluded from estimates but still counted in the
-     * buckets they fall into.
+     * buckets they fall into. Files flagged as changed whose digest prompt
+     * hash matches the ledger (mtime/size churn without content changes) are
+     * reconciled back into `upToDate` and the ledger entry is refreshed.
      */
     scan(folders: IngestSourceFolder[]): IngestScanResult {
         const files = discoverSessionFiles(folders);
         const buckets = bucketSessionFiles(files, this.ledger);
-        let inputChars = 0;
+        const ledgerEntries = this.ledger.load().files;
+        const refreshedEntries: Record<string, IngestLedgerEntry> = {};
+
+        let newChars = 0;
+        let changedChars = 0;
         const processableBuckets = { newFiles: [] as SessionFile[], changedFiles: [] as SessionFile[] };
         const skippedTrivialFiles: SessionFile[] = [];
-        const collectEstimate = (file: SessionFile, kind: 'newFiles' | 'changedFiles') => {
+
+        for (const file of buckets.newFiles) {
             const session = this.tryParse(file);
             if (!session) {
                 skippedTrivialFiles.push(file);
-                return;
+                continue;
             }
-            processableBuckets[kind].push(file);
-            inputChars += buildDigestPrompt(session).length;
+            processableBuckets.newFiles.push(file);
+            newChars += buildDigestPrompt(session).length;
+        }
+
+        const stillChanged: SessionFile[] = [];
+        for (const file of buckets.changedFiles) {
+            const session = this.tryParse(file);
+            if (!session) {
+                stillChanged.push(file);
+                skippedTrivialFiles.push(file);
+                continue;
+            }
+            const prompt = buildDigestPrompt(session);
+            const entry = ledgerEntries[file.filePath];
+            if (entry?.promptHash !== undefined && entry.promptHash === hashDigestPrompt(prompt)) {
+                // The file was touched on disk, but the content the digest
+                // depends on is unchanged — self-heal the ledger and move on.
+                buckets.upToDate.push(file);
+                refreshedEntries[file.filePath] = { ...entry, mtimeMs: file.mtimeMs, size: file.size };
+                continue;
+            }
+            stillChanged.push(file);
+            processableBuckets.changedFiles.push(file);
+            changedChars += prompt.length;
+        }
+        buckets.changedFiles = stillChanged;
+        this.ledger.updateEntries(refreshedEntries);
+
+        const totalsFor = (count: number, chars: number): IngestScanTotals => {
+            const estimatedInputTokens = estimateTokensForChars(chars);
+            const estimatedOutputTokens = count * ESTIMATED_OUTPUT_TOKENS_PER_SESSION;
+            return {
+                pendingCount: count,
+                estimatedInputTokens,
+                estimatedOutputTokens,
+                estimates: estimateCost(estimatedInputTokens, estimatedOutputTokens),
+            };
         };
-        for (const file of buckets.newFiles) collectEstimate(file, 'newFiles');
-        for (const file of buckets.changedFiles) collectEstimate(file, 'changedFiles');
         const pendingCount = processableBuckets.newFiles.length + processableBuckets.changedFiles.length;
-        const estimatedInputTokens = estimateTokensForChars(inputChars);
-        const estimatedOutputTokens = pendingCount * ESTIMATED_OUTPUT_TOKENS_PER_SESSION;
         return {
             buckets,
             processableBuckets,
             skippedTrivialFiles,
-            pendingCount,
-            estimatedInputTokens,
-            estimatedOutputTokens,
-            estimates: estimateCost(estimatedInputTokens, estimatedOutputTokens),
+            ...totalsFor(pendingCount, newChars + changedChars),
+            newOnly: totalsFor(processableBuckets.newFiles.length, newChars),
         };
     }
 
@@ -171,24 +217,38 @@ export class IngestManager {
         try {
             const files = discoverSessionFiles(options.folders);
             const buckets = bucketSessionFiles(files, this.ledger);
-            const pendingFiles = [...buckets.newFiles, ...buckets.changedFiles];
+            const pendingFiles = options.newOnly
+                ? [...buckets.newFiles]
+                : [...buckets.newFiles, ...buckets.changedFiles];
+            const ledgerEntries = this.ledger.load().files;
+            const refreshedEntries: Record<string, IngestLedgerEntry> = {};
 
             const sessions: PendingSession[] = [];
-            let skippedTrivial = 0;
+            let skipped = 0;
             for (const file of pendingFiles) {
                 const session = this.tryParse(file);
                 if (!session) {
-                    skippedTrivial += 1;
+                    skipped += 1;
                     continue;
                 }
-                sessions.push({ file, session, promptChars: 0 });
+                const promptHash = hashDigestPrompt(buildDigestPrompt(session));
+                const entry = ledgerEntries[file.filePath];
+                if (entry?.promptHash !== undefined && entry.promptHash === promptHash) {
+                    // mtime/size churn without content changes — refresh the
+                    // ledger instead of paying for an identical digest.
+                    refreshedEntries[file.filePath] = { ...entry, mtimeMs: file.mtimeMs, size: file.size };
+                    skipped += 1;
+                    continue;
+                }
+                sessions.push({ file, session, promptHash });
             }
+            this.ledger.updateEntries(refreshedEntries);
 
             this.progress = {
                 state: 'running',
                 processed: 0,
                 failed: 0,
-                skipped: skippedTrivial,
+                skipped,
                 total: sessions.length,
             };
 
@@ -349,6 +409,7 @@ export class IngestManager {
                         mtimeMs: item.file.mtimeMs,
                         size: item.file.size,
                         sessionId: item.session.sessionId,
+                        promptHash: item.promptHash,
                         sessionMeta: toSessionMeta(item.session),
                     }, backend, digester.model);
                     this.progress.processed += 1;
@@ -410,6 +471,7 @@ export class IngestManager {
             memoryId,
             model,
             ingestedAt: now,
+            ...(request.promptHash !== undefined ? { promptHash: request.promptHash } : {}),
         });
     }
 
@@ -427,6 +489,7 @@ export class IngestManager {
                 mtimeMs: item.file.mtimeMs,
                 size: item.file.size,
                 sessionId: item.session.sessionId,
+                promptHash: item.promptHash,
                 sessionMeta: toSessionMeta(item.session),
             };
             lines.push(JSON.stringify({ key, request: digestBatchRequest(item.session) }));

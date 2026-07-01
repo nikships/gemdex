@@ -239,6 +239,14 @@ struct IngestCostEstimate: Codable, Identifiable, Hashable, Sendable {
     let batchUsd: Double
 }
 
+/// Pending count and cost estimates for one ingestion scope.
+struct IngestScanTotals: Codable, Sendable {
+    let pendingCount: Int
+    let estimatedInputTokens: Int
+    let estimatedOutputTokens: Int
+    let estimates: [IngestCostEstimate]
+}
+
 /// `POST /ingest/scan` response.
 struct IngestScanSummary: Codable, Sendable {
     struct Buckets: Codable, Sendable {
@@ -252,6 +260,8 @@ struct IngestScanSummary: Codable, Sendable {
     let estimatedInputTokens: Int
     let estimatedOutputTokens: Int
     let estimates: [IngestCostEstimate]
+    /// Totals restricted to never-before-ingested sessions.
+    let newOnly: IngestScanTotals
 }
 
 struct IngestSessionFile: Codable, Hashable, Sendable {
