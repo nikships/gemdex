@@ -38,6 +38,7 @@ const fakeManager = {
             estimatedInputTokens: 0,
             estimatedOutputTokens: 0,
             estimates: [],
+            newOnly: { pendingCount: 0, estimatedInputTokens: 0, estimatedOutputTokens: 0, estimates: [] },
         };
     },
     async run(options: unknown, _backend: MemoryBackend): Promise<IngestProgress> {
@@ -181,20 +182,30 @@ test("POST /ingest/scan validates sources and delegates to the manager", async (
 test("POST /ingest/start kicks off a run and /ingest/status reports it", async () => {
     const res = await authed(`${base}/ingest/start`, {
         method: "POST",
-        body: JSON.stringify({ sources: [{ source: "factory" }], model: "gemini-2.5-flash", mode: "batch" }),
+        body: JSON.stringify({ sources: [{ source: "factory" }], model: "gemini-2.5-flash", mode: "batch", newOnly: true }),
     });
     assert.equal(res.status, 200);
     assert.deepEqual(await res.json(), { started: true });
     // run() is fired asynchronously; give it a tick.
     await new Promise((resolve) => setTimeout(resolve, 10));
-    const runOptions = calls.runs.at(-1) as { model?: string; mode?: string };
+    const runOptions = calls.runs.at(-1) as { model?: string; mode?: string; newOnly?: boolean };
     assert.equal(runOptions.model, "gemini-2.5-flash");
     assert.equal(runOptions.mode, "batch");
+    assert.equal(runOptions.newOnly, true);
 
     const status = await authed(`${base}/ingest/status`);
     const statusBody = (await status.json()) as IngestProgress;
     assert.equal(statusBody.state, "done");
     assert.equal(statusBody.processed, 2);
+
+    // newOnly defaults to false when omitted.
+    const res2 = await authed(`${base}/ingest/start`, {
+        method: "POST",
+        body: JSON.stringify({ sources: [{ source: "factory" }] }),
+    });
+    assert.equal(res2.status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal((calls.runs.at(-1) as { newOnly?: boolean }).newOnly, false);
 });
 
 test("POST /ingest/start returns 409 while a run is in progress", async () => {

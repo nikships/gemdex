@@ -43,6 +43,17 @@ export class IngestLedgerStore {
         this.write(ledger);
     }
 
+    /** Upsert several entries in one read-modify-write (used to self-heal mtime churn). */
+    updateEntries(entries: Record<string, IngestLedgerEntry>): void {
+        const paths = Object.keys(entries);
+        if (paths.length === 0) return;
+        const ledger = this.load();
+        for (const filePath of paths) {
+            ledger.files[filePath] = entries[filePath];
+        }
+        this.write(ledger);
+    }
+
     setPendingBatch(job: PendingBatchJob | undefined): void {
         const ledger = this.load();
         if (job) {

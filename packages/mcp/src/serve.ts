@@ -660,6 +660,7 @@ export function createServer(ctx: ServeContext): http.Server {
                     const folders = resolveIngestFolders(ctx, body?.sources);
                     const model = trimmedString(body?.model) || undefined;
                     const mode = trimmedString(body?.mode) === 'batch' ? 'batch' as const : 'standard' as const;
+                    const newOnly = body?.newOnly === true;
                     const manager = ingestManager(ctx);
                     if (manager.isRunning()) {
                         sendJson(res, 409, { error: 'An ingestion run is already in progress.' }, corsHeaders);
@@ -668,7 +669,7 @@ export function createServer(ctx: ServeContext): http.Server {
                     const store = ctx.store;
                     // Fire and forget: the run is polled via GET /ingest/status.
                     // Errors are captured in the manager's progress state.
-                    void manager.run({ folders, model, mode }, store).catch(() => undefined);
+                    void manager.run({ folders, model, mode, newOnly }, store).catch(() => undefined);
                     sendJson(res, 200, { started: true }, corsHeaders);
                 } catch (error) {
                     sendJson(res, 400, { error: errorMessage(error) }, corsHeaders);

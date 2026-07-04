@@ -63,6 +63,14 @@ function makeState(pendingCount: number): FakeManagerState {
             estimates: [
                 { model: 'gemini-3.5-flash', standardUsd: 1.23, batchUsd: 0.62 },
             ],
+            newOnly: {
+                pendingCount,
+                estimatedInputTokens: 1000,
+                estimatedOutputTokens: 800,
+                estimates: [
+                    { model: 'gemini-3.5-flash', standardUsd: 1.23, batchUsd: 0.62 },
+                ],
+            },
         },
         runResult: { state: 'done', processed: pendingCount, failed: 0, skipped: 0, total: pendingCount },
         collectResult: { state: 'none' },
@@ -150,6 +158,41 @@ test('ingest-history runs standard mode and reports the summary', async () => {
     const options = state.runs[0] as { mode?: string; model?: string };
     assert.equal(options.mode, 'standard');
     assert.equal(options.model, 'gemini-3.5-flash');
+});
+
+test('ingest-history --new-only skips changed sessions and uses newOnly totals', async () => {
+    const state = makeState(1);
+    state.scanResult.buckets.changedFiles = [
+        { source: 'claude', filePath: '/s/changed.jsonl', mtimeMs: 2, size: 9 },
+    ];
+    state.scanResult.processableBuckets.changedFiles = state.scanResult.buckets.changedFiles;
+    state.scanResult.pendingCount = 2;
+    state.scanResult.estimatedInputTokens = 2000;
+    state.scanResult.newOnly = {
+        pendingCount: 1,
+        estimatedInputTokens: 900,
+        estimatedOutputTokens: 400,
+        estimates: [{ model: 'gemini-3.5-flash', standardUsd: 0.55, batchUsd: 0.28 }],
+    };
+    const result = await run(['ingest-history', '--new-only', '--source', rootDir], state);
+    assert.equal(result.code, 0);
+    assert.match(result.stdout, /New sessions only: skipping 1 changed session/);
+    assert.match(result.stdout, /~900/);
+    const options = state.runs[0] as { newOnly?: boolean };
+    assert.equal(options.newOnly, true);
+});
+
+test('ingest-history --new-only reports nothing to do when only changed sessions exist', async () => {
+    const state = makeState(0);
+    state.scanResult.buckets.changedFiles = [
+        { source: 'claude', filePath: '/s/changed.jsonl', mtimeMs: 2, size: 9 },
+    ];
+    state.scanResult.processableBuckets.changedFiles = state.scanResult.buckets.changedFiles;
+    state.scanResult.pendingCount = 1;
+    const result = await run(['ingest-history', '--new-only', '--source', rootDir], state);
+    assert.equal(result.code, 0);
+    assert.match(result.stdout, /Nothing to ingest/);
+    assert.equal(state.runs.length, 0);
 });
 
 test('ingest-history --batch submits and prints the job name', async () => {

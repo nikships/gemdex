@@ -27,6 +27,7 @@ struct IngestView: View {
     @State private var scan: IngestScanSummary?
     @State private var selectedModel = ""
     @State private var useBatch = false
+    @State private var newOnly = false
     @State private var status: IngestStatus?
     @State private var collectResult: IngestCollectResult?
     @State private var busy = false
@@ -99,7 +100,7 @@ struct IngestView: View {
                 Button("Back") { step = .sources; scan = nil; error = nil }
                 Button(useBatch ? "Submit Batch Job" : "Start Ingestion") { Task { await start() } }
                     .buttonStyle(BrandButtonStyle())
-                    .disabled(busy || (scan?.pendingCount ?? 0) == 0)
+                    .disabled(busy || effectivePendingCount == 0)
             case .running:
                 Button("Cancel") { Task { await cancel() } }
                     .disabled(busy)
@@ -234,20 +235,34 @@ struct IngestView: View {
                 }
                 .font(.callout)
 
-                if scan.pendingCount == 0 {
-                    Label("Everything is already ingested — nothing to do.", systemImage: "checkmark.circle")
+                if scan.pendingCount > 0 && !scan.buckets.changedFiles.isEmpty {
+                    Toggle(isOn: $newOnly) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Only ingest new sessions")
+                            Text("Skip the \(scan.buckets.changedFiles.count) previously ingested sessions flagged as changed.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
+                if effectivePendingCount == 0 {
+                    Label(scan.pendingCount == 0
+                            ? "Everything is already ingested — nothing to do."
+                            : "No new sessions — turn off “Only ingest new sessions” to re-ingest changed ones.",
+                          systemImage: "checkmark.circle")
                         .foregroundStyle(Brand.sage)
                 } else {
+                    let totals = effectiveTotals(scan)
                     Divider()
                     Text("Model & cost").font(.headline)
-                    Text("≈ \(formatTokens(scan.estimatedInputTokens)) input tokens across \(scan.pendingCount) sessions. Pricing as of \(sources?.pricingAsOf ?? "—").")
+                    Text("≈ \(formatTokens(totals.estimatedInputTokens)) input tokens across \(totals.pendingCount) sessions. Pricing as of \(sources?.pricingAsOf ?? "—").")
                         .font(.caption).foregroundStyle(.secondary)
                     Picker("Model", selection: $selectedModel) {
                         ForEach(sources?.models ?? []) { info in
                             Text("\(info.model) — \(info.description)").tag(info.model)
                         }
                     }
-                    costTable(scan.estimates)
+                    costTable(totals.estimates)
                     Toggle(isOn: $useBatch) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Use Batch API (half price)")
@@ -373,6 +388,21 @@ struct IngestView: View {
         }
     }
 
+    /// Totals for the selected scope: full pending set, or new sessions only.
+    private func effectiveTotals(_ scan: IngestScanSummary) -> IngestScanTotals {
+        newOnly
+            ? scan.newOnly
+            : IngestScanTotals(pendingCount: scan.pendingCount,
+                               estimatedInputTokens: scan.estimatedInputTokens,
+                               estimatedOutputTokens: scan.estimatedOutputTokens,
+                               estimates: scan.estimates)
+    }
+
+    private var effectivePendingCount: Int {
+        guard let scan else { return 0 }
+        return effectiveTotals(scan).pendingCount
+    }
+
     // MARK: - Actions
 
     private func close() {
@@ -451,7 +481,8 @@ struct IngestView: View {
             try await api.ingestStart(
                 sources: selectedSourcePayload,
                 model: selectedModel,
-                mode: useBatch ? "batch" : "standard"
+                mode: useBatch ? "batch" : "standard",
+                newOnly: newOnly
             )
             status = nil
             step = .running

@@ -121,6 +121,49 @@ describe('IngestManager.scan', () => {
         expect(result.estimates[0].batchUsd).toBeLessThanOrEqual(result.estimates[0].standardUsd);
     });
 
+    it('reports newOnly totals restricted to never-ingested sessions', async () => {
+        const changedPath = writeSession('old.jsonl', 'old');
+        const backend = fakeBackend();
+        await manager(fakeDigester()).run({ folders: folders() }, backend);
+
+        // Rewrite with different content so the prompt hash differs.
+        fs.appendFileSync(changedPath, `\n${JSON.stringify({
+            type: 'user',
+            sessionId: 'old',
+            timestamp: '2026-01-02T00:00:00.000Z',
+            message: { role: 'user', content: `more ${FILLER}` },
+        })}`, 'utf8');
+        const old = (Date.now() - ACTIVE_SESSION_WINDOW_MS - 30_000) / 1000;
+        fs.utimesSync(changedPath, old, old);
+        writeSession('new.jsonl', 'new');
+
+        const result = manager(fakeDigester()).scan(folders());
+        expect(result.buckets.newFiles).toHaveLength(1);
+        expect(result.buckets.changedFiles).toHaveLength(1);
+        expect(result.pendingCount).toBe(2);
+        expect(result.newOnly.pendingCount).toBe(1);
+        expect(result.newOnly.estimatedInputTokens).toBeGreaterThan(0);
+        expect(result.newOnly.estimatedInputTokens).toBeLessThan(result.estimatedInputTokens);
+    });
+
+    it('reconciles mtime churn without content changes back to up to date', async () => {
+        const filePath = writeSession('a.jsonl', 'a');
+        const backend = fakeBackend();
+        await manager(fakeDigester()).run({ folders: folders() }, backend);
+
+        // Touch the file (new mtime, same content) — e.g. a sync/backup tool.
+        const old = (Date.now() - ACTIVE_SESSION_WINDOW_MS - 30_000) / 1000;
+        fs.utimesSync(filePath, old, old);
+
+        const result = manager(fakeDigester()).scan(folders());
+        expect(result.buckets.changedFiles).toHaveLength(0);
+        expect(result.buckets.upToDate.map((file) => file.filePath)).toEqual([filePath]);
+        expect(result.pendingCount).toBe(0);
+        // The ledger self-heals so the next scan passes the cheap mtime check.
+        const entry = ledger.getEntry(filePath);
+        expect(entry?.mtimeMs).toBe(fs.statSync(filePath).mtimeMs);
+    });
+
     it('excludes trivial session stubs from pending counts and estimates', () => {
         writeSession('real.jsonl', 'real');
         const trivialPath = writeTrivialSession('stub.jsonl');
@@ -153,6 +196,57 @@ describe('IngestManager.run — standard mode', () => {
         const second = await mgr.run({ folders: folders() }, backend);
         expect(second.total).toBe(0);
         expect(backend.imported).toHaveLength(1);
+    });
+
+    it('records the prompt hash and skips unchanged content instead of re-digesting', async () => {
+        const filePath = writeSession('a.jsonl', 'sess-a');
+        const backend = fakeBackend();
+        const digest = jest.fn(async () => ({
+            title: 'ok', whatWasDone: 'w',
+            howToReproduce: [], toolsAndServices: [], credentialsAndConfig: [], gotchas: [],
+        }));
+        const mgr = manager(fakeDigester({ digest }));
+
+        await mgr.run({ folders: folders() }, backend);
+        expect(ledger.getEntry(filePath)?.promptHash).toMatch(/^[0-9a-f]{64}$/);
+        expect(digest).toHaveBeenCalledTimes(1);
+
+        // mtime churn only — the run must not pay for an identical digest.
+        const old = (Date.now() - ACTIVE_SESSION_WINDOW_MS - 30_000) / 1000;
+        fs.utimesSync(filePath, old, old);
+        const progress = await mgr.run({ folders: folders() }, backend);
+        expect(digest).toHaveBeenCalledTimes(1);
+        expect(progress.total).toBe(0);
+        expect(progress.skipped).toBe(1);
+        expect(ledger.getEntry(filePath)?.mtimeMs).toBe(fs.statSync(filePath).mtimeMs);
+    });
+
+    it('newOnly ingests new sessions and leaves changed ones untouched', async () => {
+        const changedPath = writeSession('old.jsonl', 'old');
+        const backend = fakeBackend();
+        const mgr = manager(fakeDigester());
+        await mgr.run({ folders: folders() }, backend);
+
+        // Genuinely change the old session and add a brand-new one.
+        fs.appendFileSync(changedPath, `\n${JSON.stringify({
+            type: 'user',
+            sessionId: 'old',
+            timestamp: '2026-01-02T00:00:00.000Z',
+            message: { role: 'user', content: `more ${FILLER}` },
+        })}`, 'utf8');
+        const old = (Date.now() - ACTIVE_SESSION_WINDOW_MS - 30_000) / 1000;
+        fs.utimesSync(changedPath, old, old);
+        writeSession('new.jsonl', 'sess-new');
+
+        const before = ledger.getEntry(changedPath);
+        const progress = await mgr.run({ folders: folders(), newOnly: true }, backend);
+        expect(progress.processed).toBe(1);
+        expect(backend.imported.map((record) => record.id)).toEqual(['chat:claude:old', 'chat:claude:sess-new']);
+        // The changed session stays pending for a later full run.
+        expect(ledger.getEntry(changedPath)).toEqual(before);
+        const rescan = mgr.scan(folders());
+        expect(rescan.buckets.changedFiles.map((file) => file.filePath)).toEqual([changedPath]);
+        expect(rescan.newOnly.pendingCount).toBe(0);
     });
 
     it('counts failures without aborting the run', async () => {
