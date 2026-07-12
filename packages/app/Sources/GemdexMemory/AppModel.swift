@@ -128,24 +128,68 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Reconcile UI with the sidecar's config: load memories when a key is set,
-    /// otherwise reveal the setup screen.
+    /// Reconcile UI with the sidecar's config. Local mode is a hard gate: the
+    /// manager UI is never mounted until a real Gemini embedding request proves
+    /// that the configured key works during this sidecar launch.
     @discardableResult
     func syncConfigGate() async -> Bool {
         guard let api else { return false }
         do {
-            let cfg = try await api.config()
+            var cfg = try await api.config()
             self.config = cfg
+
+            if cfg.mode == "local" && cfg.gemini.status == "checking" {
+                screen = .launching
+                statusText = "Validating Gemini API key…"
+                statusIsError = false
+                for _ in 0..<60 where cfg.gemini.status == "checking" {
+                    try await Task.sleep(nanoseconds: 250_000_000)
+                    cfg = try await api.config()
+                    self.config = cfg
+                }
+            }
+
+            if cfg.mode == "local" && !cfg.gemini.isReady {
+                setupNotice = cfg.gemini.message
+                screen = .setup
+                statusText = readinessTitle(cfg.gemini)
+                statusIsError = true
+                return false
+            }
+
             if cfg.configured {
                 await loadMemories()
+                if cfg.mode == "remote" && cfg.gemini.status == "checking" {
+                    Task { await refreshGeminiReadinessUntilSettled() }
+                }
                 return true
             }
             screen = .setup
-            statusText = "API key required"
+            statusText = "Storage setup required"
+            statusIsError = true
             return false
         } catch {
             setStatus("Error: \(error.localizedDescription)", isError: true)
             return false
+        }
+    }
+
+    private func refreshGeminiReadinessUntilSettled() async {
+        guard let api else { return }
+        for _ in 0..<60 {
+            guard config?.gemini.status == "checking" else { return }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard let latest = try? await api.config() else { continue }
+            config = latest
+        }
+    }
+
+    private func readinessTitle(_ readiness: GeminiReadiness) -> String {
+        switch readiness.status {
+        case "invalid": return "Gemini API key rejected"
+        case "unavailable": return "Gemini validation unavailable"
+        case "checking": return "Validating Gemini API key…"
+        default: return "Gemini API key required"
         }
     }
 
@@ -317,10 +361,33 @@ final class AppModel: ObservableObject {
 
     func submitApiKey(_ key: String) async throws {
         guard let api else { throw APIError(status: -1, message: "Sidecar not ready", needsKey: false) }
-        let configured = try await api.setApiKey(key)
-        guard configured else { throw APIError(status: -1, message: "Key was not accepted.", needsKey: false) }
+        statusText = "Validating Gemini API key…"
+        statusIsError = false
+        let cfg = try await api.setApiKey(key)
+        guard cfg.gemini.isReady else {
+            throw APIError(status: -1, message: cfg.gemini.message ?? "Key was not validated.", needsKey: true)
+        }
+        config = cfg
         setupNotice = nil
         await syncConfigGate()
+        await refreshSettings()
+    }
+
+    func retryApiKeyValidation() async throws {
+        guard let api else { throw APIError(status: -1, message: "Sidecar not ready", needsKey: false) }
+        statusText = "Validating Gemini API key…"
+        statusIsError = false
+        do {
+            let cfg = try await api.validateConfiguredApiKey()
+            config = cfg
+            setupNotice = cfg.gemini.message
+        } catch {
+            await refreshConfig()
+            setupNotice = config?.gemini.message ?? error.localizedDescription
+            throw error
+        }
+        await syncConfigGate()
+        await refreshSettings()
     }
 
     /// Detect Gemini's "API key not valid" failure (the key is configured but
@@ -339,7 +406,7 @@ final class AppModel: ObservableObject {
     @discardableResult
     func handlePossibleInvalidKey(_ message: String) -> Bool {
         guard config?.mode != "remote", Self.isInvalidKeyError(message) else { return false }
-        setupNotice = "Your Gemini API key was rejected. Please enter a valid key."
+        markGeminiKeyInvalid()
         showSettings = false
         showIngest = false
         isEditorOpen = false
@@ -347,6 +414,40 @@ final class AppModel: ObservableObject {
         statusText = "API key required"
         statusIsError = true
         return true
+    }
+
+    /// Ingestion always uses the local Gemini key, even with remote storage.
+    /// If that key is revoked after startup, close the ingestion flow and route
+    /// remote users directly to the repair controls without disabling storage.
+    @discardableResult
+    func handlePossibleInvalidIngestionKey(_ message: String) -> Bool {
+        guard Self.isInvalidKeyError(message) else { return false }
+        markGeminiKeyInvalid()
+        showIngest = false
+        if backendIsRemote {
+            showSettings = true
+            setStatus("Gemini key rejected; ingestion is blocked.", isError: true)
+        } else {
+            isEditorOpen = false
+            screen = .setup
+            statusText = "API key required"
+            statusIsError = true
+        }
+        return true
+    }
+
+    private func markGeminiKeyInvalid() {
+        let notice = "Your Gemini API key was rejected. Please enter a valid key."
+        setupNotice = notice
+        if let config {
+            self.config = ConfigSummary(
+                configured: config.mode == "remote" ? config.configured : false,
+                mode: config.mode,
+                needsKey: config.mode == "local",
+                gemini: GeminiReadiness(status: "invalid", message: notice, validatedAt: nil),
+                activeRemote: config.activeRemote
+            )
+        }
     }
 
     // MARK: - Config / settings helpers
@@ -366,11 +467,23 @@ final class AppModel: ObservableObject {
         if config.mode == "remote" {
             return "Remote: \(config.activeRemote?.name ?? "remote")"
         }
-        return config.needsKey ? "Local: needs API key" : "Local"
+        switch config.gemini.status {
+        case "valid": return "Local: Gemini verified"
+        case "checking": return "Local: validating Gemini"
+        case "invalid": return "Local: key rejected"
+        case "unavailable": return "Local: validation unavailable"
+        default: return "Local: API key required"
+        }
     }
 
     var backendIsRemote: Bool { config?.mode == "remote" }
-    var backendNeedsAttention: Bool { !(config?.configured ?? false) }
+    var backendNeedsAttention: Bool {
+        guard let config else { return true }
+        return config.mode == "local" && !config.gemini.isReady
+    }
+    var geminiReadiness: GeminiReadiness? { config?.gemini }
+    var ingestionIsReady: Bool { config?.gemini.isReady ?? false }
+    var ingestionNeedsAttention: Bool { !(config?.gemini.isReady ?? false) }
 
     // MARK: - Settings actions
 

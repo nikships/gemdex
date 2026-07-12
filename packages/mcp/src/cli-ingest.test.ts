@@ -47,15 +47,12 @@ function makeState(pendingCount: number): FakeManagerState {
                 upToDate: [],
                 skippedActive: [],
             },
-            processableBuckets: {
-                newFiles: Array.from({ length: pendingCount }, (_, index) => ({
-                    source: 'claude' as const,
-                    filePath: `/s/${index}.jsonl`,
-                    mtimeMs: 1,
-                    size: 1,
-                })),
-                changedFiles: [],
-            },
+            processableFiles: Array.from({ length: pendingCount }, (_, index) => ({
+                source: 'claude' as const,
+                filePath: `/s/${index}.jsonl`,
+                mtimeMs: 1,
+                size: 1,
+            })),
             skippedTrivialFiles: [],
             pendingCount,
             estimatedInputTokens: 1000,
@@ -63,14 +60,6 @@ function makeState(pendingCount: number): FakeManagerState {
             estimates: [
                 { model: 'gemini-3.5-flash', standardUsd: 1.23, batchUsd: 0.62 },
             ],
-            newOnly: {
-                pendingCount,
-                estimatedInputTokens: 1000,
-                estimatedOutputTokens: 800,
-                estimates: [
-                    { model: 'gemini-3.5-flash', standardUsd: 1.23, batchUsd: 0.62 },
-                ],
-            },
         },
         runResult: { state: 'done', processed: pendingCount, failed: 0, skipped: 0, total: pendingCount },
         collectResult: { state: 'none' },
@@ -146,7 +135,7 @@ test('ingest-history --dry-run reports trivial candidates separately', async () 
     const result = await run(['ingest-history', '--dry-run', '--source', rootDir], state);
 
     assert.equal(result.code, 0);
-    assert.match(result.stdout, /Sessions — new: 1, changed: 0/);
+    assert.match(result.stdout, /Sessions — new: 1, previously ingested and changed \(skipped\): 0/);
     assert.match(result.stdout, /Skipped trivial candidates: 1/);
 });
 
@@ -160,37 +149,33 @@ test('ingest-history runs standard mode and reports the summary', async () => {
     assert.equal(options.model, 'gemini-3.5-flash');
 });
 
-test('ingest-history --new-only skips changed sessions and uses newOnly totals', async () => {
+test('ingest-history always skips changed sessions and prices only new ones', async () => {
     const state = makeState(1);
     state.scanResult.buckets.changedFiles = [
         { source: 'claude', filePath: '/s/changed.jsonl', mtimeMs: 2, size: 9 },
     ];
-    state.scanResult.processableBuckets.changedFiles = state.scanResult.buckets.changedFiles;
-    state.scanResult.pendingCount = 2;
-    state.scanResult.estimatedInputTokens = 2000;
-    state.scanResult.newOnly = {
-        pendingCount: 1,
-        estimatedInputTokens: 900,
-        estimatedOutputTokens: 400,
-        estimates: [{ model: 'gemini-3.5-flash', standardUsd: 0.55, batchUsd: 0.28 }],
-    };
-    const result = await run(['ingest-history', '--new-only', '--source', rootDir], state);
+    state.scanResult.estimatedInputTokens = 900;
+    state.scanResult.estimatedOutputTokens = 400;
+    state.scanResult.estimates = [
+        { model: 'gemini-3.5-flash', standardUsd: 0.55, batchUsd: 0.28 },
+    ];
+    const result = await run(['ingest-history', '--source', rootDir], state);
     assert.equal(result.code, 0);
-    assert.match(result.stdout, /New sessions only: skipping 1 changed session/);
+    assert.match(result.stdout, /previously ingested and changed \(skipped\): 1/);
+    assert.match(result.stdout, /Previously ingested sessions are never reprocessed/);
     assert.match(result.stdout, /~900/);
-    const options = state.runs[0] as { newOnly?: boolean };
-    assert.equal(options.newOnly, true);
+    const options = state.runs[0] as Record<string, unknown>;
+    assert.equal('newOnly' in options, false);
 });
 
-test('ingest-history --new-only reports nothing to do when only changed sessions exist', async () => {
+test('ingest-history reports nothing to do when only changed sessions exist', async () => {
     const state = makeState(0);
     state.scanResult.buckets.changedFiles = [
         { source: 'claude', filePath: '/s/changed.jsonl', mtimeMs: 2, size: 9 },
     ];
-    state.scanResult.processableBuckets.changedFiles = state.scanResult.buckets.changedFiles;
-    state.scanResult.pendingCount = 1;
-    const result = await run(['ingest-history', '--new-only', '--source', rootDir], state);
+    const result = await run(['ingest-history', '--source', rootDir], state);
     assert.equal(result.code, 0);
+    assert.match(result.stdout, /Previously ingested sessions are never reprocessed/);
     assert.match(result.stdout, /Nothing to ingest/);
     assert.equal(state.runs.length, 0);
 });

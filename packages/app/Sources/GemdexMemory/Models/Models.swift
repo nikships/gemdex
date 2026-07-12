@@ -134,6 +134,16 @@ struct RecallResult: Codable, Identifiable, Hashable, Sendable {
     var displayTitle: String { title.isEmpty ? "Untitled memory" : title }
 }
 
+/// Per-launch proof that the configured Gemini key can perform embedding work.
+struct GeminiReadiness: Codable, Sendable {
+    let status: String
+    let message: String?
+    let validatedAt: Double?
+
+    var isReady: Bool { status == "valid" }
+    var needsAttention: Bool { !isReady && status != "checking" }
+}
+
 /// Active backend summary (`GET /config`).
 struct ConfigSummary: Codable, Sendable {
     struct ActiveRemote: Codable, Sendable {
@@ -144,6 +154,7 @@ struct ConfigSummary: Codable, Sendable {
     let configured: Bool
     let mode: String
     let needsKey: Bool
+    let gemini: GeminiReadiness
     let activeRemote: ActiveRemote?
 }
 
@@ -161,6 +172,7 @@ struct SettingsSummary: Codable, Sendable {
     let activeRemote: String?
     let configured: Bool
     let localConfigured: Bool
+    let gemini: GeminiReadiness
     let remotes: [RemoteSummary]
 }
 
@@ -229,6 +241,7 @@ struct IngestSources: Codable, Sendable {
     let models: [IngestModelInfo]
     let pricingAsOf: String
     let ingestReady: Bool
+    let gemini: GeminiReadiness
 }
 
 /// Per-model cost estimate (standard vs. Batch API pricing).
@@ -260,8 +273,6 @@ struct IngestScanSummary: Codable, Sendable {
     let estimatedInputTokens: Int
     let estimatedOutputTokens: Int
     let estimates: [IngestCostEstimate]
-    /// Totals restricted to never-before-ingested sessions.
-    let newOnly: IngestScanTotals
 }
 
 struct IngestSessionFile: Codable, Hashable, Sendable {

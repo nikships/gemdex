@@ -213,6 +213,17 @@ oversized body → HTTP 413; bad JSON → 400; attachment bytes are returned wit
 `X-Content-Type-Options: nosniff` and forced to `application/octet-stream` +
 `Content-Disposition: attachment` for any non-allowlisted mime type.
 
+## 7. Chat-history ingestion
+
+`ingest/IngestManager` scans coding-agent transcript folders against the local
+ledger, estimates Gemini digestion cost, and writes deterministic
+`chat:<source>:<sessionId>` memories. **Runs are permanently new-sessions-only.**
+`scan()` keeps `changedFiles` in its diagnostic buckets so the desktop and CLI
+can explain what was found, but `pendingCount`, estimates, and
+`processableFiles` cover only never-before-ingested sessions. `run()` always
+selects only `buckets.newFiles`; there is no option that can re-enable changed
+sessions. Preserve this invariant across standard and Batch API paths.
+
 ## Gotchas / invariants
 
 - **LanceDB/DataFusion SQL quirks.** Unquoted identifiers are lowercased (so

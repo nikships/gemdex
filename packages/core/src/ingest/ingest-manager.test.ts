@@ -114,14 +114,14 @@ describe('IngestManager.scan', () => {
         const result = manager(fakeDigester()).scan(folders());
         expect(result.pendingCount).toBe(2);
         expect(result.buckets.newFiles).toHaveLength(2);
-        expect(result.processableBuckets.newFiles).toHaveLength(2);
+        expect(result.processableFiles).toHaveLength(2);
         expect(result.skippedTrivialFiles).toHaveLength(0);
         expect(result.estimatedInputTokens).toBeGreaterThan(0);
         expect(result.estimates.length).toBeGreaterThan(0);
         expect(result.estimates[0].batchUsd).toBeLessThanOrEqual(result.estimates[0].standardUsd);
     });
 
-    it('reports newOnly totals restricted to never-ingested sessions', async () => {
+    it('reports changed sessions without including them in pending totals', async () => {
         const changedPath = writeSession('old.jsonl', 'old');
         const backend = fakeBackend();
         await manager(fakeDigester()).run({ folders: folders() }, backend);
@@ -140,10 +140,9 @@ describe('IngestManager.scan', () => {
         const result = manager(fakeDigester()).scan(folders());
         expect(result.buckets.newFiles).toHaveLength(1);
         expect(result.buckets.changedFiles).toHaveLength(1);
-        expect(result.pendingCount).toBe(2);
-        expect(result.newOnly.pendingCount).toBe(1);
-        expect(result.newOnly.estimatedInputTokens).toBeGreaterThan(0);
-        expect(result.newOnly.estimatedInputTokens).toBeLessThan(result.estimatedInputTokens);
+        expect(result.pendingCount).toBe(1);
+        expect(result.processableFiles).toHaveLength(1);
+        expect(result.estimatedInputTokens).toBeGreaterThan(0);
     });
 
     it('reconciles mtime churn without content changes back to up to date', async () => {
@@ -171,7 +170,7 @@ describe('IngestManager.scan', () => {
         const result = manager(fakeDigester()).scan(folders());
 
         expect(result.buckets.newFiles).toHaveLength(2);
-        expect(result.processableBuckets.newFiles).toHaveLength(1);
+        expect(result.processableFiles).toHaveLength(1);
         expect(result.pendingCount).toBe(1);
         expect(result.skippedTrivialFiles.map((file) => file.filePath)).toEqual([trivialPath]);
         expect(result.estimatedOutputTokens).toBeGreaterThan(0);
@@ -217,11 +216,11 @@ describe('IngestManager.run — standard mode', () => {
         const progress = await mgr.run({ folders: folders() }, backend);
         expect(digest).toHaveBeenCalledTimes(1);
         expect(progress.total).toBe(0);
-        expect(progress.skipped).toBe(1);
-        expect(ledger.getEntry(filePath)?.mtimeMs).toBe(fs.statSync(filePath).mtimeMs);
+        expect(progress.skipped).toBe(0);
+        expect(ledger.getEntry(filePath)?.mtimeMs).not.toBe(fs.statSync(filePath).mtimeMs);
     });
 
-    it('newOnly ingests new sessions and leaves changed ones untouched', async () => {
+    it('always ingests only new sessions and leaves changed ones untouched', async () => {
         const changedPath = writeSession('old.jsonl', 'old');
         const backend = fakeBackend();
         const mgr = manager(fakeDigester());
@@ -239,14 +238,14 @@ describe('IngestManager.run — standard mode', () => {
         writeSession('new.jsonl', 'sess-new');
 
         const before = ledger.getEntry(changedPath);
-        const progress = await mgr.run({ folders: folders(), newOnly: true }, backend);
+        const progress = await mgr.run({ folders: folders() }, backend);
         expect(progress.processed).toBe(1);
         expect(backend.imported.map((record) => record.id)).toEqual(['chat:claude:old', 'chat:claude:sess-new']);
-        // The changed session stays pending for a later full run.
+        // The changed session stays visible but can never enter a later run.
         expect(ledger.getEntry(changedPath)).toEqual(before);
         const rescan = mgr.scan(folders());
         expect(rescan.buckets.changedFiles.map((file) => file.filePath)).toEqual([changedPath]);
-        expect(rescan.newOnly.pendingCount).toBe(0);
+        expect(rescan.pendingCount).toBe(0);
     });
 
     it('counts failures without aborting the run', async () => {

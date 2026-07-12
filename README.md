@@ -213,6 +213,7 @@ straight into your memory layer:
   them in place).
 - "Find similar" on any attachment to recall related memories by media.
 - Export all memories to a portable JSONL file; import them back.
+- Distill coding-agent chat history into one memory per **new** session. Once a session is ingested, Gemdex never reprocesses it—even if the transcript later changes.
 
 There's **no free-text search box** — recall is an agent/MCP capability; the app
 is a fast local manager (the only recall it surfaces is "Find similar", i.e.
@@ -222,8 +223,16 @@ run a sidecar command.**
 
 ### First launch
 
-If `GEMINI_API_KEY` is not configured yet, the app prompts once and stores it
-locally in `~/.gemdex/.env`.
+The app will not unlock local memory operations until `GEMINI_API_KEY` is both
+present **and verified with a real Gemini embedding request**. Missing, rejected,
+or temporarily unverifiable keys produce a prominent blocking screen with retry
+and replacement controls; an untested candidate is never saved. After Gemini
+accepts the key, Gemdex stores it locally in `~/.gemdex/.env`.
+
+Remote storage can open the memory manager without a local embedding key because
+the server owns memory embeddings. Chat-history digestion still runs on this Mac,
+so remote-mode users see a persistent red warning and ingestion remains disabled
+until a local Gemini key is verified.
 
 <p align="center">
   <img src="assets/app-screenshot-setup.png" alt="Gemdex Memory first-launch API key setup screen" width="100%" />

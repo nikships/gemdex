@@ -95,11 +95,16 @@ actor APIClient {
     }
 
     @discardableResult
-    func setApiKey(_ key: String) async throws -> Bool {
+    func setApiKey(_ key: String) async throws -> ConfigSummary {
         let body = try JSONSerialization.data(withJSONObject: ["apiKey": key])
         let (data, _) = try await send(makeRequest("POST", "/config", body: body))
-        let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        return (obj?["configured"] as? Bool) ?? false
+        return try decode(ConfigSummary.self, from: data)
+    }
+
+    @discardableResult
+    func validateConfiguredApiKey() async throws -> ConfigSummary {
+        let (data, _) = try await send(makeRequest("POST", "/config/validate"))
+        return try decode(ConfigSummary.self, from: data)
     }
 
     // MARK: - Memories
@@ -265,8 +270,8 @@ actor APIClient {
         return try decode(IngestScanSummary.self, from: data)
     }
 
-    func ingestStart(sources: [[String: Any]], model: String, mode: String, newOnly: Bool) async throws {
-        let payload: [String: Any] = ["sources": sources, "model": model, "mode": mode, "newOnly": newOnly]
+    func ingestStart(sources: [[String: Any]], model: String, mode: String) async throws {
+        let payload: [String: Any] = ["sources": sources, "model": model, "mode": mode]
         let body = try JSONSerialization.data(withJSONObject: payload)
         _ = try await send(makeRequest("POST", "/ingest/start", body: body))
     }

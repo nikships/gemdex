@@ -17,7 +17,28 @@ struct MainView: View {
         }
         .navigationTitle("Gemdex Memory")
         .navigationSubtitle(model.statusText)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if model.backendIsRemote && model.ingestionNeedsAttention {
+                ingestionReadinessBanner
+            }
+        }
         .toolbar { toolbarContent }
+    }
+
+    private var ingestionReadinessBanner: some View {
+        HStack(alignment: .center, spacing: 12) {
+            GeminiReadinessAlert(readiness: model.geminiReadiness, compact: true)
+            Button("Fix Gemini key") {
+                model.showSettings = true
+                model.showIngest = false
+            }
+            .brandPrimary()
+            .fixedSize()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Color.red.opacity(0.07))
+        .overlay(alignment: .bottom) { Divider() }
     }
 
     @ToolbarContentBuilder
@@ -31,9 +52,11 @@ struct MainView: View {
                 Label("Storage", systemImage: "externaldrive")
             }
             Button { model.showIngest = true; model.showSettings = false } label: {
-                Label("Ingest Chat History", systemImage: "tray.and.arrow.down")
+                Label("Ingest Chat History", systemImage: model.ingestionIsReady ? "tray.and.arrow.down" : "exclamationmark.triangle.fill")
             }
-            .help("Ingest coding-agent chat history as memories")
+            .help(model.ingestionIsReady
+                  ? "Ingest new coding-agent sessions as memories"
+                  : "Gemini key validation required before ingestion")
             Button(action: exportMemories) {
                 Label("Export", systemImage: "square.and.arrow.up")
             }
