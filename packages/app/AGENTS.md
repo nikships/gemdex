@@ -77,7 +77,7 @@ The child `Process` is held in a thread-safe `ProcessHolder` and terminated
 **synchronously** on `NSApplication.willTerminateNotification`, so the sidecar
 never outlives the app.
 
-Routes used by `APIClient`: `GET /health`, `GET|POST /config`,
+Routes used by `APIClient`: `GET /health`, `GET|POST /config`, `POST /config/validate`,
 `GET|POST /memories`, `GET|PUT|DELETE /memories/:id`,
 `PATCH /memories/:id/attachments` (caption-only),
 `GET /memories/:id/attachments/:attachmentId` (stream bytes),
@@ -85,13 +85,20 @@ Routes used by `APIClient`: `GET /health`, `GET|POST /config`,
 `GET /settings`, `POST /settings/mode`, `POST|DELETE /settings/remotes[/:name]`,
 `POST /settings/test`, `POST /settings/import-local`.
 
-## First-launch key flow (`SetupView`)
+## Validated key gate (`SetupView`)
 
-When `GET /config` reports not-configured (sidecar answers data routes with
-`503 { needsKey: true }`), `AppModel.syncConfigGate()` sets `screen = .setup`.
-`SetupView` offers two cards: **Local** submits `GEMINI_API_KEY` via
-`POST /config` (sidecar persists it to `~/.gemdex/.env`, then memories load) and
-**Remote** opens `StorageSettingsView` to configure a BYOI server.
+`GET /config` carries an explicit Gemini readiness state (`missing`, `checking`,
+`valid`, `invalid`, or `unavailable`). In local mode,
+`AppModel.syncConfigGate()` keeps the manager unmounted until readiness is
+`valid`; missing/rejected/unverifiable keys route to `SetupView` with a prominent
+red blocking alert. `POST /config` validates a candidate with a real embedding
+request **before** persistence, and `POST /config/validate` retries a saved key.
+
+`SetupView` offers two cards: **Use this Mac** validates and persists
+`GEMINI_API_KEY` to `~/.gemdex/.env`; **Use a Gemdex Server** opens
+`StorageSettingsView`. Remote mode can mount the manager without a local key,
+but `MainView` keeps a red ingestion warning visible and `IngestView` disables
+scan/start until the local Gemini readiness state is `valid`.
 
 ## Remote / BYOI mode (`StorageSettingsView`)
 

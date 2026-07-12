@@ -20,6 +20,7 @@ import {
 import { ClientConfigStore, StoredRemote, tokenEnvVarForRemote } from "./cli-config.js";
 import { createConfig, GemdexConfig } from "./config.js";
 import { errorMessage } from "./errors.js";
+import { createEmbeddingInstance } from "./embedding.js";
 import { createMemoryBackend } from "./memory.js";
 
 /** Read a string field from a parsed JSON body, trimmed; '' when absent or non-string. */
@@ -43,7 +44,7 @@ export interface ServeContext {
      * When set, the server enforces two security controls:
      *  1. `Origin` header on every non-OPTIONS request must match this value
      *     (or be absent — a same-origin WebView request has no Origin header).
-     *  2. Every data route (all routes except /health, /config GET/POST, and
+     *  2. Every data route (all routes except /health, /config*, and
      *     OPTIONS pre-flight) must carry `X-Gemdex-Token: <token>`.
      *
      * Both values are minted per-launch by `runServe` and handed to the
@@ -59,6 +60,12 @@ export interface ServeContext {
     ingestManager?: IngestManager;
     /** The Gemini key the current ingest manager was built with. */
     ingestManagerKey?: string;
+    /** Per-launch proof that the configured Gemini key can perform embedding work. */
+    geminiReadiness?: GeminiReadiness;
+    /** In-flight validation for the currently configured key. */
+    geminiValidation?: Promise<void>;
+    /** Injectable validation probe for tests. */
+    validateGeminiKey?: (config: GemdexConfig) => Promise<void>;
 }
 
 function buildStore(
@@ -69,14 +76,150 @@ function buildStore(
     return createBackend(config);
 }
 
-/** Persist the key to ~/.gemdex/.env, expose it to this process, and (re)build the store. */
-function configureApiKey(ctx: ServeContext, apiKey: string): void {
+export type GeminiReadinessStatus = 'missing' | 'checking' | 'valid' | 'invalid' | 'unavailable';
+
+export interface GeminiReadiness {
+    status: GeminiReadinessStatus;
+    message?: string;
+    validatedAt?: number;
+    keyFingerprint?: string;
+}
+
+const GEMINI_VALIDATION_TIMEOUT_MS = 12_000;
+const GEMINI_VALIDATION_TEXT = 'Gemdex API key readiness check';
+
+function configuredGeminiKey(ctx: ServeContext): string | undefined {
+    const trimmed = ctx.config.geminiApiKey?.trim();
+    return trimmed && trimmed.length > 0 ? trimmed : undefined;
+}
+
+function keyFingerprint(apiKey: string): string {
+    return crypto.createHash('sha256').update(apiKey).digest('hex');
+}
+
+function publicGeminiReadiness(ctx: ServeContext): Omit<GeminiReadiness, 'keyFingerprint'> {
+    const key = configuredGeminiKey(ctx);
+    if (!key) return { status: 'missing', message: 'Add a Gemini API key to continue.' };
+    const readiness = ctx.geminiReadiness;
+    if (!readiness || readiness.keyFingerprint !== keyFingerprint(key)) {
+        return { status: 'checking', message: 'Gemini API key validation has not completed.' };
+    }
+    return {
+        status: readiness.status,
+        ...(readiness.message && { message: readiness.message }),
+        ...(readiness.validatedAt !== undefined && { validatedAt: readiness.validatedAt }),
+    };
+}
+
+function classifyGeminiValidationError(error: unknown): GeminiReadiness {
+    const raw = errorMessage(error);
+    const normalized = raw.toLowerCase();
+    const unavailable = normalized.includes('timed out')
+        || normalized.includes('timeout')
+        || normalized.includes('network')
+        || normalized.includes('fetch failed')
+        || normalized.includes('econn')
+        || normalized.includes('enotfound')
+        || normalized.includes('temporarily unavailable')
+        || normalized.includes('service unavailable')
+        || normalized.includes('429')
+        || normalized.includes('resource_exhausted');
+    if (unavailable) {
+        return {
+            status: 'unavailable',
+            message: `Gemini could not be reached to validate this key. ${raw}`,
+        };
+    }
+    return {
+        status: 'invalid',
+        message: `Gemini rejected this API key. ${raw}`,
+    };
+}
+
+async function defaultValidateGeminiKey(config: GemdexConfig): Promise<void> {
+    const embedding = createEmbeddingInstance(config);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+        await Promise.race([
+            embedding.embed(GEMINI_VALIDATION_TEXT),
+            new Promise<never>((_resolve, reject) => {
+                timer = setTimeout(
+                    () => reject(new Error(`Gemini validation timed out after ${GEMINI_VALIDATION_TIMEOUT_MS / 1000} seconds.`)),
+                    GEMINI_VALIDATION_TIMEOUT_MS,
+                );
+            }),
+        ]);
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
+}
+
+async function validateGeminiKey(ctx: ServeContext, apiKey: string): Promise<GeminiReadiness> {
+    const fingerprint = keyFingerprint(apiKey);
+    const candidateConfig = { ...ctx.config, geminiApiKey: apiKey };
+    try {
+        await (ctx.validateGeminiKey ?? defaultValidateGeminiKey)(candidateConfig);
+        return { status: 'valid', validatedAt: Date.now(), keyFingerprint: fingerprint };
+    } catch (error) {
+        return { ...classifyGeminiValidationError(error), keyFingerprint: fingerprint };
+    }
+}
+
+function startConfiguredKeyValidation(ctx: ServeContext): void {
+    const apiKey = configuredGeminiKey(ctx);
+    if (!apiKey) {
+        ctx.geminiReadiness = { status: 'missing' };
+        ctx.geminiValidation = undefined;
+        return;
+    }
+    const fingerprint = keyFingerprint(apiKey);
+    // Reuse an in-flight validation for the same key so concurrent retries
+    // cannot resolve out of order and clobber a newer result.
+    if (ctx.geminiValidation && ctx.geminiReadiness?.keyFingerprint === fingerprint) {
+        return;
+    }
+    ctx.geminiReadiness = {
+        status: 'checking',
+        message: 'Validating the saved Gemini API key…',
+        keyFingerprint: fingerprint,
+    };
+    // Reserve the slot synchronously before any async work so two concurrent
+    // first-starts cannot both pass the in-flight check above.
+    let settle!: () => void;
+    const validation = new Promise<void>((resolve) => { settle = resolve; });
+    ctx.geminiValidation = validation;
+    void validateGeminiKey(ctx, apiKey)
+        .then((readiness) => {
+            if (configuredGeminiKey(ctx) === apiKey && ctx.geminiValidation === validation) {
+                ctx.geminiReadiness = readiness;
+            }
+        })
+        .finally(() => {
+            if (ctx.geminiValidation === validation) ctx.geminiValidation = undefined;
+            settle();
+        });
+}
+
+async function waitForConfiguredKeyValidation(ctx: ServeContext): Promise<void> {
+    if (!ctx.geminiValidation) startConfiguredKeyValidation(ctx);
+    await ctx.geminiValidation;
+}
+
+function geminiIsReady(ctx: ServeContext): boolean {
+    return publicGeminiReadiness(ctx).status === 'valid';
+}
+
+/** Persist a validated key, expose it to this process, and rebuild the local store. */
+function configureApiKey(ctx: ServeContext, apiKey: string, readiness: GeminiReadiness): void {
     envManager.set('GEMINI_API_KEY', apiKey);
     process.env['GEMINI_API_KEY'] = apiKey;
     ctx.config = {
         ...ctx.config,
         geminiApiKey: apiKey,
     };
+    // Drop any in-flight validation so a stale resolve cannot overwrite this result.
+    ctx.geminiValidation = undefined;
+    ctx.geminiReadiness = readiness;
     // The ingest manager is rebuilt lazily when its recorded key goes stale
     // (see ingestManager()), so an in-flight run keeps its manager while any
     // later run picks up the new key.
@@ -95,6 +238,7 @@ interface DesktopSettingsSummary {
     activeRemote?: string;
     configured: boolean;
     localConfigured: boolean;
+    gemini: Omit<GeminiReadiness, 'keyFingerprint'>;
     remotes: DesktopRemoteSummary[];
 }
 
@@ -102,6 +246,7 @@ interface DesktopConfigSummary {
     configured: boolean;
     mode: 'local' | 'remote';
     needsKey: boolean;
+    gemini: Omit<GeminiReadiness, 'keyFingerprint'>;
     activeRemote?: Pick<DesktopRemoteSummary, 'name' | 'url' | 'hasToken'>;
 }
 
@@ -148,11 +293,16 @@ function remoteConfig(ctx: ServeContext, name: string): GemdexConfig {
 
 function settingsSummary(ctx: ServeContext): DesktopSettingsSummary {
     const configStore = clientConfigStore(ctx);
+    const gemini = publicGeminiReadiness(ctx);
+    const configured = ctx.config.mode === 'local'
+        ? ctx.store !== null && gemini.status === 'valid'
+        : ctx.store !== null;
     return {
         mode: ctx.config.mode,
         ...(ctx.config.mode === 'remote' && ctx.config.remoteName && { activeRemote: ctx.config.remoteName }),
-        configured: ctx.store !== null,
-        localConfigured: Boolean(ctx.config.geminiApiKey ?? envManager.get('GEMINI_API_KEY')),
+        configured,
+        localConfigured: gemini.status === 'valid',
+        gemini,
         remotes: configStore.list().map((remote) => ({
             ...remote,
             hasToken: Boolean(configStore.getEnv(remote.tokenEnvVar)?.trim()),
@@ -177,10 +327,15 @@ function activeRemoteSummary(ctx: ServeContext): Pick<DesktopRemoteSummary, 'nam
 
 function configSummary(ctx: ServeContext): DesktopConfigSummary {
     const activeRemote = activeRemoteSummary(ctx);
+    const gemini = publicGeminiReadiness(ctx);
+    const configured = ctx.config.mode === 'local'
+        ? ctx.store !== null && gemini.status === 'valid'
+        : ctx.store !== null;
     return {
-        configured: ctx.store !== null,
+        configured,
         mode: ctx.config.mode,
-        needsKey: ctx.config.mode === 'local' && ctx.store === null,
+        needsKey: ctx.config.mode === 'local' && gemini.status !== 'valid',
+        gemini,
         ...(activeRemote && { activeRemote }),
     };
 }
@@ -264,9 +419,12 @@ async function migrateLocalToRemote(
  * even when the memory backend is remote.
  */
 function ingestApiKey(ctx: ServeContext): string {
-    const key = ctx.config.geminiApiKey ?? envManager.get('GEMINI_API_KEY');
+    const key = configuredGeminiKey(ctx);
     if (!key) {
         throw new Error('Chat-history ingestion needs a local GEMINI_API_KEY (digests are generated client-side).');
+    }
+    if (!geminiIsReady(ctx)) {
+        throw new Error('Chat-history ingestion is blocked until the Gemini API key is validated.');
     }
     return key;
 }
@@ -346,7 +504,8 @@ function ingestSourcesSummary(ctx: ServeContext): unknown {
             isDefault: model === DEFAULT_DIGEST_MODEL,
         })),
         pricingAsOf: DIGEST_PRICING_AS_OF,
-        ingestReady: Boolean(ctx.config.geminiApiKey ?? envManager.get('GEMINI_API_KEY')),
+        ingestReady: geminiIsReady(ctx),
+        gemini: publicGeminiReadiness(ctx),
     };
 }
 
@@ -425,6 +584,15 @@ function isTokenValid(req: http.IncomingMessage, token: string | undefined): boo
 }
 
 export function createServer(ctx: ServeContext): http.Server {
+    // Never mark a configured key valid without a real embedding proof. Tests that
+    // need an unlocked local backend must pass an explicit validated readiness.
+    if (!ctx.geminiReadiness) {
+        if (configuredGeminiKey(ctx)) {
+            startConfiguredKeyValidation(ctx);
+        } else {
+            ctx.geminiReadiness = { status: 'missing' };
+        }
+    }
     return http.createServer(async (req, res) => {
         const method = req.method ?? 'GET';
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -453,11 +621,9 @@ export function createServer(ctx: ServeContext): http.Server {
                 return;
             }
 
-            // GET /config and POST /config are intentionally excluded from the
-            // token requirement: the desktop app must be able to submit an API
-            // key before authentication is established. These routes do not
-            // expose sensitive memory data. /config stays a desktop-sidecar
-            // concern; shared memory API handlers do not mount it.
+            // Configuration routes are intentionally excluded from the token
+            // requirement: the desktop app must be able to repair a missing or
+            // rejected key before data-route authentication is established.
             if (method === 'GET' && pathname === '/config') {
                 sendJson(res, 200, configSummary(ctx), corsHeaders);
                 return;
@@ -470,11 +636,49 @@ export function createServer(ctx: ServeContext): http.Server {
                     sendJson(res, 400, { error: "'apiKey' is required" }, corsHeaders);
                     return;
                 }
+                const readiness = await validateGeminiKey(ctx, apiKey);
+                if (readiness.status !== 'valid') {
+                    const status = readiness.status === 'unavailable' ? 503 : 401;
+                    sendJson(res, status, {
+                        error: readiness.message ?? 'Gemini API key validation failed.',
+                        configured: false,
+                        needsKey: true,
+                        gemini: {
+                            status: readiness.status,
+                            ...(readiness.message && { message: readiness.message }),
+                        },
+                    }, corsHeaders);
+                    return;
+                }
                 try {
-                    configureApiKey(ctx, apiKey);
-                    sendJson(res, 200, { configured: ctx.store !== null }, corsHeaders);
+                    configureApiKey(ctx, apiKey, readiness);
+                    sendJson(res, 200, configSummary(ctx), corsHeaders);
                 } catch (error) {
                     sendJson(res, 500, { error: errorMessage(error) }, corsHeaders);
+                }
+                return;
+            }
+
+            if (method === 'POST' && pathname === '/config/validate') {
+                if (!configuredGeminiKey(ctx)) {
+                    sendJson(res, 400, {
+                        error: 'No Gemini API key is configured.',
+                        needsKey: true,
+                        gemini: { status: 'missing', message: 'Add a Gemini API key to continue.' },
+                    }, corsHeaders);
+                    return;
+                }
+                startConfiguredKeyValidation(ctx);
+                await waitForConfiguredKeyValidation(ctx);
+                const summary = configSummary(ctx);
+                if (summary.gemini.status === 'valid') {
+                    sendJson(res, 200, summary, corsHeaders);
+                } else {
+                    sendJson(res, 503, {
+                        ...summary,
+                        error: summary.gemini.message ?? 'Gemini API key validation failed.',
+                        needsKey: true,
+                    }, corsHeaders);
                 }
                 return;
             }
@@ -606,10 +810,20 @@ export function createServer(ctx: ServeContext): http.Server {
                 return;
             }
 
-            // Every remaining route needs an embedding-backed store. Until a
-            // key is configured, tell the app to prompt for one.
+            // Local memory operations are blocked until the configured key has
+            // completed a real Gemini embedding request during this sidecar run.
+            if (ctx.config.mode === 'local' && !geminiIsReady(ctx)) {
+                const gemini = publicGeminiReadiness(ctx);
+                sendJson(res, 503, {
+                    error: gemini.message ?? 'Gemini API key validation is required.',
+                    needsKey: true,
+                    gemini,
+                }, corsHeaders);
+                return;
+            }
+
             if (ctx.store === null) {
-                sendJson(res, 503, { error: 'GEMINI_API_KEY not configured', needsKey: true }, corsHeaders);
+                sendJson(res, 503, { error: 'No memory backend configured' }, corsHeaders);
                 return;
             }
 
@@ -660,7 +874,6 @@ export function createServer(ctx: ServeContext): http.Server {
                     const folders = resolveIngestFolders(ctx, body?.sources);
                     const model = trimmedString(body?.model) || undefined;
                     const mode = trimmedString(body?.mode) === 'batch' ? 'batch' as const : 'standard' as const;
-                    const newOnly = body?.newOnly === true;
                     const manager = ingestManager(ctx);
                     if (manager.isRunning()) {
                         sendJson(res, 409, { error: 'An ingestion run is already in progress.' }, corsHeaders);
@@ -669,7 +882,7 @@ export function createServer(ctx: ServeContext): http.Server {
                     const store = ctx.store;
                     // Fire and forget: the run is polled via GET /ingest/status.
                     // Errors are captured in the manager's progress state.
-                    void manager.run({ folders, model, mode, newOnly }, store).catch(() => undefined);
+                    void manager.run({ folders, model, mode }, store).catch(() => undefined);
                     sendJson(res, 200, { started: true }, corsHeaders);
                 } catch (error) {
                     sendJson(res, 400, { error: errorMessage(error) }, corsHeaders);
@@ -760,6 +973,7 @@ export async function runServe(args: string[]): Promise<void> {
         allowedOrigin,
         clientConfigStore: new ClientConfigStore(),
     };
+    startConfiguredKeyValidation(ctx);
     const server = createServer(ctx);
 
     await new Promise<void>((resolve) => {

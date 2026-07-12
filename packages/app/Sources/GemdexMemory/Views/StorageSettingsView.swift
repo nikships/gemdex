@@ -28,6 +28,7 @@ struct StorageSettingsView: View {
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
+                    geminiSection
                     modeChooser
                     remoteChooser
                     addRemoteForm
@@ -38,8 +39,8 @@ struct StorageSettingsView: View {
                 .padding(20)
             }
         }
-        .frame(width: isEmbedded ? nil : 560, height: isEmbedded ? nil : 600)
-        .frame(maxWidth: isEmbedded ? 600 : .infinity)
+        .frame(width: isEmbedded ? nil : 620, height: isEmbedded ? nil : 660)
+        .frame(maxWidth: isEmbedded ? 640 : .infinity)
         .background(isEmbedded ? nil : BrandBackdrop())
         .task { await refresh() }
     }
@@ -47,10 +48,10 @@ struct StorageSettingsView: View {
     private var header: some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 4) {
-                Label("Storage settings", systemImage: "externaldrive.connected.to.line.below")
+                Label("Storage & Gemini", systemImage: "externaldrive.connected.to.line.below")
                     .font(.title3.bold())
                     .labelStyle(.titleAndIcon)
-                Text("Choose the embedded local store or a Gemdex Server you control.")
+                Text("Choose where memories live and verify the Gemini key used for local embeddings and chat-history ingestion.")
                     .font(.callout).foregroundStyle(.secondary)
             }
             Spacer()
@@ -72,6 +73,29 @@ struct StorageSettingsView: View {
             .accessibilityLabel("Close")
         }
         .padding(20)
+    }
+
+    private var geminiSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Gemini API readiness").font(.headline)
+            if let readiness = model.geminiReadiness, readiness.isReady {
+                HStack(spacing: 10) {
+                    Image(systemName: "checkmark.seal.fill")
+                        .foregroundStyle(Brand.sage)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Gemini key verified").font(.callout.bold())
+                        Text("Local embeddings and new-session ingestion are unlocked for this launch.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .glassSurface(cornerRadius: Metric.radiusCard, tint: Brand.sage)
+            } else {
+                GeminiReadinessAlert(readiness: model.geminiReadiness, compact: true)
+                GeminiKeySetupPanel(primaryButtonTitle: "Validate Gemini key")
+            }
+        }
     }
 
     private var modeChooser: some View {

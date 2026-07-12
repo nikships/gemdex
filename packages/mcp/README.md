@@ -112,6 +112,19 @@ deployment, TLS, storage, backup/restore, upgrades, and troubleshooting.
 Deletion is intentionally **not** an agent tool — it's a human action in the
 Gemdex desktop app.
 
+## Chat-history ingestion
+
+```bash
+npx gemdex ingest-history --source claude --dry-run
+npx gemdex ingest-history --source claude
+```
+
+Ingestion processes **only sessions that have never been successfully ingested**.
+Previously ingested sessions are reported as skipped and are never re-digested,
+even if the transcript later changes. This invariant is enforced by the core
+engine; there is no CLI or sidecar override. Digestion always needs a local
+`GEMINI_API_KEY`, including when memory storage is remote.
+
 ## Desktop sidecar
 
 The same binary also runs the localhost HTTP manager API used by the desktop app:

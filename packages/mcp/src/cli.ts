@@ -57,7 +57,7 @@ Usage:
   gemdex status
   gemdex import-local-to-remote [name]
   gemdex ingest-history [--source claude|factory|codex|antigravity|PATH]... [--model MODEL]
-                        [--batch] [--dry-run] [--new-only] [--collect]
+                        [--batch] [--dry-run] [--collect]
 
 init-remote is the one-shot client setup for a BYOI server: it stores the
 remote + token, verifies the server is reachable, authenticated, and version-
@@ -66,10 +66,11 @@ memories (--import-local), and prints the exact agent command to run.
 
 ingest-history distills coding-agent chat transcripts (Claude Code, Factory
 CLI, Codex, Antigravity, or any folder of .jsonl sessions) into one memory per
-session. Defaults to detected presets. --dry-run prints the scan + cost estimate;
---new-only ingests never-before-ingested sessions and skips changed ones;
---batch submits a Gemini Batch API job (50% cost, results within ~24h) that
-you collect later with --collect. Needs a local GEMINI_API_KEY.
+session. Only never-before-ingested sessions are processed; previously ingested
+sessions are never reprocessed, even if their transcript later changes. Defaults
+to detected presets. --dry-run prints the scan + cost estimate; --batch submits a
+Gemini Batch API job (50% cost, results within ~24h) that you collect later with
+--collect. Needs a local GEMINI_API_KEY.
 `;
 }
 
@@ -453,7 +454,6 @@ async function runIngestHistory(args: string[], io: CliIo, dependencies: CliDepe
     }
     const batch = args.includes('--batch');
     const dryRun = args.includes('--dry-run');
-    const newOnly = args.includes('--new-only');
     const collect = args.includes('--collect');
 
     const apiKey = envManager.get('GEMINI_API_KEY');
@@ -487,24 +487,23 @@ async function runIngestHistory(args: string[], io: CliIo, dependencies: CliDepe
     const folders = parseIngestSources(args);
     const scan = manager.scan(folders);
     io.stdout(
-        `Sessions — new: ${scan.processableBuckets.newFiles.length}, ` +
-        `changed: ${scan.processableBuckets.changedFiles.length}, ` +
+        `Sessions — new: ${scan.processableFiles.length}, ` +
+        `previously ingested and changed (skipped): ${scan.buckets.changedFiles.length}, ` +
         `up-to-date: ${scan.buckets.upToDate.length}, active (skipped): ${scan.buckets.skippedActive.length}\n`,
     );
     if (scan.skippedTrivialFiles.length > 0) {
         io.stdout(`Skipped trivial candidates: ${scan.skippedTrivialFiles.length}\n`);
     }
-    const totals = newOnly ? scan.newOnly : scan;
-    if (newOnly) {
-        io.stdout(`New sessions only: skipping ${scan.processableBuckets.changedFiles.length} changed sessions.\n`);
+    if (scan.buckets.changedFiles.length > 0) {
+        io.stdout('Previously ingested sessions are never reprocessed.\n');
     }
-    if (totals.pendingCount === 0) {
+    if (scan.pendingCount === 0) {
         io.stdout('Nothing to ingest.\n');
         return 0;
     }
-    io.stdout(`Estimated input tokens: ~${totals.estimatedInputTokens.toLocaleString()}\n`);
+    io.stdout(`Estimated input tokens: ~${scan.estimatedInputTokens.toLocaleString()}\n`);
     io.stdout(`Cost estimates (pricing as of ${DIGEST_PRICING_AS_OF}):\n`);
-    for (const estimate of totals.estimates) {
+    for (const estimate of scan.estimates) {
         const marker = estimate.model === model ? '*' : ' ';
         io.stdout(
             `  ${marker} ${estimate.model.padEnd(24)} standard ${formatUsd(estimate.standardUsd)}` +
@@ -515,7 +514,7 @@ async function runIngestHistory(args: string[], io: CliIo, dependencies: CliDepe
 
     const backend = createBackend();
     if (batch) {
-        const progress = await manager.run({ folders, model, mode: 'batch', newOnly }, backend);
+        const progress = await manager.run({ folders, model, mode: 'batch' }, backend);
         const jobName = progress.pendingBatch?.jobName ?? '(unknown)';
         io.stdout(`Submitted batch job ${jobName} (${progress.total} sessions).\n`);
         io.stdout('Collect results later with: gemdex ingest-history --collect\n');
@@ -527,7 +526,7 @@ async function runIngestHistory(args: string[], io: CliIo, dependencies: CliDepe
         io.stderr(`\r[ingest] ${progress.processed + progress.failed}/${progress.total} (failed: ${progress.failed})  `);
     }, 1000);
     try {
-        const progress = await manager.run({ folders, model, mode: 'standard', newOnly }, backend);
+        const progress = await manager.run({ folders, model, mode: 'standard' }, backend);
         io.stderr('\n');
         io.stdout(
             `Done — Ingested: ${progress.processed}, Failed: ${progress.failed}, ` +

@@ -5,6 +5,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Added
+- **Validated Gemini readiness in the macOS app.** Every sidecar launch now proves the configured local key with a real embedding request before the app unlocks. Missing, rejected, and temporarily unverifiable keys produce a prominent blocking alert instead of surfacing later as failed saves, searches, imports, or session ingestions. Candidate keys are validated before they are persisted, and Storage settings provides status, replacement, and retry controls (including in remote storage mode, where chat digestion still needs a local key).
 - **`list_memories` MCP tool.** A read-only browse over the global pool: lists stored memories newest-first as compact summaries (title + id + relative age + preview + media counts), with an optional case-insensitive substring `filter` over title/preview and a `limit` (default 50, max 200). Complements `recall` (relevance-ranked, full content) for orienting and for retrieving an exact `id` to pass to `update_memory`. Deletion remains a human-only desktop action.
 - **Richer `recall` output for agents.** Each hit now reports its relative age (`updated: 3d ago`, from `updatedAt`) and an `attachments:` line (kind + stable id + caption) so the agent can judge staleness and knows when media exists (fetch bytes via the sidecar's `GET /memories/:id/attachments/:attachmentId`).
 - **Token-budgeted recall.** `recall` accepts `detail: "summary" | "full"` (default `full`); `summary` returns a ~200-char preview per hit instead of full content, so an agent can scan many results cheaply before pulling the one it needs.
@@ -17,6 +18,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - **Desktop app multimodal UI.** Create/edit memories with drag-and-drop or a file picker; per-attachment caption inputs; inline rendering of images, audio and video players, and native PDF preview; a media badge on list items; and a “Find similar” action on any attachment that runs recall-by-example (no free-text search box — keeping the app manage-only).
 
 ### Changed
+- **Chat-history ingestion is new-sessions-only.** The desktop checkbox and CLI `--new-only` flag were removed. The core engine, sidecar, desktop app, and CLI now treat previously ingested sessions as informational-only—even if their transcript later changes—so no client can accidentally re-digest or overwrite an existing session memory.
 - `content` is now optional for `save_memory`/`update_memory` when at least one attachment is supplied; `update_memory` preserves omitted fields (text, title, attachments) instead of requiring `content`.
 - `recall` (`MemoryStore` + MCP tool) now takes an optional media query; `query` is optional when at least one attachment is provided.
 

@@ -78,8 +78,9 @@ things on top:
 | Method | Path | Token? | Source | Notes |
 |--------|------|--------|--------|-------|
 | `GET` | `/health` | no | sidecar | `{ ok: true }`; polled before a token exists |
-| `GET` | `/config` | no | sidecar | `{ configured, mode, needsKey, activeRemote? }` |
-| `POST` | `/config` | no | sidecar | Set `GEMINI_API_KEY` (`{apiKey}`) → persisted to `~/.gemdex/.env`, store rebuilt |
+| `GET` | `/config` | no | sidecar | Backend summary plus Gemini readiness (`missing`, `checking`, `valid`, `invalid`, `unavailable`) |
+| `POST` | `/config` | no | sidecar | Validate candidate `GEMINI_API_KEY` with a real embedding call; persist and rebuild only on success |
+| `POST` | `/config/validate` | no | sidecar | Retry validation of the saved key |
 | `GET` | `/settings` | yes | sidecar | Mode + configured remotes |
 | `POST` | `/settings/remotes` | yes | sidecar | Add/update named remote `{name,url,token?}` |
 | `DELETE` | `/settings/remotes/:name` | yes | sidecar | Remove a remote |
@@ -98,15 +99,19 @@ things on top:
 | `POST` | `/import` | yes | **core** | Upsert records by id |
 
 Auth precedence inside `createServer`: reject bad `Origin` (403) → `OPTIONS`
-preflight (204, no token) → `/health` and `/config` (no token) → token gate (401
-on miss) → `/settings*` → **store-null gate** → core data routes.
+preflight (204, no token) → `/health` and `/config*` (no token) → token gate (401
+on miss) → `/settings*` → **validated-local-key gate** → store-null gate → core
+data routes.
 
-**`503 {needsKey:true}`**: the sidecar boots even with no `GEMINI_API_KEY` (a
-`.app` launched from Finder doesn't inherit shell env). `buildStore` returns
-`null` in local mode when the key is missing, and every core data route answers
-`503 {needsKey:true}` until the app POSTs a key to `/config`. Settings routes work
-without a key. Body cap is 100 MiB on attachment-carrying core routes (50 MiB
-default elsewhere) → `413`; malformed JSON → `400`.
+**`503 {needsKey:true}`**: the production sidecar validates any saved local key
+on every launch with a small real embedding request. Local data routes remain
+blocked while the key is missing, checking, rejected, or temporarily
+unverifiable. `POST /config` validates a candidate before writing
+`~/.gemdex/.env`, so a rejected key never replaces the current value;
+`POST /config/validate` retries the saved key. Settings routes and remote memory
+routes continue to work without a validated local key. Body cap is 100 MiB on
+attachment-carrying core routes (50 MiB default elsewhere) → `413`; malformed
+JSON → `400`.
 
 ## MCP tool contract
 
@@ -177,10 +182,8 @@ independent pools; the local and remote pools never merge.
 
 - **Never write to stdout in MCP mode** (it's the JSON-RPC channel). The sidecar's
   `PORT=… TOKEN=…` handshake is the *only* sanctioned raw-stdout write.
-- **MCP local mode fails fast on a missing key; the sidecar does not.** The stdio
-  server builds the backend at startup, so `createEmbeddingInstance` throws
-  `GEMINI_API_KEY is required` and the process exits non-zero. The sidecar instead
-  boots with a `null` store and serves `503 {needsKey:true}` until `/config`.
+- **MCP local mode fails fast on a missing key; the sidecar boots into a repairable gate.** The stdio server builds the backend at startup, so `createEmbeddingInstance` throws `GEMINI_API_KEY is required` and the process exits non-zero. The sidecar starts its management routes, validates a saved key asynchronously, and serves `503 {needsKey:true}` for local data work until readiness is `valid`.
+- **History ingestion is permanently new-sessions-only.** The core manager runs only ledger-new files. Changed previously ingested sessions may appear in scan diagnostics but are never passed to standard or batch digestion; the sidecar ignores legacy `newOnly` request fields and the CLI exposes no override.
 - **Tool routing is positional**: `index.ts` switches on `MCP_TOOL_NAMES[0..3]`.
   Reordering `tool-names.ts` silently rewires the handlers. Adding a tool means
   appending to the tuple, defining its schema in `index.ts`, adding a `case`, and
@@ -193,4 +196,4 @@ independent pools; the local and remote pools never merge.
   the same. Same semantics in MCP `update_memory` and core `PUT/PATCH`.
 - The sidecar reuses the **core** router for data routes — fix a memory-API bug in
   `gemdex-core/src/http/http-api.ts`, not here; this layer only owns auth/bind and
-  the `/config` + `/settings*` management routes.
+  the `/config*` + `/settings*` management routes.

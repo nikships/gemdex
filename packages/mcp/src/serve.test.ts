@@ -1,5 +1,6 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -24,6 +25,15 @@ import { ClientConfigStore } from "./cli-config.js";
 import { createServer } from "./serve.js";
 
 const DIM = 16;
+
+function validGeminiReadiness(apiKey: string) {
+    return {
+        status: 'valid' as const,
+        validatedAt: Date.now(),
+        keyFingerprint: crypto.createHash('sha256').update(apiKey).digest('hex'),
+    };
+}
+
 
 function vectorize(text: string): number[] {
     const vec: number[] = [];
@@ -194,10 +204,204 @@ test("GET /health returns ok", async () => {
 test("GET /config reports configured when a store is present", async () => {
     const res = await fetch(`${base}/config`);
     assert.equal(res.status, 200);
-    assert.deepEqual(await res.json(), {
-        configured: true,
-        needsKey: false,
-    });
+    const body = await json(res);
+    assert.equal(body.configured, true);
+    assert.equal(body.needsKey, false);
+    assert.equal(body.gemini.status, 'missing');
+});
+
+test("local data routes stay locked until the saved Gemini key validates", async () => {
+    const ctx = {
+        config: {
+            name: 'test',
+            version: '1',
+            embeddingModel: 'fake',
+            geminiApiKey: 'saved-key',
+            mode: 'local' as const,
+        },
+        store: new SettingsBackend(),
+        geminiReadiness: { status: 'checking' as const },
+        validateGeminiKey: async () => undefined,
+    };
+    const srv = createServer(ctx);
+    await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
+    const addr = srv.address() as AddressInfo;
+    const srvBase = `http://127.0.0.1:${addr.port}`;
+    try {
+        const before = await fetch(`${srvBase}/config`);
+        const beforeBody = await json(before);
+        assert.equal(beforeBody.configured, false);
+        assert.equal(beforeBody.needsKey, true);
+        assert.equal(beforeBody.gemini.status, 'checking');
+
+        const blocked = await fetch(`${srvBase}/memories`);
+        assert.equal(blocked.status, 503);
+        assert.equal((await json(blocked)).needsKey, true);
+
+        const validated = await fetch(`${srvBase}/config/validate`, { method: 'POST' });
+        assert.equal(validated.status, 200);
+        assert.equal((await json(validated)).gemini.status, 'valid');
+
+        const unlocked = await fetch(`${srvBase}/memories`);
+        assert.equal(unlocked.status, 200);
+    } finally {
+        await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+});
+
+test("createServer never marks an unvalidated key as valid", async () => {
+    let resolveValidation: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => { resolveValidation = resolve; });
+    const ctx = {
+        config: {
+            name: 'test',
+            version: '1',
+            embeddingModel: 'fake',
+            geminiApiKey: 'saved-key',
+            mode: 'local' as const,
+        },
+        store: new SettingsBackend(),
+        validateGeminiKey: async () => { await gate; },
+    };
+    const srv = createServer(ctx);
+    await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
+    const addr = srv.address() as AddressInfo;
+    const srvBase = `http://127.0.0.1:${addr.port}`;
+    try {
+        const before = await json(await fetch(`${srvBase}/config`));
+        assert.equal(before.gemini.status, 'checking');
+        assert.equal(before.needsKey, true);
+        assert.equal(before.configured, false);
+
+        const blocked = await fetch(`${srvBase}/memories`);
+        assert.equal(blocked.status, 503);
+        assert.equal((await json(blocked)).needsKey, true);
+
+        resolveValidation?.();
+        const validated = await fetch(`${srvBase}/config/validate`, { method: 'POST' });
+        assert.equal(validated.status, 200);
+        assert.equal((await json(validated)).gemini.status, 'valid');
+    } finally {
+        resolveValidation?.();
+        await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+});
+
+test("POST /config/validate reuses an in-flight check for the same key", async () => {
+    let calls = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const fingerprint = crypto.createHash('sha256').update('saved-key').digest('hex');
+    const ctx = {
+        config: {
+            name: 'test',
+            version: '1',
+            embeddingModel: 'fake',
+            geminiApiKey: 'saved-key',
+            mode: 'local' as const,
+        },
+        store: new SettingsBackend(),
+        // Pre-seed checking so createServer does not auto-start a probe; the
+        // concurrent validate requests below own the single in-flight check.
+        geminiReadiness: {
+            status: 'checking' as const,
+            message: 'preflight',
+            keyFingerprint: fingerprint,
+        },
+        validateGeminiKey: async () => {
+            calls += 1;
+            await gate;
+        },
+    };
+    const srv = createServer(ctx);
+    await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
+    const addr = srv.address() as AddressInfo;
+    const srvBase = `http://127.0.0.1:${addr.port}`;
+    try {
+        const first = fetch(`${srvBase}/config/validate`, { method: 'POST' });
+        const second = fetch(`${srvBase}/config/validate`, { method: 'POST' });
+        // Yield so both handlers enter startConfiguredKeyValidation.
+        await new Promise((r) => setTimeout(r, 20));
+        release();
+        const [a, b] = await Promise.all([first, second]);
+        assert.equal(a.status, 200);
+        assert.equal(b.status, 200);
+        assert.equal(calls, 1);
+        assert.equal((await json(a)).gemini.status, 'valid');
+        assert.equal((await json(b)).gemini.status, 'valid');
+    } finally {
+        release();
+        await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+});
+
+test("POST /config/validate returns needsKey when the saved key is rejected", async () => {
+    const ctx = {
+        config: {
+            name: 'test',
+            version: '1',
+            embeddingModel: 'fake',
+            geminiApiKey: 'saved-key',
+            mode: 'local' as const,
+        },
+        store: new SettingsBackend(),
+        geminiReadiness: {
+            status: 'invalid' as const,
+            message: 'stale',
+            keyFingerprint: crypto.createHash('sha256').update('saved-key').digest('hex'),
+        },
+        validateGeminiKey: async () => { throw new Error('API_KEY_INVALID'); },
+    };
+    const srv = createServer(ctx);
+    await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
+    const addr = srv.address() as AddressInfo;
+    const srvBase = `http://127.0.0.1:${addr.port}`;
+    try {
+        const res = await fetch(`${srvBase}/config/validate`, { method: 'POST' });
+        assert.equal(res.status, 503);
+        const body = await json(res);
+        assert.equal(body.needsKey, true);
+        assert.equal(body.gemini.status, 'invalid');
+        assert.match(body.error, /rejected|invalid/i);
+    } finally {
+        await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+});
+
+test("POST /config rejects an invalid candidate without replacing the working key", async () => {
+    const ctx = {
+        config: {
+            name: 'test',
+            version: '1',
+            embeddingModel: 'fake',
+            geminiApiKey: 'saved-key',
+            mode: 'local' as const,
+        },
+        store: new SettingsBackend(),
+        geminiReadiness: validGeminiReadiness('saved-key'),
+        validateGeminiKey: async () => { throw new Error('API_KEY_INVALID'); },
+    };
+    const srv = createServer(ctx);
+    await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
+    const addr = srv.address() as AddressInfo;
+    const srvBase = `http://127.0.0.1:${addr.port}`;
+    try {
+        const rejected = await fetch(`${srvBase}/config`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ apiKey: 'bad-candidate' }),
+        });
+        assert.equal(rejected.status, 401);
+        const rejectedBody = await json(rejected);
+        assert.equal(rejectedBody.gemini.status, 'invalid');
+        assert.equal(rejectedBody.needsKey, true);
+        assert.equal(ctx.config.geminiApiKey, 'saved-key');
+
+        const summary = await fetch(`${srvBase}/config`);
+        assert.equal((await json(summary)).gemini.status, 'valid');
+    } finally {
+        await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
 });
 
 test("shared memory API handler mounts data routes without desktop /config", async () => {
@@ -245,17 +449,17 @@ test("shared memory API handler mounts data routes without desktop /config", asy
     }
 });
 
-test("data routes answer 503 needsKey when no store is configured", async () => {
-    const bare = createServer({ config: {} as any, store: null });
+test("data routes answer 503 needsKey when no local key is configured", async () => {
+    const bare = createServer({ config: { mode: 'local' } as any, store: null });
     await new Promise<void>((resolve) => bare.listen(0, "127.0.0.1", resolve));
     const addr = bare.address() as AddressInfo;
     const bareBase = `http://127.0.0.1:${addr.port}`;
     try {
         const cfg = await fetch(`${bareBase}/config`);
-        assert.deepEqual(await cfg.json(), {
-            configured: false,
-            needsKey: false,
-        });
+        const cfgBody = await json(cfg);
+        assert.equal(cfgBody.configured, false);
+        assert.equal(cfgBody.needsKey, true);
+        assert.equal(cfgBody.gemini.status, 'missing');
 
         const res = await fetch(`${bareBase}/memories`);
         assert.equal(res.status, 503);
@@ -286,6 +490,7 @@ test("desktop settings configure, test, switch, migrate, and remove remotes with
         store: local,
         token,
         clientConfigStore: configStore,
+        geminiReadiness: validGeminiReadiness('local-key'),
         createBackend: (config) => config.mode === 'remote' ? remote : local,
         fetch: (async (input) => {
             const url = String(input);
@@ -314,12 +519,12 @@ test("desktop settings configure, test, switch, migrate, and remove remotes with
     try {
         const initial = await fetch(`${settingsBase}/settings`, { headers });
         assert.equal(initial.status, 200);
-        assert.deepEqual(await initial.json(), {
-            mode: 'local',
-            configured: true,
-            localConfigured: true,
-            remotes: [],
-        });
+        const initialBody = await json(initial);
+        assert.equal(initialBody.mode, 'local');
+        assert.equal(initialBody.configured, true);
+        assert.equal(initialBody.localConfigured, true);
+        assert.equal(initialBody.gemini.status, 'valid');
+        assert.deepEqual(initialBody.remotes, []);
 
         const add = await fetch(`${settingsBase}/settings/remotes`, {
             method: 'POST',
@@ -358,15 +563,15 @@ test("desktop settings configure, test, switch, migrate, and remove remotes with
         const remoteConfigText = await remoteConfig.text();
         assert.doesNotMatch(remoteConfigText, /long-lived-secret/);
         assert.doesNotMatch(remoteConfigText, /tokenEnvVar/);
-        assert.deepEqual(JSON.parse(remoteConfigText), {
-            configured: true,
-            mode: 'remote',
-            needsKey: false,
-            activeRemote: {
-                name: 'prod',
-                url: 'https://memory.example.com',
-                hasToken: true,
-            },
+        const remoteConfigBody = JSON.parse(remoteConfigText);
+        assert.equal(remoteConfigBody.configured, true);
+        assert.equal(remoteConfigBody.mode, 'remote');
+        assert.equal(remoteConfigBody.needsKey, false);
+        assert.equal(remoteConfigBody.gemini.status, 'valid');
+        assert.deepEqual(remoteConfigBody.activeRemote, {
+            name: 'prod',
+            url: 'https://memory.example.com',
+            hasToken: true,
         });
 
         const remoteList = await fetch(`${settingsBase}/memories`, { headers });
@@ -708,7 +913,12 @@ async function withTokenServer(
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gemdex-serve-auth-"));
     const db = new LanceDBVectorDatabase({ uri: dir });
     const store = new LocalMemoryBackend({ embedding: new FakeEmbedding(), vectorDatabase: db });
-    const srv = createServer({ config: {} as any, store, token });
+    const srv = createServer({
+        config: {} as any,
+        store,
+        token,
+        validateGeminiKey: async () => undefined,
+    });
     await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
     const addr = srv.address() as AddressInfo;
     const srvBase = `http://127.0.0.1:${addr.port}`;
@@ -738,14 +948,13 @@ test("token: GET /config is accessible without a token", async () => {
 
 test("token: POST /config is accessible without a token", async () => {
     await withTokenServer(TEST_TOKEN, async (b) => {
-        // Posting a bogus key is fine; we only care about the auth gate here.
+        // Validation is injected by withTokenServer; this test only covers auth.
         const res = await fetch(`${b}/config`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ apiKey: "not-a-real-key" }),
         });
-        // 200 or 500 — either way the request was not blocked by the token gate.
-        assert.ok(res.status !== 401, `expected non-401, got ${res.status}`);
+        assert.equal(res.status, 200);
     });
 });
 

@@ -144,12 +144,10 @@ export interface IngestScanTotals {
 /** Result of scanning sources without running ingestion. */
 export interface IngestScanResult extends IngestScanTotals {
     buckets: ScanBuckets;
-    /** Pending files that parse into non-trivial sessions and would be processed. */
-    processableBuckets: Pick<ScanBuckets, 'newFiles' | 'changedFiles'>;
-    /** Pending files skipped because they did not contain enough real conversation. */
+    /** New files that parse into non-trivial sessions and will be processed. */
+    processableFiles: SessionFile[];
+    /** New files skipped because they did not contain enough real conversation. */
     skippedTrivialFiles: SessionFile[];
-    /** Totals restricted to never-before-ingested sessions (the `newOnly` run option). */
-    newOnly: IngestScanTotals;
 }
 
 export type IngestRunState = 'idle' | 'running' | 'batchPending' | 'done' | 'failed' | 'cancelled';

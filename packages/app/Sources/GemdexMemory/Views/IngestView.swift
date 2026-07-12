@@ -27,7 +27,6 @@ struct IngestView: View {
     @State private var scan: IngestScanSummary?
     @State private var selectedModel = ""
     @State private var useBatch = false
-    @State private var newOnly = false
     @State private var status: IngestStatus?
     @State private var collectResult: IngestCollectResult?
     @State private var busy = false
@@ -93,14 +92,14 @@ struct IngestView: View {
             Spacer()
             switch step {
             case .sources:
-                Button("Scan") { Task { await runScan() } }
+                Button("Scan New Sessions") { Task { await runScan() } }
                     .buttonStyle(BrandButtonStyle())
-                    .disabled(busy || !hasSelection)
+                    .disabled(busy || !hasSelection || !(sources?.ingestReady ?? false))
             case .scanned:
                 Button("Back") { step = .sources; scan = nil; error = nil }
                 Button(useBatch ? "Submit Batch Job" : "Start Ingestion") { Task { await start() } }
                     .buttonStyle(BrandButtonStyle())
-                    .disabled(busy || effectivePendingCount == 0)
+                    .disabled(busy || (scan?.pendingCount ?? 0) == 0 || !(sources?.ingestReady ?? false))
             case .running:
                 Button("Cancel") { Task { await cancel() } }
                     .disabled(busy)
@@ -134,30 +133,38 @@ struct IngestView: View {
         if let sources {
             VStack(alignment: .leading, spacing: 14) {
                 if !sources.ingestReady {
-                    Label("Ingestion digests transcripts locally with Gemini and needs a GEMINI_API_KEY (Storage settings).",
-                          systemImage: "exclamationmark.triangle")
-                        .font(.callout)
-                        .foregroundStyle(Brand.terracotta)
+                    VStack(alignment: .leading, spacing: 10) {
+                        GeminiReadinessAlert(readiness: sources.gemini, compact: true)
+                        Text("Scanning and ingestion are disabled. Chat-history digestion always runs locally, even when memories are stored on a remote Gemdex Server.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Button("Open Storage & Gemini settings") {
+                            model.showIngest = false
+                            model.showSettings = true
+                        }
+                        .brandPrimary()
+                    }
                 }
                 Text("Session folders").font(.headline)
                 ForEach(sources.presets) { preset in
                     folderRow(preset,
                               checked: selectedPresets.contains(preset.source),
                               toggle: { togglePreset(preset) },
-                              removable: false)
+                              removable: false,
+                              enabled: sources.ingestReady)
                 }
                 ForEach(sources.customFolders) { folder in
                     folderRow(folder,
                               checked: selectedCustom.contains(folder.path),
                               toggle: { toggleCustom(folder) },
-                              removable: true)
+                              removable: true,
+                              enabled: sources.ingestReady)
                 }
                 Button {
                     addFolder()
                 } label: {
                     Label("Add Folder…", systemImage: "plus")
                 }
-                .disabled(busy)
+                .disabled(busy || !sources.ingestReady)
                 if let pending = model.pendingIngestBatch {
                     pendingBatchCard(pending)
                 }
@@ -173,7 +180,8 @@ struct IngestView: View {
         _ folder: IngestFolderSummary,
         checked: Bool,
         toggle: @escaping () -> Void,
-        removable: Bool
+        removable: Bool,
+        enabled: Bool = true
     ) -> some View {
         HStack(spacing: 10) {
             Toggle(isOn: Binding(get: { checked }, set: { _ in toggle() })) {
@@ -184,7 +192,7 @@ struct IngestView: View {
                 }
             }
             .toggleStyle(.checkbox)
-            .disabled(!folder.exists)
+            .disabled(!folder.exists || !enabled)
             Spacer()
             Text(folder.exists ? "\(folder.sessionCount) sessions" : "not found")
                 .font(.caption)
@@ -197,6 +205,7 @@ struct IngestView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
+                .disabled(!enabled || busy)
                 .accessibilityLabel("Remove folder")
             }
         }
@@ -221,13 +230,14 @@ struct IngestView: View {
                 Text("Scan results").font(.headline)
                 Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
                     GridRow {
-                        Text("New sessions"); Text("\(scan.buckets.newFiles.count)").bold()
+                        Text("New sessions ready to ingest"); Text("\(scan.pendingCount)").bold()
                     }
                     GridRow {
-                        Text("Changed since last ingest"); Text("\(scan.buckets.changedFiles.count)").bold()
+                        Text("Previously ingested, later changed");
+                        Text("\(scan.buckets.changedFiles.count) skipped").foregroundStyle(.secondary)
                     }
                     GridRow {
-                        Text("Already up to date"); Text("\(scan.buckets.upToDate.count)").foregroundStyle(.secondary)
+                        Text("Previously ingested, unchanged"); Text("\(scan.buckets.upToDate.count)").foregroundStyle(.secondary)
                     }
                     GridRow {
                         Text("Skipped (active in last 10 min)"); Text("\(scan.buckets.skippedActive.count)").foregroundStyle(.secondary)
@@ -235,34 +245,30 @@ struct IngestView: View {
                 }
                 .font(.callout)
 
-                if scan.pendingCount > 0 && !scan.buckets.changedFiles.isEmpty {
-                    Toggle(isOn: $newOnly) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Only ingest new sessions")
-                            Text("Skip the \(scan.buckets.changedFiles.count) previously ingested sessions flagged as changed.")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
+                if !scan.buckets.changedFiles.isEmpty {
+                    Label("Gemdex never reprocesses a session after its first successful ingest. Changed transcripts stay linked through the original memory's provenance path.",
+                          systemImage: "lock.shield.fill")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .padding(10)
+                        .glassSurface(cornerRadius: Metric.radiusCard, tint: Brand.sage)
                 }
 
-                if effectivePendingCount == 0 {
-                    Label(scan.pendingCount == 0
-                            ? "Everything is already ingested — nothing to do."
-                            : "No new sessions — turn off “Only ingest new sessions” to re-ingest changed ones.",
+                if scan.pendingCount == 0 {
+                    Label("No new sessions to ingest. Previously ingested sessions are left untouched.",
                           systemImage: "checkmark.circle")
                         .foregroundStyle(Brand.sage)
                 } else {
-                    let totals = effectiveTotals(scan)
                     Divider()
                     Text("Model & cost").font(.headline)
-                    Text("≈ \(formatTokens(totals.estimatedInputTokens)) input tokens across \(totals.pendingCount) sessions. Pricing as of \(sources?.pricingAsOf ?? "—").")
+                    Text("≈ \(formatTokens(scan.estimatedInputTokens)) input tokens across \(scan.pendingCount) new sessions. Pricing as of \(sources?.pricingAsOf ?? "—").")
                         .font(.caption).foregroundStyle(.secondary)
                     Picker("Model", selection: $selectedModel) {
                         ForEach(sources?.models ?? []) { info in
                             Text("\(info.model) — \(info.description)").tag(info.model)
                         }
                     }
-                    costTable(totals.estimates)
+                    costTable(scan.estimates)
                     Toggle(isOn: $useBatch) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Use Batch API (half price)")
@@ -388,21 +394,6 @@ struct IngestView: View {
         }
     }
 
-    /// Totals for the selected scope: full pending set, or new sessions only.
-    private func effectiveTotals(_ scan: IngestScanSummary) -> IngestScanTotals {
-        newOnly
-            ? scan.newOnly
-            : IngestScanTotals(pendingCount: scan.pendingCount,
-                               estimatedInputTokens: scan.estimatedInputTokens,
-                               estimatedOutputTokens: scan.estimatedOutputTokens,
-                               estimates: scan.estimates)
-    }
-
-    private var effectivePendingCount: Int {
-        guard let scan else { return 0 }
-        return effectiveTotals(scan).pendingCount
-    }
-
     // MARK: - Actions
 
     private func close() {
@@ -425,7 +416,7 @@ struct IngestView: View {
             await model.refreshPendingIngestBatch()
         } catch {
             let message = (error as? APIError)?.message ?? error.localizedDescription
-            if model.handlePossibleInvalidKey(message) { return }
+            if model.handlePossibleInvalidIngestionKey(message) { return }
             self.error = message
         }
     }
@@ -481,8 +472,7 @@ struct IngestView: View {
             try await api.ingestStart(
                 sources: selectedSourcePayload,
                 model: selectedModel,
-                mode: useBatch ? "batch" : "standard",
-                newOnly: newOnly
+                mode: useBatch ? "batch" : "standard"
             )
             status = nil
             step = .running
@@ -550,7 +540,7 @@ struct IngestView: View {
             try await work()
         } catch {
             let message = (error as? APIError)?.message ?? error.localizedDescription
-            if model.handlePossibleInvalidKey(message) { return }
+            if model.handlePossibleInvalidIngestionKey(message) { return }
             self.error = message
         }
     }

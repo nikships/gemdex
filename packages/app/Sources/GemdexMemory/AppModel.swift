@@ -128,24 +128,72 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Reconcile UI with the sidecar's config: load memories when a key is set,
-    /// otherwise reveal the setup screen.
+    /// Reconcile UI with the sidecar's config. Local mode is a hard gate: the
+    /// manager UI is never mounted until a real Gemini embedding request proves
+    /// that the configured key works during this sidecar launch.
     @discardableResult
     func syncConfigGate() async -> Bool {
         guard let api else { return false }
         do {
-            let cfg = try await api.config()
+            var cfg = try await api.config()
             self.config = cfg
+
+            if cfg.mode == "local" && cfg.gemini.status == "checking" {
+                screen = .launching
+                statusText = "Validating Gemini API key…"
+                statusIsError = false
+                cfg = await pollGeminiReadiness(from: cfg, api: api)
+            }
+
+            if cfg.mode == "local" && !cfg.gemini.isReady {
+                setupNotice = cfg.gemini.message
+                screen = .setup
+                statusText = readinessTitle(cfg.gemini)
+                statusIsError = true
+                return false
+            }
+
             if cfg.configured {
                 await loadMemories()
+                if cfg.mode == "remote" && cfg.gemini.status == "checking" {
+                    Task { await refreshGeminiReadinessUntilSettled() }
+                }
                 return true
             }
             screen = .setup
-            statusText = "API key required"
+            statusText = readinessTitle(cfg.gemini)
+            statusIsError = true
             return false
         } catch {
             setStatus("Error: \(error.localizedDescription)", isError: true)
             return false
+        }
+    }
+
+    /// Poll GET /config while readiness is `checking` (≈15s max at 250ms).
+    private func pollGeminiReadiness(from initial: ConfigSummary, api: APIClient) async -> ConfigSummary {
+        var cfg = initial
+        for _ in 0..<60 {
+            guard cfg.gemini.status == "checking" else { break }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard let latest = try? await api.config() else { continue }
+            cfg = latest
+            self.config = latest
+        }
+        return cfg
+    }
+
+    private func refreshGeminiReadinessUntilSettled() async {
+        guard let api, let cfg = config else { return }
+        _ = await pollGeminiReadiness(from: cfg, api: api)
+    }
+
+    private func readinessTitle(_ readiness: GeminiReadiness) -> String {
+        switch readiness.status {
+        case "invalid": return "Gemini API key rejected"
+        case "unavailable": return "Gemini validation unavailable"
+        case "checking": return "Validating Gemini API key…"
+        default: return "Gemini API key required"
         }
     }
 
@@ -317,10 +365,43 @@ final class AppModel: ObservableObject {
 
     func submitApiKey(_ key: String) async throws {
         guard let api else { throw APIError(status: -1, message: "Sidecar not ready", needsKey: false) }
-        let configured = try await api.setApiKey(key)
-        guard configured else { throw APIError(status: -1, message: "Key was not accepted.", needsKey: false) }
+        statusText = "Validating Gemini API key…"
+        statusIsError = false
+        let cfg = try await api.setApiKey(key)
+        guard cfg.gemini.isReady else {
+            throw APIError(status: -1, message: cfg.gemini.message ?? "Key was not validated.", needsKey: true)
+        }
+        config = cfg
         setupNotice = nil
         await syncConfigGate()
+        await refreshSettings()
+    }
+
+    func retryApiKeyValidation() async throws {
+        guard let api else { throw APIError(status: -1, message: "Sidecar not ready", needsKey: false) }
+        statusText = "Validating Gemini API key…"
+        statusIsError = false
+        let cfg: ConfigSummary
+        do {
+            cfg = try await api.validateConfiguredApiKey()
+        } catch {
+            await refreshConfig()
+            setupNotice = config?.gemini.message ?? error.localizedDescription
+            throw error
+        }
+        config = cfg
+        setupNotice = cfg.gemini.message
+        guard cfg.gemini.isReady else {
+            statusText = readinessTitle(cfg.gemini)
+            statusIsError = true
+            throw APIError(
+                status: -1,
+                message: cfg.gemini.message ?? "Gemini API key validation failed.",
+                needsKey: true
+            )
+        }
+        await syncConfigGate()
+        await refreshSettings()
     }
 
     /// Detect Gemini's "API key not valid" failure (the key is configured but
@@ -339,7 +420,7 @@ final class AppModel: ObservableObject {
     @discardableResult
     func handlePossibleInvalidKey(_ message: String) -> Bool {
         guard config?.mode != "remote", Self.isInvalidKeyError(message) else { return false }
-        setupNotice = "Your Gemini API key was rejected. Please enter a valid key."
+        markGeminiKeyInvalid()
         showSettings = false
         showIngest = false
         isEditorOpen = false
@@ -347,6 +428,40 @@ final class AppModel: ObservableObject {
         statusText = "API key required"
         statusIsError = true
         return true
+    }
+
+    /// Ingestion always uses the local Gemini key, even with remote storage.
+    /// If that key is revoked after startup, close the ingestion flow and route
+    /// remote users directly to the repair controls without disabling storage.
+    @discardableResult
+    func handlePossibleInvalidIngestionKey(_ message: String) -> Bool {
+        guard Self.isInvalidKeyError(message) else { return false }
+        markGeminiKeyInvalid()
+        showIngest = false
+        if backendIsRemote {
+            showSettings = true
+            setStatus("Gemini key rejected; ingestion is blocked.", isError: true)
+        } else {
+            isEditorOpen = false
+            screen = .setup
+            statusText = "Gemini API key required"
+            statusIsError = true
+        }
+        return true
+    }
+
+    private func markGeminiKeyInvalid() {
+        let notice = "Your Gemini API key was rejected. Please enter a valid key."
+        setupNotice = notice
+        if let config {
+            self.config = ConfigSummary(
+                configured: config.mode == "remote" ? config.configured : false,
+                mode: config.mode,
+                needsKey: config.mode == "local",
+                gemini: GeminiReadiness(status: "invalid", message: notice, validatedAt: nil),
+                activeRemote: config.activeRemote
+            )
+        }
     }
 
     // MARK: - Config / settings helpers
@@ -366,11 +481,25 @@ final class AppModel: ObservableObject {
         if config.mode == "remote" {
             return "Remote: \(config.activeRemote?.name ?? "remote")"
         }
-        return config.needsKey ? "Local: needs API key" : "Local"
+        switch config.gemini.status {
+        case "valid": return "Local: Gemini verified"
+        case "checking": return "Local: validating Gemini"
+        case "invalid": return "Local: key rejected"
+        case "unavailable": return "Local: validation unavailable"
+        default: return "Local: API key required"
+        }
     }
 
     var backendIsRemote: Bool { config?.mode == "remote" }
-    var backendNeedsAttention: Bool { !(config?.configured ?? false) }
+    var backendNeedsAttention: Bool {
+        guard let config else { return true }
+        return config.mode == "local" && !config.gemini.isReady
+    }
+    var geminiReadiness: GeminiReadiness? { config?.gemini }
+    var ingestionIsReady: Bool { config?.gemini.isReady ?? false }
+    /// True when ingestion is blocked for a user-actionable reason (not mid-check).
+    var ingestionNeedsAttention: Bool { config?.gemini.needsAttention ?? true }
+    var ingestionIsChecking: Bool { config?.gemini.status == "checking" }
 
     // MARK: - Settings actions
 
