@@ -208,9 +208,9 @@ export class IngestManager {
         try {
             const files = discoverSessionFiles(options.folders);
             const buckets = bucketSessionFiles(files, this.ledger);
+            // Permanently new-sessions-only: only ledger-absent files are eligible.
+            // Prompt-hash reconciliation for mtime churn lives in scan(), not here.
             const pendingFiles = [...buckets.newFiles];
-            const ledgerEntries = this.ledger.load().files;
-            const refreshedEntries: Record<string, IngestLedgerEntry> = {};
 
             const sessions: PendingSession[] = [];
             let skipped = 0;
@@ -221,17 +221,8 @@ export class IngestManager {
                     continue;
                 }
                 const promptHash = hashDigestPrompt(buildDigestPrompt(session));
-                const entry = ledgerEntries[file.filePath];
-                if (entry?.promptHash !== undefined && entry.promptHash === promptHash) {
-                    // mtime/size churn without content changes — refresh the
-                    // ledger instead of paying for an identical digest.
-                    refreshedEntries[file.filePath] = { ...entry, mtimeMs: file.mtimeMs, size: file.size };
-                    skipped += 1;
-                    continue;
-                }
                 sessions.push({ file, session, promptHash });
             }
-            this.ledger.updateEntries(refreshedEntries);
 
             this.progress = {
                 state: 'running',

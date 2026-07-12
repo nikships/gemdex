@@ -142,11 +142,7 @@ final class AppModel: ObservableObject {
                 screen = .launching
                 statusText = "Validating Gemini API key…"
                 statusIsError = false
-                for _ in 0..<60 where cfg.gemini.status == "checking" {
-                    try await Task.sleep(nanoseconds: 250_000_000)
-                    cfg = try await api.config()
-                    self.config = cfg
-                }
+                cfg = await pollGeminiReadiness(from: cfg, api: api)
             }
 
             if cfg.mode == "local" && !cfg.gemini.isReady {
@@ -165,7 +161,7 @@ final class AppModel: ObservableObject {
                 return true
             }
             screen = .setup
-            statusText = "Storage setup required"
+            statusText = readinessTitle(cfg.gemini)
             statusIsError = true
             return false
         } catch {
@@ -174,14 +170,22 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func refreshGeminiReadinessUntilSettled() async {
-        guard let api else { return }
+    /// Poll GET /config while readiness is `checking` (≈15s max at 250ms).
+    private func pollGeminiReadiness(from initial: ConfigSummary, api: APIClient) async -> ConfigSummary {
+        var cfg = initial
         for _ in 0..<60 {
-            guard config?.gemini.status == "checking" else { return }
+            guard cfg.gemini.status == "checking" else { break }
             try? await Task.sleep(nanoseconds: 250_000_000)
             guard let latest = try? await api.config() else { continue }
-            config = latest
+            cfg = latest
+            self.config = latest
         }
+        return cfg
+    }
+
+    private func refreshGeminiReadinessUntilSettled() async {
+        guard let api, let cfg = config else { return }
+        _ = await pollGeminiReadiness(from: cfg, api: api)
     }
 
     private func readinessTitle(_ readiness: GeminiReadiness) -> String {
@@ -377,14 +381,24 @@ final class AppModel: ObservableObject {
         guard let api else { throw APIError(status: -1, message: "Sidecar not ready", needsKey: false) }
         statusText = "Validating Gemini API key…"
         statusIsError = false
+        let cfg: ConfigSummary
         do {
-            let cfg = try await api.validateConfiguredApiKey()
-            config = cfg
-            setupNotice = cfg.gemini.message
+            cfg = try await api.validateConfiguredApiKey()
         } catch {
             await refreshConfig()
             setupNotice = config?.gemini.message ?? error.localizedDescription
             throw error
+        }
+        config = cfg
+        setupNotice = cfg.gemini.message
+        guard cfg.gemini.isReady else {
+            statusText = readinessTitle(cfg.gemini)
+            statusIsError = true
+            throw APIError(
+                status: -1,
+                message: cfg.gemini.message ?? "Gemini API key validation failed.",
+                needsKey: true
+            )
         }
         await syncConfigGate()
         await refreshSettings()
@@ -430,7 +444,7 @@ final class AppModel: ObservableObject {
         } else {
             isEditorOpen = false
             screen = .setup
-            statusText = "API key required"
+            statusText = "Gemini API key required"
             statusIsError = true
         }
         return true
@@ -483,7 +497,9 @@ final class AppModel: ObservableObject {
     }
     var geminiReadiness: GeminiReadiness? { config?.gemini }
     var ingestionIsReady: Bool { config?.gemini.isReady ?? false }
-    var ingestionNeedsAttention: Bool { !(config?.gemini.isReady ?? false) }
+    /// True when ingestion is blocked for a user-actionable reason (not mid-check).
+    var ingestionNeedsAttention: Bool { config?.gemini.needsAttention ?? true }
+    var ingestionIsChecking: Bool { config?.gemini.status == "checking" }
 
     // MARK: - Settings actions
 

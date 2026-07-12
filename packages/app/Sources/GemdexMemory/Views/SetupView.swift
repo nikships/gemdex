@@ -36,7 +36,7 @@ struct SetupView: View {
             } else {
                 Text("Gemdex Memory").font(.largeTitle.bold())
             }
-            Text("Gemdex is paused until its embedding connection is verified. This prevents saves, searches, imports, and session ingestions from failing later without a clear explanation.")
+            Text("Gemdex stays locked until Gemini accepts a small embedding request. That keeps saves, search, import, and session ingestion from failing later without a clear reason.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -106,8 +106,22 @@ struct GeminiReadinessAlert: View {
     }
 
     private var status: String { readiness?.status ?? "missing" }
-    private var alertColor: Color { .red }
-    private var icon: String { status == "checking" ? "hourglass.circle.fill" : "exclamationmark.octagon.fill" }
+
+    private var alertColor: Color {
+        switch status {
+        case "checking": return Brand.gold
+        case "unavailable": return Brand.terracotta
+        default: return .red
+        }
+    }
+
+    private var icon: String {
+        switch status {
+        case "checking": return "hourglass.circle.fill"
+        case "unavailable": return "wifi.exclamationmark"
+        default: return "exclamationmark.octagon.fill"
+        }
+    }
 
     private var title: String {
         switch status {
@@ -120,15 +134,16 @@ struct GeminiReadinessAlert: View {
 
     private var fallbackDetail: String {
         switch status {
-        case "checking": return "Gemdex will unlock automatically after the validation request succeeds."
-        case "invalid": return "Enter a working key below. Nothing will be persisted until Gemini accepts it."
-        case "unavailable": return "Check your connection and retry, or enter a different key. Gemdex stays locked until validation succeeds."
-        default: return "Add a key below. Gemdex will test it before enabling any embedding or ingestion work."
+        case "checking": return "This usually takes a few seconds. Gemdex unlocks automatically when the embedding request succeeds."
+        case "invalid": return "Enter a working key below. Nothing is written to ~/.gemdex/.env until Gemini accepts it."
+        case "unavailable": return "Check your network and retry, or enter a different key. Local work stays locked until validation succeeds."
+        default: return "Add a Gemini API key below. Gemdex tests it with a real embedding request before enabling local work."
         }
     }
 }
 
 /// Key entry and validation controls used by onboarding and Storage settings.
+@MainActor
 struct GeminiKeySetupPanel: View {
     @EnvironmentObject var model: AppModel
     let primaryButtonTitle: String
@@ -154,18 +169,18 @@ struct GeminiKeySetupPanel: View {
                 .frame(maxWidth: .infinity)
             }
             .brandPrimary()
-            .disabled(submitting || retrying || apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .disabled(submitting || retrying || isBusyChecking || apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
             if canRetrySavedKey {
                 Button {
                     Task { await retrySavedKey() }
                 } label: {
                     HStack {
-                        if retrying { ProgressView().controlSize(.small) }
-                        Text(retrying ? "Retrying validation…" : "Retry saved key")
+                        if retrying || isBusyChecking { ProgressView().controlSize(.small) }
+                        Text((retrying || isBusyChecking) ? "Retrying validation…" : "Retry saved key")
                     }
                 }
-                .disabled(submitting || retrying)
+                .disabled(submitting || retrying || isBusyChecking)
             }
 
             if let error {
@@ -184,7 +199,11 @@ struct GeminiKeySetupPanel: View {
 
     private var canRetrySavedKey: Bool {
         guard let status = model.geminiReadiness?.status else { return false }
-        return status == "invalid" || status == "unavailable"
+        return status == "invalid" || status == "unavailable" || status == "checking"
+    }
+
+    private var isBusyChecking: Bool {
+        model.geminiReadiness?.status == "checking" && !submitting && !retrying
     }
 
     private func submit() {

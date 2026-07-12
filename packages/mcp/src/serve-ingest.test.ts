@@ -1,5 +1,6 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -10,6 +11,15 @@ import { ClientConfigStore } from "./cli-config.js";
 import { createServer, ServeContext } from "./serve.js";
 
 const TOKEN = "ingest-test-token";
+
+function validGeminiReadiness(apiKey: string) {
+    return {
+        status: "valid" as const,
+        validatedAt: Date.now(),
+        keyFingerprint: crypto.createHash("sha256").update(apiKey).digest("hex"),
+    };
+}
+
 
 let tmpDir: string;
 let server: Server;
@@ -89,6 +99,7 @@ before(async () => {
         ingestManager: fakeManager,
         // Matches config.geminiApiKey so the key-staleness check keeps the fake.
         ingestManagerKey: "local-key",
+        geminiReadiness: validGeminiReadiness("local-key"),
     };
     server = createServer(ctx);
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));

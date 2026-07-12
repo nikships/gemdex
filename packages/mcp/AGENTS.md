@@ -78,7 +78,7 @@ things on top:
 | Method | Path | Token? | Source | Notes |
 |--------|------|--------|--------|-------|
 | `GET` | `/health` | no | sidecar | `{ ok: true }`; polled before a token exists |
-| `GET` | `/config` | no | sidecar | Backend summary plus Gemini readiness (`missing|checking|valid|invalid|unavailable`) |
+| `GET` | `/config` | no | sidecar | Backend summary plus Gemini readiness (`missing`, `checking`, `valid`, `invalid`, `unavailable`) |
 | `POST` | `/config` | no | sidecar | Validate candidate `GEMINI_API_KEY` with a real embedding call; persist and rebuild only on success |
 | `POST` | `/config/validate` | no | sidecar | Retry validation of the saved key |
 | `GET` | `/settings` | yes | sidecar | Mode + configured remotes |

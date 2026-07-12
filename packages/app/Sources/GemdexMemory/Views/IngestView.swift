@@ -149,20 +149,22 @@ struct IngestView: View {
                     folderRow(preset,
                               checked: selectedPresets.contains(preset.source),
                               toggle: { togglePreset(preset) },
-                              removable: false)
+                              removable: false,
+                              enabled: sources.ingestReady)
                 }
                 ForEach(sources.customFolders) { folder in
                     folderRow(folder,
                               checked: selectedCustom.contains(folder.path),
                               toggle: { toggleCustom(folder) },
-                              removable: true)
+                              removable: true,
+                              enabled: sources.ingestReady)
                 }
                 Button {
                     addFolder()
                 } label: {
                     Label("Add Folder…", systemImage: "plus")
                 }
-                .disabled(busy)
+                .disabled(busy || !sources.ingestReady)
                 if let pending = model.pendingIngestBatch {
                     pendingBatchCard(pending)
                 }
@@ -178,7 +180,8 @@ struct IngestView: View {
         _ folder: IngestFolderSummary,
         checked: Bool,
         toggle: @escaping () -> Void,
-        removable: Bool
+        removable: Bool,
+        enabled: Bool = true
     ) -> some View {
         HStack(spacing: 10) {
             Toggle(isOn: Binding(get: { checked }, set: { _ in toggle() })) {
@@ -189,7 +192,7 @@ struct IngestView: View {
                 }
             }
             .toggleStyle(.checkbox)
-            .disabled(!folder.exists)
+            .disabled(!folder.exists || !enabled)
             Spacer()
             Text(folder.exists ? "\(folder.sessionCount) sessions" : "not found")
                 .font(.caption)
@@ -202,6 +205,7 @@ struct IngestView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
+                .disabled(!enabled || busy)
                 .accessibilityLabel("Remove folder")
             }
         }

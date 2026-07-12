@@ -44,7 +44,7 @@ export interface ServeContext {
      * When set, the server enforces two security controls:
      *  1. `Origin` header on every non-OPTIONS request must match this value
      *     (or be absent — a same-origin WebView request has no Origin header).
-     *  2. Every data route (all routes except /health, /config GET/POST, and
+     *  2. Every data route (all routes except /health, /config*, and
      *     OPTIONS pre-flight) must carry `X-Gemdex-Token: <token>`.
      *
      * Both values are minted per-launch by `runServe` and handed to the
@@ -173,17 +173,31 @@ function startConfiguredKeyValidation(ctx: ServeContext): void {
         return;
     }
     const fingerprint = keyFingerprint(apiKey);
+    // Reuse an in-flight validation for the same key so concurrent retries
+    // cannot resolve out of order and clobber a newer result.
+    if (ctx.geminiValidation && ctx.geminiReadiness?.keyFingerprint === fingerprint) {
+        return;
+    }
     ctx.geminiReadiness = {
         status: 'checking',
         message: 'Validating the saved Gemini API key…',
         keyFingerprint: fingerprint,
     };
-    const validation = validateGeminiKey(ctx, apiKey).then((readiness) => {
-        if (configuredGeminiKey(ctx) === apiKey) ctx.geminiReadiness = readiness;
-    }).finally(() => {
-        if (ctx.geminiValidation === validation) ctx.geminiValidation = undefined;
-    });
+    // Reserve the slot synchronously before any async work so two concurrent
+    // first-starts cannot both pass the in-flight check above.
+    let settle!: () => void;
+    const validation = new Promise<void>((resolve) => { settle = resolve; });
     ctx.geminiValidation = validation;
+    void validateGeminiKey(ctx, apiKey)
+        .then((readiness) => {
+            if (configuredGeminiKey(ctx) === apiKey && ctx.geminiValidation === validation) {
+                ctx.geminiReadiness = readiness;
+            }
+        })
+        .finally(() => {
+            if (ctx.geminiValidation === validation) ctx.geminiValidation = undefined;
+            settle();
+        });
 }
 
 async function waitForConfiguredKeyValidation(ctx: ServeContext): Promise<void> {
@@ -203,6 +217,8 @@ function configureApiKey(ctx: ServeContext, apiKey: string, readiness: GeminiRea
         ...ctx.config,
         geminiApiKey: apiKey,
     };
+    // Drop any in-flight validation so a stale resolve cannot overwrite this result.
+    ctx.geminiValidation = undefined;
     ctx.geminiReadiness = readiness;
     // The ingest manager is rebuilt lazily when its recorded key goes stale
     // (see ingestManager()), so an in-flight run keeps its manager while any
@@ -568,11 +584,14 @@ function isTokenValid(req: http.IncomingMessage, token: string | undefined): boo
 }
 
 export function createServer(ctx: ServeContext): http.Server {
+    // Never mark a configured key valid without a real embedding proof. Tests that
+    // need an unlocked local backend must pass an explicit validated readiness.
     if (!ctx.geminiReadiness) {
-        const key = configuredGeminiKey(ctx);
-        ctx.geminiReadiness = key && ctx.store !== null
-            ? { status: 'valid', validatedAt: Date.now(), keyFingerprint: keyFingerprint(key) }
-            : { status: 'missing' };
+        if (configuredGeminiKey(ctx)) {
+            startConfiguredKeyValidation(ctx);
+        } else {
+            ctx.geminiReadiness = { status: 'missing' };
+        }
     }
     return http.createServer(async (req, res) => {
         const method = req.method ?? 'GET';
@@ -623,6 +642,7 @@ export function createServer(ctx: ServeContext): http.Server {
                     sendJson(res, status, {
                         error: readiness.message ?? 'Gemini API key validation failed.',
                         configured: false,
+                        needsKey: true,
                         gemini: {
                             status: readiness.status,
                             ...(readiness.message && { message: readiness.message }),
@@ -641,13 +661,25 @@ export function createServer(ctx: ServeContext): http.Server {
 
             if (method === 'POST' && pathname === '/config/validate') {
                 if (!configuredGeminiKey(ctx)) {
-                    sendJson(res, 400, { error: 'No Gemini API key is configured.', needsKey: true }, corsHeaders);
+                    sendJson(res, 400, {
+                        error: 'No Gemini API key is configured.',
+                        needsKey: true,
+                        gemini: { status: 'missing', message: 'Add a Gemini API key to continue.' },
+                    }, corsHeaders);
                     return;
                 }
                 startConfiguredKeyValidation(ctx);
                 await waitForConfiguredKeyValidation(ctx);
                 const summary = configSummary(ctx);
-                sendJson(res, summary.gemini.status === 'valid' ? 200 : 503, summary, corsHeaders);
+                if (summary.gemini.status === 'valid') {
+                    sendJson(res, 200, summary, corsHeaders);
+                } else {
+                    sendJson(res, 503, {
+                        ...summary,
+                        error: summary.gemini.message ?? 'Gemini API key validation failed.',
+                        needsKey: true,
+                    }, corsHeaders);
+                }
                 return;
             }
 

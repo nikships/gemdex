@@ -103,8 +103,23 @@ actor APIClient {
 
     @discardableResult
     func validateConfiguredApiKey() async throws -> ConfigSummary {
-        let (data, _) = try await send(makeRequest("POST", "/config/validate"))
-        return try decode(ConfigSummary.self, from: data)
+        // 200 = valid; 503 = still locked. Both include a ConfigSummary so the
+        // UI can refresh readiness without a follow-up GET /config.
+        let req = makeRequest("POST", "/config/validate")
+        let (data, response) = try await session.data(for: req)
+        guard let http = response as? HTTPURLResponse else {
+            throw APIError(status: -1, message: "No HTTP response", needsKey: false)
+        }
+        if http.statusCode == 200 || http.statusCode == 503 {
+            return try decode(ConfigSummary.self, from: data)
+        }
+        var message = "HTTP \(http.statusCode)"
+        var needsKey = false
+        if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let e = obj["error"] as? String { message = e }
+            if let nk = obj["needsKey"] as? Bool { needsKey = nk }
+        }
+        throw APIError(status: http.statusCode, message: message, needsKey: needsKey)
     }
 
     // MARK: - Memories

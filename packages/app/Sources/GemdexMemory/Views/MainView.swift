@@ -18,7 +18,7 @@ struct MainView: View {
         .navigationTitle("Gemdex Memory")
         .navigationSubtitle(model.statusText)
         .safeAreaInset(edge: .top, spacing: 0) {
-            if model.backendIsRemote && model.ingestionNeedsAttention {
+            if model.backendIsRemote && (model.ingestionNeedsAttention || model.ingestionIsChecking) {
                 ingestionReadinessBanner
             }
         }
@@ -26,18 +26,21 @@ struct MainView: View {
     }
 
     private var ingestionReadinessBanner: some View {
-        HStack(alignment: .center, spacing: 12) {
+        let checking = model.ingestionIsChecking
+        return HStack(alignment: .center, spacing: 12) {
             GeminiReadinessAlert(readiness: model.geminiReadiness, compact: true)
-            Button("Fix Gemini key") {
-                model.showSettings = true
-                model.showIngest = false
+            if !checking {
+                Button("Fix Gemini key") {
+                    model.showSettings = true
+                    model.showIngest = false
+                }
+                .brandPrimary()
+                .fixedSize()
             }
-            .brandPrimary()
-            .fixedSize()
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .background(Color.red.opacity(0.07))
+        .background((checking ? Brand.gold : Color.red).opacity(0.08))
         .overlay(alignment: .bottom) { Divider() }
     }
 
