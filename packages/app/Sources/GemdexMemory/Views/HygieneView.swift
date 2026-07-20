@@ -17,7 +17,12 @@ struct HygieneView: View {
         case scanned
         case running
         case review
+        case deleted
     }
+
+    /// Deletions are applied in small sequential batches so a big approval
+    /// (hundreds of ids) shows live progress instead of one long frozen POST.
+    private static let applyBatchSize = 10
 
     @State private var step: Step = .intro
     @State private var envelope: HygieneReportEnvelope?
@@ -27,6 +32,7 @@ struct HygieneView: View {
     @State private var status: HygieneStatus?
     @State private var selectedIds: Set<String> = []
     @State private var deletedCount: Int?
+    @State private var applyProgress: (done: Int, total: Int)?
     @State private var showDeleteConfirm = false
     @State private var busy = false
     @State private var error: String?
@@ -105,25 +111,42 @@ struct HygieneView: View {
                 Button("Cancel") { Task { await cancel() } }
                     .disabled(busy)
             case .review:
-                Text(selectedIds.isEmpty
-                     ? "No memories selected"
-                     : "\(selectedIds.count) selected")
-                    .font(.callout)
-                    .foregroundStyle(selectedIds.isEmpty ? Color.secondary : Brand.terracotta)
-                Spacer()
-                Button("Done") { close() }
-                Button("Delete Selected", role: .destructive) { showDeleteConfirm = true }
-                    .disabled(busy || selectedIds.isEmpty)
-                    .confirmationDialog(
-                        "Delete \(selectedIds.count) \(selectedIds.count == 1 ? "memory" : "memories")? This cannot be undone.",
-                        isPresented: $showDeleteConfirm,
-                        titleVisibility: .visible
-                    ) {
-                        Button("Delete \(selectedIds.count) \(selectedIds.count == 1 ? "Memory" : "Memories")", role: .destructive) {
-                            Task { await applyDeletion() }
-                        }
-                        Button("Cancel", role: .cancel) {}
+                if let progress = applyProgress {
+                    // Replace the footer controls with determinate progress
+                    // while the batched deletion runs.
+                    VStack(alignment: .leading, spacing: 6) {
+                        ProgressView(value: Double(progress.done), total: Double(max(progress.total, 1)))
+                        Text("Deleting \(progress.done) of \(progress.total)…")
+                            .font(.callout).foregroundStyle(.secondary)
                     }
+                } else {
+                    Text(selectedIds.isEmpty
+                         ? "No memories selected"
+                         : "\(selectedIds.count) selected")
+                        .font(.callout)
+                        .foregroundStyle(selectedIds.isEmpty ? Color.secondary : Brand.terracotta)
+                    Spacer()
+                    Button("Done") { close() }
+                    Button("Delete Selected", role: .destructive) { showDeleteConfirm = true }
+                        .disabled(busy || selectedIds.isEmpty)
+                        .confirmationDialog(
+                            "Delete \(selectedIds.count) \(selectedIds.count == 1 ? "memory" : "memories")? This cannot be undone.",
+                            isPresented: $showDeleteConfirm,
+                            titleVisibility: .visible
+                        ) {
+                            Button("Delete \(selectedIds.count) \(selectedIds.count == 1 ? "Memory" : "Memories")", role: .destructive) {
+                                Task { await applyDeletion() }
+                            }
+                            Button("Cancel", role: .cancel) {}
+                        }
+                }
+            case .deleted:
+                Spacer()
+                if !reviewClusters.isEmpty {
+                    Button("Back to Review") { step = .review }
+                }
+                Button("Close") { close() }
+                    .buttonStyle(BrandButtonStyle())
             }
         }
         .padding(16)
@@ -138,6 +161,7 @@ struct HygieneView: View {
         case .scanned: scannedStep
         case .running: runningStep
         case .review: reviewStep
+        case .deleted: deletedStep
         }
     }
 
@@ -294,12 +318,6 @@ struct HygieneView: View {
     @ViewBuilder
     private var reviewStep: some View {
         VStack(alignment: .leading, spacing: 14) {
-            if let deletedCount {
-                Label("Deleted \(deletedCount) \(deletedCount == 1 ? "memory" : "memories")",
-                      systemImage: "checkmark.circle")
-                    .font(.headline)
-                    .foregroundStyle(Brand.sage)
-            }
             if reviewClusters.isEmpty {
                 Label("Nothing left to review. Your memories look tidy.",
                       systemImage: "checkmark.circle")
@@ -315,6 +333,24 @@ struct HygieneView: View {
                 }
             }
         }
+    }
+
+    private var deletedStep: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 52))
+                .foregroundStyle(Brand.sage)
+            let count = deletedCount ?? 0
+            Text("Deleted \(count) \(count == 1 ? "memory" : "memories")")
+                .font(.title3.bold())
+            Text(reviewClusters.isEmpty
+                 ? "Nothing left to review. Your memories look tidy."
+                 : "Some clusters still have findings you can review.")
+                .font(.callout).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 40)
     }
 
     private func clusterCard(_ cluster: HygieneCluster) -> some View {
@@ -555,26 +591,58 @@ struct HygieneView: View {
         step = .review
     }
 
+    /// Delete the approved ids in small sequential batches so the UI shows
+    /// determinate progress and no single request can run long enough to hit
+    /// the URLSession timeout. A mid-run failure keeps the already-deleted
+    /// batches pruned from local state and leaves the rest selected.
     private func applyDeletion() async {
-        await withBusy {
-            guard let api = model.api else { return }
-            let ids = selectedIds.sorted()
-            let deleted = try await api.hygieneApply(ids: ids)
-            let removed = Set(ids)
-            reviewClusters = reviewClusters.compactMap { cluster -> HygieneCluster? in
-                let members = cluster.members.filter { !removed.contains($0.memoryId) }
-                guard members.count >= 2 else { return nil }
-                return HygieneCluster(
-                    clusterId: cluster.clusterId,
-                    similarity: cluster.similarity,
-                    members: members,
-                    findings: cluster.findings,
-                    error: cluster.error
-                )
+        guard let api = model.api else { return }
+        busy = true
+        error = nil
+        let ids = selectedIds.sorted()
+        applyProgress = (done: 0, total: ids.count)
+        var totalDeleted = 0
+        var failure: String?
+        for batchStart in stride(from: 0, to: ids.count, by: Self.applyBatchSize) {
+            let batch = Array(ids[batchStart..<min(batchStart + Self.applyBatchSize, ids.count)])
+            do {
+                totalDeleted += try await api.hygieneApply(ids: batch)
+            } catch {
+                let message = (error as? APIError)?.message ?? error.localizedDescription
+                failure = message
+                break
             }
-            selectedIds = []
-            deletedCount = deleted
+            removeFromReview(Set(batch))
+            applyProgress = (done: batchStart + batch.count, total: ids.count)
+        }
+        applyProgress = nil
+        busy = false
+        if totalDeleted > 0 {
             await model.refreshList()
+        }
+        if let failure {
+            if model.handlePossibleInvalidIngestionKey(failure) { return }
+            error = failure
+            return
+        }
+        deletedCount = totalDeleted
+        step = .deleted
+    }
+
+    /// Prune deleted members from local review state; unselect them and drop
+    /// clusters that no longer have at least two remaining members.
+    private func removeFromReview(_ removed: Set<String>) {
+        selectedIds.subtract(removed)
+        reviewClusters = reviewClusters.compactMap { cluster -> HygieneCluster? in
+            let members = cluster.members.filter { !removed.contains($0.memoryId) }
+            guard members.count >= 2 else { return nil }
+            return HygieneCluster(
+                clusterId: cluster.clusterId,
+                similarity: cluster.similarity,
+                members: members,
+                findings: cluster.findings,
+                error: cluster.error
+            )
         }
     }
 
