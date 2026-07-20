@@ -41,6 +41,11 @@ export class LocalMemoryBackend implements MemoryBackend {
         this.store = storeOrConfig instanceof MemoryStore ? storeOrConfig : new MemoryStore(storeOrConfig);
     }
 
+    /** Direct access to the underlying local store (e.g. for hygiene scans). */
+    getStore(): MemoryStore {
+        return this.store;
+    }
+
     save(input: SaveMemoryInput): Promise<Memory> {
         return this.store.save(input);
     }

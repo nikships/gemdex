@@ -305,6 +305,50 @@ actor APIClient {
         _ = try await send(makeRequest("POST", "/ingest/cancel"))
     }
 
+    // MARK: - Memory hygiene
+
+    func hygieneReport() async throws -> HygieneReportEnvelope {
+        let (data, _) = try await send(makeRequest("GET", "/hygiene/report"))
+        return try decode(HygieneReportEnvelope.self, from: data)
+    }
+
+    func hygieneScan(threshold: Double? = nil) async throws -> HygieneScanSummary {
+        var payload: [String: Any] = [:]
+        if let threshold { payload["threshold"] = threshold }
+        let body = try JSONSerialization.data(withJSONObject: payload)
+        let (data, _) = try await send(makeRequest("POST", "/hygiene/scan", body: body))
+        return try decode(HygieneScanSummary.self, from: data)
+    }
+
+    func hygieneStart(model: String, threshold: Double? = nil) async throws {
+        var payload: [String: Any] = ["model": model]
+        if let threshold { payload["threshold"] = threshold }
+        let body = try JSONSerialization.data(withJSONObject: payload)
+        _ = try await send(makeRequest("POST", "/hygiene/start", body: body))
+    }
+
+    func hygieneStatus() async throws -> HygieneStatus {
+        let (data, _) = try await send(makeRequest("GET", "/hygiene/status"))
+        return try decode(HygieneStatus.self, from: data)
+    }
+
+    func hygieneCancel() async throws {
+        _ = try await send(makeRequest("POST", "/hygiene/cancel"))
+    }
+
+    @discardableResult
+    func hygieneApply(ids: [String]) async throws -> Int {
+        let body = try JSONSerialization.data(withJSONObject: ["ids": ids])
+        let (data, _) = try await send(makeRequest("POST", "/hygiene/apply", body: body))
+        struct Wrapper: Decodable { let deleted: Int }
+        return try decode(Wrapper.self, from: data).deleted
+    }
+
+    func hygieneDismiss(clusterIds: [String]) async throws {
+        let body = try JSONSerialization.data(withJSONObject: ["clusterIds": clusterIds])
+        _ = try await send(makeRequest("POST", "/hygiene/dismiss", body: body))
+    }
+
     // MARK: - Helpers
 
     private func encodeAttachment(_ a: AttachmentInput) -> [String: Any] {

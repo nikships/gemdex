@@ -2,7 +2,18 @@ import * as http from "http";
 import * as crypto from "crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { IngestManager, IngestSourceFolder, MemoryBackend, RemoteMemoryBackend, envManager } from "gemdex-core";
+import {
+    HygieneManager,
+    HygieneReport,
+    HygieneReportStore,
+    IngestManager,
+    IngestSourceFolder,
+    LocalMemoryBackend,
+    MemoryBackend,
+    MemoryStore,
+    RemoteMemoryBackend,
+    envManager,
+} from "gemdex-core";
 import {
     DIGEST_MODELS,
     DEFAULT_DIGEST_MODEL,
@@ -60,6 +71,10 @@ export interface ServeContext {
     ingestManager?: IngestManager;
     /** The Gemini key the current ingest manager was built with. */
     ingestManagerKey?: string;
+    /** Lazily created memory-hygiene orchestrator. */
+    hygieneManager?: HygieneManager;
+    /** The Gemini key the current hygiene manager was built with. */
+    hygieneManagerKey?: string;
     /** Per-launch proof that the configured Gemini key can perform embedding work. */
     geminiReadiness?: GeminiReadiness;
     /** In-flight validation for the currently configured key. */
@@ -444,6 +459,84 @@ function ingestManager(ctx: ServeContext): IngestManager {
         ctx.ingestManagerKey = key;
     }
     return ctx.ingestManager;
+}
+
+/**
+ * The Gemini key used for hygiene cluster judging. Judging always runs
+ * client-side (the BYOI server only embeds), so hygiene needs a local key
+ * even when the memory backend is remote.
+ */
+function hygieneApiKey(ctx: ServeContext): string {
+    const key = configuredGeminiKey(ctx);
+    if (!key) {
+        throw new Error('Memory hygiene needs a local GEMINI_API_KEY (cluster judging runs client-side).');
+    }
+    if (!geminiIsReady(ctx)) {
+        throw new Error('Memory hygiene is blocked until the Gemini API key is validated.');
+    }
+    return key;
+}
+
+function hygieneManager(ctx: ServeContext): HygieneManager {
+    const key = hygieneApiKey(ctx);
+    // Rebuild on key change, but never yank the manager out from under a
+    // live run — that run already holds its judge.
+    if (ctx.hygieneManager && ctx.hygieneManagerKey !== key && !ctx.hygieneManager.isRunning()) {
+        ctx.hygieneManager = undefined;
+    }
+    if (!ctx.hygieneManager) {
+        ctx.hygieneManager = new HygieneManager({
+            apiKey: key,
+            geminiBaseUrl: ctx.config.geminiBaseUrl,
+        });
+        ctx.hygieneManagerKey = key;
+    }
+    return ctx.hygieneManager;
+}
+
+/** Hygiene is local-only in v1: clustering reads vectors straight out of LanceDB. */
+function localStore(ctx: ServeContext): MemoryStore {
+    if (!(ctx.store instanceof LocalMemoryBackend)) {
+        throw new Error('Memory hygiene requires local storage mode (remote hygiene is not supported yet).');
+    }
+    return ctx.store.getStore();
+}
+
+/**
+ * The persisted hygiene report, readable without a validated Gemini key —
+ * browsing past results is read-only. Falls back to reading the report file
+ * directly when the manager cannot be built (missing/unvalidated key).
+ */
+function hygieneReport(ctx: ServeContext): HygieneReport | null {
+    try {
+        return hygieneManager(ctx).getReport();
+    } catch {
+        return new HygieneReportStore().getReport() ?? null;
+    }
+}
+
+function hygieneReportSummary(ctx: ServeContext): unknown {
+    return {
+        report: hygieneReport(ctx),
+        models: Object.entries(DIGEST_MODELS).map(([model, info]) => ({
+            model,
+            description: info.description,
+            inputUsdPerMTok: info.inputUsdPerMTok,
+            outputUsdPerMTok: info.outputUsdPerMTok,
+            isDefault: model === DEFAULT_DIGEST_MODEL,
+        })),
+        pricingAsOf: DIGEST_PRICING_AS_OF,
+        hygieneReady: geminiIsReady(ctx),
+    };
+}
+
+/** Validate a JSON body field as a non-empty array of non-empty strings. */
+function stringArray(value: unknown, field: string): string[] {
+    if (!Array.isArray(value) || value.length === 0
+        || !value.every((entry) => typeof entry === 'string' && entry.length > 0)) {
+        throw new Error(`'${field}' must be a non-empty array of strings.`);
+    }
+    return value;
 }
 
 /**
@@ -919,6 +1012,91 @@ export function createServer(ctx: ServeContext): http.Server {
                     }
                     const cancelledBatch = await manager.cancelBatch();
                     sendJson(res, 200, { cancelled: cancelledBatch ? 'batch' : 'none' }, corsHeaders);
+                } catch (error) {
+                    sendJson(res, 400, { error: errorMessage(error) }, corsHeaders);
+                }
+                return;
+            }
+
+            if (method === 'GET' && pathname === '/hygiene/report') {
+                sendJson(res, 200, hygieneReportSummary(ctx), corsHeaders);
+                return;
+            }
+
+            if (method === 'POST' && pathname === '/hygiene/scan') {
+                const body = await readBody(req);
+                try {
+                    const threshold = typeof body?.threshold === 'number' ? body.threshold : undefined;
+                    sendJson(res, 200, await hygieneManager(ctx).scan(localStore(ctx), threshold), corsHeaders);
+                } catch (error) {
+                    sendJson(res, 400, { error: errorMessage(error) }, corsHeaders);
+                }
+                return;
+            }
+
+            if (method === 'POST' && pathname === '/hygiene/start') {
+                const body = await readBody(req);
+                try {
+                    const model = trimmedString(body?.model) || undefined;
+                    const threshold = typeof body?.threshold === 'number' ? body.threshold : undefined;
+                    const manager = hygieneManager(ctx);
+                    const store = localStore(ctx);
+                    if (manager.isRunning()) {
+                        sendJson(res, 409, { error: 'A hygiene run is already in progress.' }, corsHeaders);
+                        return;
+                    }
+                    // Fire and forget: the run is polled via GET /hygiene/status.
+                    // Errors are captured in the manager's progress state.
+                    void manager.run({ model, threshold }, store).catch(() => undefined);
+                    sendJson(res, 200, { started: true }, corsHeaders);
+                } catch (error) {
+                    sendJson(res, 400, { error: errorMessage(error) }, corsHeaders);
+                }
+                return;
+            }
+
+            if (method === 'GET' && pathname === '/hygiene/status') {
+                try {
+                    sendJson(res, 200, hygieneManager(ctx).getProgress(), corsHeaders);
+                } catch {
+                    // No local key (remote mode) — nothing can be running.
+                    sendJson(res, 200, { state: 'idle', judged: 0, failed: 0, total: 0 }, corsHeaders);
+                }
+                return;
+            }
+
+            if (method === 'POST' && pathname === '/hygiene/cancel') {
+                try {
+                    const manager = hygieneManager(ctx);
+                    if (manager.isRunning()) {
+                        manager.cancel();
+                        sendJson(res, 200, { cancelled: true }, corsHeaders);
+                    } else {
+                        sendJson(res, 200, { cancelled: false }, corsHeaders);
+                    }
+                } catch (error) {
+                    sendJson(res, 400, { error: errorMessage(error) }, corsHeaders);
+                }
+                return;
+            }
+
+            if (method === 'POST' && pathname === '/hygiene/apply') {
+                const body = await readBody(req);
+                try {
+                    const ids = stringArray(body?.ids, 'ids');
+                    sendJson(res, 200, await hygieneManager(ctx).apply(ids, ctx.store), corsHeaders);
+                } catch (error) {
+                    sendJson(res, 400, { error: errorMessage(error) }, corsHeaders);
+                }
+                return;
+            }
+
+            if (method === 'POST' && pathname === '/hygiene/dismiss') {
+                const body = await readBody(req);
+                try {
+                    const clusterIds = stringArray(body?.clusterIds, 'clusterIds');
+                    hygieneManager(ctx).dismiss(clusterIds);
+                    sendJson(res, 200, { dismissed: clusterIds.length }, corsHeaders);
                 } catch (error) {
                     sendJson(res, 400, { error: errorMessage(error) }, corsHeaders);
                 }

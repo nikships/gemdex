@@ -25,6 +25,10 @@ test, and style rules live in the root `AGENTS.md` — they are not repeated her
 | `embedding/base-embedding.ts` | `Embedding`, `EmbeddingContent`, `EmbeddingVector` | Abstract provider base; `embedContentBatch` is the text-or-inline-media entry point. |
 | `vectordb/lancedb-vectordb.ts` | `LanceDBVectorDatabase`, `DEFAULT_RRF_K=60` | Embedded LanceDB: dense kNN + BM25/FTS fused with RRF; SQL-filter translation. |
 | `vectordb/types.ts` | `VectorDatabase`, `VectorDocument`, `HybridSearchRequest/Result`, `HybridSubScores` | Generic vector-store contract used by the memory layer. |
+| `hygiene/candidate-finder.ts` | `findCandidateClusters`, `DEFAULT_HYGIENE_THRESHOLD=0.90`, `MAX_CLUSTER_MEMBERS=8`, `clusterIdFor` | Local vector clustering of similar memories (centroid cosine + size-capped greedy agglomeration). Zero API calls. |
+| `hygiene/judge.ts` | `ClusterJudge`, `buildJudgePrompt`, `parseJudgeResponse` | Gemini LLM judge: per-memory keep/duplicate/superseded/contradicted verdicts with evidence. |
+| `hygiene/hygiene-manager.ts` | `HygieneManager` | Orchestrates scan (clusters + cost estimate) → run (judge clusters) → apply (human-approved deletes) → dismiss. |
+| `hygiene/hygiene-report.ts` | `HygieneReportStore` | Persisted report + dismissals ledger at `~/.gemdex/hygiene.json`. |
 | `http/http-api.ts` | `handleMemoryApiRequest`, `createMemoryApiHandler` | The single shared memory HTTP API reused by *both* the mcp sidecar and the BYOI server. |
 | `config/remote-config.ts` | `resolveMode`, `loadRemoteConfig`, `resolveRemoteConnection` | Local-vs-remote mode + remote URL/token resolution from env. |
 | `config/version-compat.ts` | `checkServerCompatibility`, `CLIENT_VERSION`, `SUPPORTED_API_VERSION='v1'`, `SUPPORTED_PROTOCOL_VERSION=1` | Client↔server handshake gate (fails closed on bad/old versions). |
@@ -223,6 +227,27 @@ can explain what was found, but `pendingCount`, estimates, and
 `processableFiles` cover only never-before-ingested sessions. `run()` always
 selects only `buckets.newFiles`; there is no option that can re-enable changed
 sessions. Preserve this invariant across standard and Batch API paths.
+
+## 8. Memory hygiene
+
+`hygiene/HygieneManager` finds stale/duplicate/contradicted memories in two
+phases. **Phase 1 (`scan`) is free and local**: `MemoryStore.listParentsWithVectors()`
+reads every parent's row vectors straight out of LanceDB, each parent gets an
+L2-normalized centroid, and `findCandidateClusters` groups parents by centroid
+cosine similarity (default `DEFAULT_HYGIENE_THRESHOLD = 0.90`) using
+**size-capped greedy agglomeration**: above-threshold pairs are merged
+strongest-first, a merge is skipped if it would exceed `MAX_CLUSTER_MEMBERS = 8`,
+so overflow spills into sibling clusters instead of being dropped — lowering
+the threshold can only add candidates. **Phase 2 (`run`) is the LLM judge**:
+`ClusterJudge` (same Gemini models/pricing as ingest) reads each cluster
+oldest-first and returns a per-memory verdict (`keep` / `duplicate` /
+`superseded` / `contradicted`) with `supersededBy`, quoted `evidence`, and
+`confidence`; `parseJudgeResponse` guarantees a finding per member and forces
+at least one `keep` per cluster. Results persist in `~/.gemdex/hygiene.json`
+(`HygieneReportStore`), including a dismissals ledger keyed by stable
+`clusterId` (sha256 of sorted member ids) so "keep both" decisions are never
+re-flagged. `apply(ids, backend)` performs the deletes — **only ever invoked
+from an explicit human approval in the desktop app**, never by an agent tool.
 
 ## Gotchas / invariants
 

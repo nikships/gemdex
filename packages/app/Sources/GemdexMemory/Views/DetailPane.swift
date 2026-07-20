@@ -15,6 +15,9 @@ struct DetailPane: View {
             } else if model.showIngest {
                 IngestView(isEmbedded: true)
                     .transition(.opacity.combined(with: .move(edge: .trailing)))
+            } else if model.showHygiene {
+                HygieneView(isEmbedded: true)
+                    .transition(.opacity.combined(with: .move(edge: .trailing)))
             } else if model.isEditorOpen {
                 EditorView()
                     .transition(.opacity.combined(with: .move(edge: .trailing)))
@@ -24,7 +27,7 @@ struct DetailPane: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: model.showSettings || model.showIngest || model.isEditorOpen)
+        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: model.showSettings || model.showIngest || model.showHygiene || model.isEditorOpen)
     }
 
     private var placeholder: some View {

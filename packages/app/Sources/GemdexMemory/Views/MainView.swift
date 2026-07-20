@@ -33,6 +33,7 @@ struct MainView: View {
                 Button("Fix Gemini key") {
                     model.showSettings = true
                     model.showIngest = false
+                    model.showHygiene = false
                 }
                 .brandPrimary()
                 .fixedSize()
@@ -51,15 +52,21 @@ struct MainView: View {
             Spacer()
         }
         ToolbarItemGroup(placement: .primaryAction) {
-            Button { model.showSettings = true; model.showIngest = false } label: {
+            Button { model.showSettings = true; model.showIngest = false; model.showHygiene = false } label: {
                 Label("Storage", systemImage: "externaldrive")
             }
-            Button { model.showIngest = true; model.showSettings = false } label: {
+            Button { model.showIngest = true; model.showSettings = false; model.showHygiene = false } label: {
                 Label("Ingest Chat History", systemImage: model.ingestionIsReady ? "tray.and.arrow.down" : "exclamationmark.triangle.fill")
             }
             .help(model.ingestionIsReady
                   ? "Ingest new coding-agent sessions as memories"
                   : "Gemini key validation required before ingestion")
+            Button { model.showHygiene = true; model.showSettings = false; model.showIngest = false } label: {
+                Label("Memory Hygiene", systemImage: model.hygieneIsReady ? "sparkles" : "exclamationmark.triangle.fill")
+            }
+            .help(model.hygieneIsReady
+                  ? "Find stale, duplicate, or contradicted memories"
+                  : "Gemini key validation required before hygiene analysis")
             Button(action: exportMemories) {
                 Label("Export", systemImage: "square.and.arrow.up")
             }

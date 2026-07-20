@@ -47,6 +47,7 @@ final class AppModel: ObservableObject {
     @Published var isEditorOpen = false
     @Published var showSettings = false
     @Published var showIngest = false
+    @Published var showHygiene = false
     /// Set when a Gemini Batch ingestion job is awaiting collection, so the
     /// UI can re-surface a "Collect" affordance across launches.
     @Published var pendingIngestBatch: IngestStatus.PendingBatch?
@@ -232,6 +233,7 @@ final class AppModel: ObservableObject {
         editor.startNew()
         showSettings = false
         showIngest = false
+        showHygiene = false
         isEditorOpen = true
     }
 
@@ -243,6 +245,7 @@ final class AppModel: ObservableObject {
             editor.load(memory)
             showSettings = false
             showIngest = false
+            showHygiene = false
             isEditorOpen = true
         } catch {
             setStatus("Error: \(error.localizedDescription)", isError: true)
@@ -423,6 +426,7 @@ final class AppModel: ObservableObject {
         markGeminiKeyInvalid()
         showSettings = false
         showIngest = false
+        showHygiene = false
         isEditorOpen = false
         screen = .setup
         statusText = "API key required"
@@ -438,6 +442,7 @@ final class AppModel: ObservableObject {
         guard Self.isInvalidKeyError(message) else { return false }
         markGeminiKeyInvalid()
         showIngest = false
+        showHygiene = false
         if backendIsRemote {
             showSettings = true
             setStatus("Gemini key rejected; ingestion is blocked.", isError: true)
@@ -497,6 +502,8 @@ final class AppModel: ObservableObject {
     }
     var geminiReadiness: GeminiReadiness? { config?.gemini }
     var ingestionIsReady: Bool { config?.gemini.isReady ?? false }
+    /// Hygiene analysis judges with the local Gemini key — same gate as ingestion.
+    var hygieneIsReady: Bool { ingestionIsReady }
     /// True when ingestion is blocked for a user-actionable reason (not mid-check).
     var ingestionNeedsAttention: Bool { config?.gemini.needsAttention ?? true }
     var ingestionIsChecking: Bool { config?.gemini.status == "checking" }
