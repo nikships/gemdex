@@ -181,6 +181,24 @@ describe('MemoryStore', () => {
         expect(restored!.content).toBe('export A');
     });
 
+    it('lists parents with all their row vectors', async () => {
+        const short = await store.save({ content: 'short memory', title: 'Short' });
+        // Long enough to chunk into multiple rows (~1500 chars per chunk).
+        const long = await store.save({ content: 'long filler line\n'.repeat(200), title: 'Long' });
+
+        const parents = await store.listParentsWithVectors();
+        expect(parents).toHaveLength(2);
+        const shortParent = parents.find((p) => p.id === short.id)!;
+        expect(shortParent.title).toBe('Short');
+        expect(shortParent.fullContent).toBe('short memory');
+        expect(shortParent.vectors).toHaveLength(1);
+        expect(shortParent.vectors[0]).toHaveLength(DIM);
+        expect(shortParent.createdAt).toBe(short.createdAt);
+
+        const longParent = parents.find((p) => p.id === long.id)!;
+        expect(longParent.vectors.length).toBeGreaterThan(1);
+    });
+
     it('returns an empty attachments array for text-only memories', async () => {
         const mem = await store.save({ content: 'plain text memory' });
         expect(mem.attachments).toEqual([]);

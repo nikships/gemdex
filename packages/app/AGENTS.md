@@ -28,7 +28,9 @@ lint rules (`??` over `||`, no `eslint-disable`) do **not** apply.
   `#if SPARKLE_ENABLED`, otherwise a no-op that disables the menu item.
 - `Views/*` — per-screen SwiftUI: `RootView` (screen switch), `MainView`,
   `SidebarView`, `DetailPane`, `EditorView`, `AttachmentsSection`, `SetupView`,
-  `RecoveryView`, `LaunchOverlay`, `StorageSettingsView`, `Theme.swift` (brand).
+  `RecoveryView`, `LaunchOverlay`, `StorageSettingsView`, `HygieneView`
+  (memory-hygiene panel: scan → judge → review/delete/dismiss, local mode
+  only), `Theme.swift` (brand).
 - `macos/` — `build-app.sh` (assemble `.app`), `stage-sidecar.sh` (bundle
   Node+sidecar into Resources), `embed-sparkle.sh`, `sign-app.sh`,
   `package-dmg.sh`, `entitlements.plist`.
@@ -83,7 +85,10 @@ Routes used by `APIClient`: `GET /health`, `GET|POST /config`, `POST /config/val
 `GET /memories/:id/attachments/:attachmentId` (stream bytes),
 `POST /recall` (semantic free-text search), `GET /export`, `POST /import`,
 `GET /settings`, `POST /settings/mode`, `POST|DELETE /settings/remotes[/:name]`,
-`POST /settings/test`, `POST /settings/import-local`.
+`POST /settings/test`, `POST /settings/import-local`, and the memory-hygiene
+set: `GET /hygiene/report`, `POST /hygiene/scan`, `POST /hygiene/start`,
+`GET /hygiene/status`, `POST /hygiene/cancel`, `POST /hygiene/apply`,
+`POST /hygiene/dismiss`.
 
 ## Validated key gate (`SetupView`)
 

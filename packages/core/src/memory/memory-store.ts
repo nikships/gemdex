@@ -78,6 +78,21 @@ interface ParentMeta {
     attachments: StoredAttachment[];
 }
 
+/**
+ * One parent memory with every stored row vector it owns (text chunks +
+ * attachments). Used by the hygiene feature to cluster similar memories
+ * from the vectors already in LanceDB, without any embedding API calls.
+ */
+export interface ParentVectorData {
+    id: string;
+    title: string;
+    createdAt: number;
+    updatedAt: number;
+    fullContent: string;
+    /** All row vectors for this parent (chunks + attachments). */
+    vectors: number[][];
+}
+
 export interface MemoryStoreConfig {
     embedding: Embedding;
     vectorDatabase: VectorDatabase;
@@ -703,6 +718,47 @@ export class MemoryStore {
                 updatedAt: meta.updatedAt,
             }))
             .sort((a, b) => b.updatedAt - a.updatedAt);
+    }
+
+    /**
+     * List every parent memory together with ALL of its stored row vectors
+     * (chunks + attachments). Reads straight from LanceDB — no embedding
+     * calls — so hygiene clustering can reuse the vectors already paid for.
+     */
+    async listParentsWithVectors(): Promise<ParentVectorData[]> {
+        const exists = await this.db.hasCollection(this.collectionName);
+        if (!exists) return [];
+        const rows = await this.db.query(
+            this.collectionName,
+            '',
+            ['id', 'vector', 'relativePath', 'metadata'],
+            LIST_FETCH_LIMIT,
+        );
+
+        const byParent = new Map<string, ParentVectorData>();
+        for (const row of rows) {
+            const parentId = row.relativePath as string;
+            if (!parentId) continue;
+            // Vectors may round-trip as Arrow arrays — coerce like the caption path.
+            const vector = Array.isArray(row.vector)
+                ? (row.vector as number[])
+                : Array.from(row.vector as Iterable<number>);
+            const existing = byParent.get(parentId);
+            if (existing) {
+                existing.vectors.push(vector);
+                continue;
+            }
+            const meta = this.rowToParentMeta(this.parseMetadata(row.metadata));
+            byParent.set(parentId, {
+                id: parentId,
+                title: meta.title,
+                createdAt: meta.createdAt,
+                updatedAt: meta.updatedAt,
+                fullContent: meta.fullContent,
+                vectors: [vector],
+            });
+        }
+        return Array.from(byParent.values());
     }
 
     /** Delete a memory (all its chunk + attachment rows and its blobs). No-op if absent. */

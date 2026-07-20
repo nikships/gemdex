@@ -307,6 +307,95 @@ struct IngestCollectResult: Codable, Sendable {
     let error: String?
 }
 
+// MARK: - Memory hygiene (`/hygiene/*`)
+
+/// One memory inside a hygiene candidate cluster.
+struct HygieneClusterMember: Codable, Identifiable, Hashable, Sendable {
+    var id: String { memoryId }
+    let memoryId: String
+    let title: String
+    let createdAt: Double
+    let updatedAt: Double
+    let contentLength: Int
+
+    var displayTitle: String { title.isEmpty ? "Untitled memory" : title }
+}
+
+/// The LLM judge's per-memory verdict within a cluster.
+struct HygieneFinding: Codable, Hashable, Sendable {
+    let memoryId: String
+    let verdict: String
+    let supersededBy: String?
+    let evidence: String?
+    let confidence: String?
+
+    var isKeep: Bool { verdict == "keep" }
+    var isHighConfidence: Bool { confidence == "high" }
+    /// Only high-confidence duplicate/superseded memories are ever pre-checked
+    /// for deletion; contradicted and low/medium confidence stay unchecked.
+    var isSafePreselect: Bool { isHighConfidence && (verdict == "duplicate" || verdict == "superseded") }
+}
+
+/// A cluster of similar memories. `findings`/`error` appear only after an
+/// analysis run has judged the cluster.
+struct HygieneCluster: Codable, Identifiable, Hashable, Sendable {
+    var id: String { clusterId }
+    let clusterId: String
+    let similarity: Double
+    let members: [HygieneClusterMember]
+    let findings: [HygieneFinding]?
+    let error: String?
+
+    func finding(for memoryId: String) -> HygieneFinding? {
+        findings?.first { $0.memoryId == memoryId }
+    }
+
+    var newestMember: HygieneClusterMember? {
+        members.max { $0.updatedAt < $1.updatedAt }
+    }
+}
+
+/// `POST /hygiene/scan` response: candidate clusters + LLM cost estimates.
+struct HygieneScanSummary: Codable, Sendable {
+    let scannedAt: Double
+    let threshold: Double
+    let memoryCount: Int
+    let clusters: [HygieneCluster]
+    let dismissedCount: Int
+    let estimatedInputTokens: Int
+    let estimatedOutputTokens: Int
+    let estimates: [IngestCostEstimate]
+}
+
+/// Persisted hygiene report (`GET /hygiene/report`).
+struct HygieneReport: Codable, Sendable {
+    let version: Int
+    let scannedAt: Double
+    let judgedAt: Double?
+    let model: String?
+    let threshold: Double
+    let memoryCount: Int
+    let clusters: [HygieneCluster]
+    let deletedIds: [String]
+}
+
+/// `GET /hygiene/status` response.
+struct HygieneStatus: Codable, Sendable {
+    let state: String
+    let judged: Int
+    let failed: Int
+    let total: Int
+    let error: String?
+}
+
+/// `GET /hygiene/report` envelope: last report (if any) plus judge models.
+struct HygieneReportEnvelope: Codable, Sendable {
+    let report: HygieneReport?
+    let models: [IngestModelInfo]
+    let pricingAsOf: String
+    let hygieneReady: Bool
+}
+
 /// Inline attachment payload for create/update (base64 `data`).
 struct AttachmentInput: Codable, Sendable {
     let mimeType: String

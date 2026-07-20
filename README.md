@@ -214,6 +214,11 @@ straight into your memory layer:
 - "Find similar" on any attachment to recall related memories by media.
 - Export all memories to a portable JSONL file; import them back.
 - Distill coding-agent chat history into one memory per **new** session. Once a session is ingested, Gemdex never reprocesses it—even if the transcript later changes.
+- **Memory hygiene** — find stale, duplicate, or contradicted memories. A free
+  local scan clusters similar memories using the vectors already in LanceDB;
+  a Gemini judge then marks each cluster member keep / duplicate / superseded /
+  contradicted with quoted evidence. You review the findings and approve every
+  deletion by hand — dismissed clusters are never flagged again.
 
 There's **no free-text search box** — recall is an agent/MCP capability; the app
 is a fast local manager (the only recall it surfaces is "Find similar", i.e.
