@@ -1,6 +1,6 @@
 {
     "name": "gemdex",
-    "version": "1.0.24",
+    "version": "1.0.25",
     "description": "A global, persistent memory layer for AI coding agents — Gemini embeddings + LanceDB + MCP",
     "private": true,
     "scripts": {
