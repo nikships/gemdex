@@ -653,13 +653,32 @@ test('trust ranking ON: a high-failed memory drops below a clean one with a slig
     const result = await withEnv('GEMDEX_TRUST_RANKING', 'true', () =>
         handlers.handleRecall({ query: 'q', limit: 2 }));
 
-    // Over-fetch: min(max(2*2, 2+5), 50) = min(7,50) = 7.
+    // Over-fetch: min(max(2*2, 2+5), 100) = min(7,100) = 7.
     assert.equal(requestedLimit, 7);
     const text = result.content[0].text;
     const cleanIndex = text.indexOf('id: clean');
     const burnedIndex = text.indexOf('id: burned');
     assert.ok(cleanIndex > -1 && burnedIndex > -1 && cleanIndex < burnedIndex, 'clean must now rank above burned');
     assert.match(text, /trust=×0\.7\d/);
+    cleanup();
+});
+
+test('trust ranking ON still over-fetches at the tool\'s max limit (50), not capped down to it', async () => {
+    const { statsStore, cleanup } = makeStatsStore();
+    const backend = new FakeBackend(null);
+    let requestedLimit: number | undefined;
+    backend.recall = async (_q, limit) => {
+        requestedLimit = limit;
+        return [makeRecallHit({ id: 'a', score: 0.5 })];
+    };
+    const handlers = new MemoryToolHandlers(backend, statsStore);
+
+    await withEnv('GEMDEX_TRUST_RANKING', 'true', async () => {
+        // limit is clamped to 50 by handleRecall itself; over-fetch must still
+        // reach past it (min(max(50*2, 50+5), 100) = 100), not collapse to 50.
+        await handlers.handleRecall({ query: 'q', limit: 999 });
+        assert.equal(requestedLimit, 100, 'over-fetch cap must stay above the max requestable limit');
+    });
     cleanup();
 });
 

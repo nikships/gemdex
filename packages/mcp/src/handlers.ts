@@ -283,7 +283,9 @@ export class MemoryToolHandlers {
             // Flag off: fetch exactly `limit`, no re-rank — identical to prior
             // behavior. Flag on: over-fetch so re-ranking has room to promote a
             // proven memory or demote a burned one past the raw-relevance cutoff.
-            const fetchLimit = trustRankingEnabled ? Math.min(Math.max(limit * 2, limit + 5), 50) : limit;
+            // Cap at 100 (well above the tool's own 50 max `limit`) so
+            // over-fetching still has room to work even at the top of the range.
+            const fetchLimit = trustRankingEnabled ? Math.min(Math.max(limit * 2, limit + 5), 100) : limit;
             const fetched = await this.store.recall(query, fetchLimit, resolved);
             const results = trustRankingEnabled ? this.applyTrustRanking(fetched).slice(0, limit) : fetched;
             if (results.length === 0) {

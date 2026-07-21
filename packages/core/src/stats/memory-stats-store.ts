@@ -105,14 +105,24 @@ export class MemoryStatsStore {
      * Loaded fresh on every call (no in-memory cache — matches
      * `IngestLedgerStore`'s precedent), tolerant of a missing or corrupt
      * file: this is telemetry, never source of truth, so a parse failure
-     * starts fresh instead of throwing into `recall`/`report_outcome`.
+     * starts fresh instead of throwing into `recall`/`report_outcome`. A
+     * system read error (e.g. `EACCES`/`EMFILE`) is a different failure mode
+     * and propagates instead — every call site already guards against
+     * `MemoryStatsStore` throwing, so this only trades "silently start over"
+     * for "report telemetry failure once", never risking overwriting a
+     * healthy file with an empty ledger.
      */
     private load(): StatsFile {
         if (!fs.existsSync(this.filePath)) {
             return { version: 1, memories: {} };
         }
+        // Read and parse are deliberately separate: a system read error
+        // (e.g. EACCES/EMFILE) must propagate rather than be mistaken for a
+        // corrupt file — swallowing it here would let a later write()
+        // overwrite an otherwise-healthy file with an empty ledger.
+        const content = fs.readFileSync(this.filePath, 'utf8');
         try {
-            const parsed = JSON.parse(fs.readFileSync(this.filePath, 'utf8'));
+            const parsed = JSON.parse(content);
             if (!parsed || typeof parsed !== 'object' || parsed.version !== 1
                 || typeof parsed.memories !== 'object' || parsed.memories === null) {
                 throw new Error('unsupported format');

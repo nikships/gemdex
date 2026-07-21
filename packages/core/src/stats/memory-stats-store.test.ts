@@ -123,6 +123,15 @@ describe('MemoryStatsStore', () => {
         expect(store.get('a')).toBeUndefined();
     });
 
+    it('propagates a system read error instead of silently starting fresh', () => {
+        // A directory at the stats path triggers a system error (EISDIR) on
+        // read — distinct from a corrupt/foreign file. This must NOT be
+        // swallowed into an empty ledger, since a later write() would then
+        // clobber whatever was actually there once the transient failure clears.
+        fs.mkdirSync(filePath, { recursive: true });
+        expect(() => store.get('a')).toThrow();
+    });
+
     it('removeStats drops all stats for an id and is harmless if absent', () => {
         store.recordRecall(['a', 'b'], 1);
         store.removeStats('a');

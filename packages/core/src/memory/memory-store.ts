@@ -480,8 +480,9 @@ export class MemoryStore {
         // Exact scoring: rebuild each candidate's own centroid from ALL of its
         // row vectors (reusing the row-reading/vector-coercion pattern from
         // `listParentsWithVectors`/`updateAttachmentCaptions`) and compare.
-        const results: SimilarMemoryRef[] = [];
-        for (const parentId of candidateIds) {
+        // Candidates are independent reads, so run them concurrently
+        // (≤ `SIMILAR_MAX_RESCORED` at once) to keep the save path fast.
+        const scored = await Promise.all(candidateIds.map(async (parentId): Promise<SimilarMemoryRef | null> => {
             const filter = `relativePath == '${MemoryStore.escapeLiteral(parentId)}'`;
             const rows = await this.db.query(
                 this.collectionName,
@@ -489,17 +490,20 @@ export class MemoryStore {
                 ['vector', 'metadata'],
                 LIST_FETCH_LIMIT,
             );
-            if (rows.length === 0) continue;
+            if (rows.length === 0) return null;
             const parentVectors = rows.map((row) =>
                 Array.isArray(row.vector) ? (row.vector as number[]) : Array.from(row.vector as Iterable<number>));
             const parentCentroid = normalizedCentroid(parentVectors);
             const similarity = cosine(centroid, parentCentroid);
-            if (similarity < threshold) continue;
+            if (similarity < threshold) return null;
             const meta = this.rowToParentMeta(this.parseMetadata(rows[0].metadata));
-            results.push({ id: parentId, title: meta.title, similarity, updatedAt: meta.updatedAt });
-        }
+            return { id: parentId, title: meta.title, similarity, updatedAt: meta.updatedAt };
+        }));
 
-        return results.sort((a, b) => b.similarity - a.similarity).slice(0, SIMILAR_MAX_RESULTS);
+        return scored
+            .filter((r): r is SimilarMemoryRef => r !== null)
+            .sort((a, b) => b.similarity - a.similarity)
+            .slice(0, SIMILAR_MAX_RESULTS);
     }
 
     /**
