@@ -129,9 +129,9 @@ class Sidecar:
             if body is not None:
                 req.add_header("Content-Type", "application/json")
             try:
-                with urllib.request.urlopen(req, timeout=120) as resp:
-                    raw = resp.read().decode()
-                    return json.loads(raw) if raw.strip() else None
+                with urllib.request.urlopen(req, timeout=300) as resp:
+                    raw_body = resp.read().decode()
+                    return json.loads(raw_body) if raw_body.strip() else None
             except urllib.error.HTTPError as e:
                 detail = e.read().decode(errors="replace")
                 if e.code == 503 and "needsKey" in detail:
@@ -151,12 +151,13 @@ class Sidecar:
         return self._req("GET", "/memories")
 
     def export(self) -> str:
-        # /export streams JSONL (one record per line).
-        url = f"http://127.0.0.1:{self.port}/export"
-        req = urllib.request.Request(url, method="GET")
-        req.add_header("X-Gemdex-Token", self.token or "")
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            return resp.read().decode()
+        # The core /export route answers a single JSON object {records:[...]}.
+        # Route through _req so it shares the 503/needsKey retry that covers the
+        # async key-validation race, then re-emit as JSONL (one memory per line)
+        # — the format this command documents and the consolidation skill reads.
+        data = self._req("GET", "/export")
+        records = data.get("records", []) if isinstance(data, dict) else data
+        return "".join(json.dumps(r) + "\n" for r in records)
 
     def get(self, mid: str) -> Any:
         return self._req("GET", f"/memories/{mid}")
