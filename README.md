@@ -8,7 +8,7 @@
 [![npm downloads](https://img.shields.io/npm/dm/gemdex-mcp?color=cf6a4c&label=downloads&logo=npm)](https://www.npmjs.com/package/gemdex-mcp)
 [![GitHub stars](https://img.shields.io/github/stars/anand-92/gemdex?style=flat&color=e9b949&logo=github)](https://github.com/anand-92/gemdex/stargazers)
 [![License: MIT](https://img.shields.io/badge/License-MIT-7a9e7e.svg)](LICENSE)
-[![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A520-7a9e7e.svg?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A524-7a9e7e.svg?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![MCP](https://img.shields.io/badge/MCP-compatible-cf6a4c)](https://modelcontextprotocol.io)
 [![Powered by Gemini](https://img.shields.io/badge/embeddings-Gemini-4285F4?logo=google)](https://ai.google.dev/)
 [![Powered by LanceDB](https://img.shields.io/badge/vector_db-LanceDB-9933ff)](https://lancedb.com/)

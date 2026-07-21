@@ -115,7 +115,7 @@ deliberately don't expose it).
 
 ## Working in the monorepo
 
-- pnpm workspace, Node ≥ 20, pnpm ≥ 10. `pnpm install` from the root.
+- pnpm workspace, Node ≥ 24, pnpm ≥ 10. `pnpm install` from the root.
 - Per-package work: `pnpm --filter <name> <script>` (e.g. `build`, `dev`, `test`).
 - Full local gate before pushing: `pnpm lint && pnpm typecheck && pnpm build &&
   pnpm -r test`. CI plan: `.github/workflows/ci.yml` (TS verify matrix +

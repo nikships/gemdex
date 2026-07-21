@@ -17,7 +17,7 @@ For non-trivial changes, open a discussion or issue first so we can align on the
 
 You need:
 
-- Node.js ≥ 20
+- Node.js ≥ 24
 - pnpm ≥ 10 (`corepack enable && corepack prepare pnpm@latest --activate`)
 - A Google AI Studio API key (free tier is fine for development)
 
