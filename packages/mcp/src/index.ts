@@ -30,9 +30,14 @@ import { runCli } from "./cli.js";
 const SAVE_MEMORY_DESCRIPTION = `
 Persist a new memory to the user's global, durable memory layer.
 
-🎯 **When to use**: ONLY when the user explicitly asks you to remember or save
-something ("save this to memory", "remember that…", "store these credentials").
-Never capture proactively.
+🎯 **When to use**: proactively, as you work — you do NOT need the user to ask.
+Save durable, reusable knowledge the moment you learn it: hard-won fixes and
+root causes, project conventions and architecture decisions, setup/build/deploy
+steps, credentials and paths the user shares, gotchas, and the rationale behind
+choices. If it's likely to matter in a future session or repo, store it now
+without waiting for permission. Explicit user requests ("remember that…", "save
+this") are just one trigger among many. Keep memories to durable, reusable facts
+— skip one-off trivia and anything easily re-derived from the current context.
 
 Behavior: the content is chunked, embedded via Gemini, and stored globally
 (searchable from every repo and session). Returns the new memory id.
@@ -53,9 +58,14 @@ const RECALL_DESCRIPTION = `
 Retrieve memories from the user's global memory layer by natural-language query
 and/or inline media (image / audio / video / PDF).
 
-🎯 **When to use**: ONLY when the user points you at memory ("check your memory
-layer", "how do we usually do X", "what were those credentials", "find the
-memory that matches this screenshot"). Never recall unprompted.
+🎯 **When to use**: proactively and by default — make checking memory a reflex,
+not something you wait to be told to do. Recall at the start of a task, before
+solving a problem, before setting up a tool or environment, before making a
+design/convention decision, and before asking the user for information they may
+have already given you. Explicit prompts ("check your memory layer", "how do we
+usually do X", "what were those credentials", "find the memory that matches this
+screenshot") are just some of the triggers; a quick recall is cheap and often
+surfaces prior work, so prefer checking first over assuming nothing is stored.
 
 Behavior: hybrid semantic + BM25 search over text, plus a media-similarity
 branch for each query attachment, fused by relevance. Returns the FULL matching
@@ -89,10 +99,12 @@ const LIST_MEMORIES_DESCRIPTION = `
 Browse the user's global memory layer: list stored memories newest-first, each
 as a compact title + id + relative age + preview (no embedding/search).
 
-🎯 **When to use**: when the user wants to see what's stored ("what do you have
-in memory?", "list your memories about deploys") or when you need a memory's
-exact \`id\` to pass to \`update_memory\` and a fuzzy \`recall\` isn't precise.
-Like the other tools, use it only when the user points you at the memory layer.
+🎯 **When to use**: whenever you want to orient yourself in what's stored — when
+the user asks ("what do you have in memory?", "list your memories about
+deploys") and also proactively, e.g. to get a memory's exact \`id\` for
+\`update_memory\` when a fuzzy \`recall\` isn't precise, or to scan what already
+exists before saving something new. Use it freely; you don't need the user to
+point you at the memory layer first.
 
 Behavior: returns lightweight summaries (content truncated to a preview), not
 full content — use \`recall\` for relevance-ranked full memories. Optional
@@ -103,9 +115,13 @@ literal filter, NOT semantic search). \`limit\` defaults to 50 (max 200).
 const UPDATE_MEMORY_DESCRIPTION = `
 Revise an existing memory in place, identified by its id.
 
-🎯 **When to use**: when the user asks to update/correct a stored memory
-("the notarization step changed — update that memory"). Get the id from a prior
-save_memory or recall result.
+🎯 **When to use**: proactively whenever you discover a stored memory is
+outdated, wrong, or duplicated — not only when the user asks
+("the notarization step changed — update that memory"). If you learn a better
+fact, or a \`save_memory\` response flags "⚠ similar existing memories already
+stored", prefer correcting/consolidating the existing memory in place over
+leaving stale or conflicting copies. Get the id from a prior save_memory,
+recall, or list_memories result.
 
 Two ways to change the text:
 - \`edits\`: targeted find-and-replace — preferred for large memories. Pass an
