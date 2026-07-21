@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM node:20-bookworm-slim AS build
+FROM node:24-bookworm-slim AS build
 
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
@@ -22,7 +22,7 @@ COPY packages/server packages/server
 RUN pnpm --filter gemdex-server... build \
     && pnpm --filter gemdex-server deploy --prod --legacy /opt/gemdex
 
-FROM node:20-bookworm-slim AS runtime
+FROM node:24-bookworm-slim AS runtime
 
 ENV NODE_ENV=production
 ENV GEMDEX_SERVER_HOST=0.0.0.0

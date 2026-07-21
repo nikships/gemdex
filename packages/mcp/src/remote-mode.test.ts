@@ -6,6 +6,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import type { Memory } from 'gemdex-core';
+import { MemoryStatsStore } from 'gemdex-core';
 import { createConfig } from './config.js';
 import { MemoryToolHandlers } from './handlers.js';
 import { createMemoryBackend } from './memory.js';
@@ -106,8 +107,11 @@ async function startFakeRemote(): Promise<{
     };
 }
 
-test('MCP public tool surface remains exactly save_memory, recall, update_memory, list_memories', () => {
-    assert.deepEqual([...MCP_TOOL_NAMES], ['save_memory', 'recall', 'update_memory', 'list_memories']);
+test('MCP public tool surface remains exactly save_memory, recall, update_memory, list_memories, report_outcome', () => {
+    assert.deepEqual(
+        [...MCP_TOOL_NAMES],
+        ['save_memory', 'recall', 'update_memory', 'list_memories', 'report_outcome'],
+    );
 });
 
 test('remote-mode MCP handlers save, media-recall, and update through HTTP', async () => {
@@ -121,7 +125,8 @@ test('remote-mode MCP handlers save, media-recall, and update through HTTP', asy
         GEMDEX_REMOTE_URL: remote.url,
         GEMDEX_REMOTE_TOKEN: 'remote-token',
     })[name]);
-    const handlers = new MemoryToolHandlers(createMemoryBackend(config));
+    const statsPath = path.join(tmpDir, 'stats.json');
+    const handlers = new MemoryToolHandlers(createMemoryBackend(config), new MemoryStatsStore(statsPath));
 
     try {
         const saved = await handlers.handleSaveMemory({

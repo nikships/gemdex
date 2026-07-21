@@ -1,4 +1,14 @@
-import { MemoryBackend, applyContentEdits, ContentEdit } from "gemdex-core";
+import {
+    MemoryBackend,
+    MemoryStatsStore,
+    MemoryOutcome,
+    MemoryStats,
+    MemoryRecallResult,
+    SimilarMemoryRef,
+    applyContentEdits,
+    ContentEdit,
+    envManager,
+} from "gemdex-core";
 import { resolveAttachmentInputs } from "./attachment-path.js";
 import { errorMessage } from "./errors.js";
 
@@ -87,6 +97,51 @@ function formatRelativeAge(timestamp: number, now: number = Date.now()): string 
 }
 
 /**
+ * Per-hit track-record line beneath a recall result, rendered whenever stats
+ * exist for that memory (always-on, purely additive — absent for untracked
+ * memories, so backward compatibility with no stats recorded holds byte for
+ * byte). Only non-zero tallies are shown, EXCEPT that `failed`/`stale` are
+ * always both shown together once either is non-zero, prefixed with `⚠` as an
+ * at-a-glance warning that this memory has burned the agent before:
+ *
+ *   track record: recalled 7×, worked 3× (last: worked 2d ago)
+ *   ⚠ track record: recalled 9×, worked 1×, failed 3× (last: failed 4h ago)
+ *
+ * Returns null when no stats exist for the memory yet.
+ */
+function formatTrackRecordLine(stats: MemoryStats | undefined, now: number = Date.now()): string | null {
+    if (!stats) return null;
+    const hasBadOutcomes = stats.failedCount + stats.staleCount > 0;
+    const parts = [`recalled ${stats.recallCount}×`];
+    if (stats.workedCount > 0) parts.push(`worked ${stats.workedCount}×`);
+    if (hasBadOutcomes) {
+        if (stats.failedCount > 0) parts.push(`failed ${stats.failedCount}×`);
+        if (stats.staleCount > 0) parts.push(`stale ${stats.staleCount}×`);
+    }
+    const lastOutcomeNote = stats.lastOutcome
+        ? ` (last: ${stats.lastOutcome.outcome} ${formatRelativeAge(stats.lastOutcome.at, now)})`
+        : '';
+    const prefix = hasBadOutcomes ? '⚠ track record' : 'track record';
+    return `${prefix}: ${parts.join(', ')}${lastOutcomeNote}`;
+}
+
+/**
+ * Trust-weighted re-ranking multiplier (opt-in, `GEMDEX_TRUST_RANKING=true`).
+ * Boosts memories with a strong `worked` history, demotes ones that have
+ * burned the agent (`failed`/`stale`), and is exactly 1 — a no-op — for a
+ * memory with no stats, so untracked memories keep their relative order.
+ * Deterministic and documented here rather than tuned empirically:
+ *
+ *   trust = clamp( (1 + 0.08·ln(1+worked)) / (1 + 0.20·ln(1+failed+stale)), 0.6, 1.4 )
+ */
+function trustMultiplier(stats: MemoryStats | undefined): number {
+    if (!stats) return 1;
+    const boost = 1 + 0.08 * Math.log(1 + stats.workedCount);
+    const penalty = 1 + 0.20 * Math.log(1 + stats.failedCount + stats.staleCount);
+    return Math.min(1.4, Math.max(0.6, boost / penalty));
+}
+
+/**
  * Per-hit attachment line for recall output. Surfaces each attachment's kind,
  * stable id, and caption so the agent knows media exists and can reason about
  * it (the caption is the human-written description). Returns null when none.
@@ -122,20 +177,26 @@ function formatScoreBranch(label: string, rank: number | undefined, detail: stri
 /**
  * Render the per-branch sub-score line shown beneath each recall hit so the
  * agent can gauge confidence (mirrors the old code-search format).
+ * `fusedScore` is always the raw relevance score (pre-trust-adjustment) so
+ * the agent can see both the underlying relevance AND the trust multiplier
+ * that was layered on top of it; `trust` is omitted entirely when
+ * `GEMDEX_TRUST_RANKING` is off, matching the flag's byte-identical-when-off
+ * backward-compatibility requirement.
  */
 function formatSubScoresLine(fusedScore: number, subScores?: {
     denseRank?: number;
     denseDistance?: number;
     ftsRank?: number;
     ftsScore?: number;
-}): string {
+}, trust?: number): string {
     const fused = `fused=${fusedScore.toFixed(4)}`;
-    if (!subScores) return `Scores: ${fused}`;
+    const trustPart = trust !== undefined ? ` · trust=×${trust.toFixed(2)}` : '';
+    if (!subScores) return `Scores: ${fused}${trustPart}`;
     const denseDetail = subScores.denseDistance !== undefined ? ` (d=${subScores.denseDistance.toFixed(4)})` : '';
     const ftsDetail = subScores.ftsScore !== undefined ? ` (s=${subScores.ftsScore.toFixed(2)})` : '';
     const dense = formatScoreBranch('dense', subScores.denseRank, denseDetail);
     const bm25 = formatScoreBranch('bm25', subScores.ftsRank, ftsDetail);
-    return `Scores: ${fused} · ${dense} · ${bm25}`;
+    return `Scores: ${fused}${trustPart} · ${dense} · ${bm25}`;
 }
 
 /** Render the confirmation block returned to the agent after a save/update. */
@@ -146,11 +207,36 @@ function formatMemoryResult(verb: string, memory: { id: string; title: string; a
     return lines.join('\n');
 }
 
+/**
+ * Advisory near-duplicate/conflict block appended after `save_memory` when
+ * the backend's save-time detection (`MemoryStore.findSimilarParents`)
+ * returned candidates. Purely additive — absent entirely when `similar` is
+ * empty/undefined (e.g. detection disabled, first save into an empty store,
+ * or a remote/BYOI backend that doesn't run detection yet). The id is shown
+ * in full (not truncated) since the advisory text asks the agent to pass it
+ * straight into `update_memory`.
+ */
+function formatSimilarBlock(similar: SimilarMemoryRef[], now: number = Date.now()): string {
+    const lines = ['⚠ similar existing memories already stored:'];
+    similar.forEach((ref, i) => {
+        const age = formatRelativeAge(ref.updatedAt, now);
+        lines.push(`  ${i + 1}. "${ref.title}" (id ${ref.id}, updated ${age}, ${ref.similarity.toFixed(2)} similar)`);
+    });
+    lines.push(
+        'If the new memory revises or duplicates one of these, consolidate: keep ONE',
+        'canonical memory — update_memory the existing id with the merged content (or',
+        'confirm with the user which should win). Avoid leaving both.',
+    );
+    return lines.join('\n');
+}
+
 export class MemoryToolHandlers {
     private store: MemoryBackend;
+    private statsStore: MemoryStatsStore;
 
-    constructor(store: MemoryBackend) {
+    constructor(store: MemoryBackend, statsStore: MemoryStatsStore) {
         this.store = store;
+        this.statsStore = statsStore;
     }
 
     async handleSaveMemory(args: any): Promise<ToolResult> {
@@ -166,7 +252,11 @@ export class MemoryToolHandlers {
         try {
             const resolved = attachments && await resolveAttachmentInputs(attachments);
             const memory = await this.store.save({ content, title, ...(resolved && { attachments: resolved }) });
-            return textResult(formatMemoryResult('Saved', memory));
+            const base = formatMemoryResult('Saved', memory);
+            const similarBlock = memory.similar && memory.similar.length > 0
+                ? `\n\n${formatSimilarBlock(memory.similar)}`
+                : '';
+            return textResult(base + similarBlock);
         } catch (error) {
             return textResult(`Failed to save memory: ${errorMessage(error)}`, true);
         }
@@ -184,21 +274,44 @@ export class MemoryToolHandlers {
             return textResult("Error: provide 'query' or at least one attachment.", true);
         }
         const label = query.trim().length > 0 ? `"${query}"` : 'the supplied media';
+        // Read once per call: an unparseable/missing value is simply "not
+        // 'true'" => off, so ranking stays byte-identical to backend order
+        // whenever the flag is unset (no-silent-behavior-change).
+        const trustRankingEnabled = (envManager.get('GEMDEX_TRUST_RANKING') ?? '').toLowerCase() === 'true';
         try {
             const resolved = hasAttachments ? await resolveAttachmentInputs(attachments!) : undefined;
-            const results = await this.store.recall(query, limit, resolved);
+            // Flag off: fetch exactly `limit`, no re-rank — identical to prior
+            // behavior. Flag on: over-fetch so re-ranking has room to promote a
+            // proven memory or demote a burned one past the raw-relevance cutoff.
+            // Cap at 100 (well above the tool's own 50 max `limit`) so
+            // over-fetching still has room to work even at the top of the range.
+            const fetchLimit = trustRankingEnabled ? Math.min(Math.max(limit * 2, limit + 5), 100) : limit;
+            const fetched = await this.store.recall(query, fetchLimit, resolved);
+            const results = trustRankingEnabled ? this.applyTrustRanking(fetched).slice(0, limit) : fetched;
             if (results.length === 0) {
                 return textResult(`No memories matched ${label}. Nothing stored yet, or no relevant match.`);
             }
+
+            try {
+                this.statsStore.recordRecall(results.map((r) => r.id));
+            } catch (error) {
+                // Telemetry only — a stats-store failure must never break recall.
+                console.error('Failed to record recall stats:', errorMessage(error));
+            }
+
             const now = Date.now();
             const blocks = results.map((r, i) => {
-                const scoreLine = formatSubScoresLine(r.score, r.subScores);
+                const stats = this.safeGetStats(r.id);
+                const trust = trustRankingEnabled ? trustMultiplier(stats) : undefined;
+                const scoreLine = formatSubScoresLine(r.score, r.subScores, trust);
                 const lines = [
                     `### ${i + 1}. ${r.title}`,
                     `id: ${r.id}`,
                     `updated: ${formatRelativeAge(r.updatedAt, now)}`,
                     scoreLine,
                 ];
+                const trackRecordLine = formatTrackRecordLine(stats, now);
+                if (trackRecordLine) lines.push(trackRecordLine);
                 const attachmentsLine = formatAttachmentsLine(r.attachments);
                 if (attachmentsLine) lines.push(attachmentsLine);
                 lines.push('', summaryOnly ? makePreview(r.content) : r.content);
@@ -211,6 +324,34 @@ export class MemoryToolHandlers {
             return textResult(header + '\n' + blocks.join('\n\n---\n\n'));
         } catch (error) {
             return textResult(`Failed to recall memories: ${errorMessage(error)}`, true);
+        }
+    }
+
+    /**
+     * Re-rank over-fetched recall hits by `score * trustMultiplier(stats)`
+     * (stable-ish: `Array.prototype.sort` preserves the backend's relative
+     * order for ties, and untracked memories carry `trust = 1` so their
+     * relative order among themselves is unchanged).
+     */
+    private applyTrustRanking(hits: MemoryRecallResult[]): MemoryRecallResult[] {
+        return hits
+            .map((hit) => ({ hit, adjustedScore: hit.score * trustMultiplier(this.safeGetStats(hit.id)) }))
+            .sort((a, b) => b.adjustedScore - a.adjustedScore)
+            .map(({ hit }) => hit);
+    }
+
+    /**
+     * `MemoryStatsStore.get` reads a file on every call; a stats-store
+     * failure anywhere in `recall` rendering (track-record line, trust
+     * ranking) must degrade to "no stats" rather than break the whole
+     * recall — telemetry is never allowed to be a single point of failure.
+     */
+    private safeGetStats(id: string): MemoryStats | undefined {
+        try {
+            return this.statsStore.get(id);
+        } catch (error) {
+            console.error('Failed to read recall stats:', errorMessage(error));
+            return undefined;
         }
     }
 
@@ -290,6 +431,43 @@ export class MemoryToolHandlers {
             return textResult(formatMemoryResult('Updated', memory));
         } catch (error) {
             return textResult(`Failed to update memory: ${errorMessage(error)}`, true);
+        }
+    }
+
+    /**
+     * Record how acting on a recalled memory actually went. Validates the id
+     * against the backend first (`store.get`, works identically on local and
+     * remote) so junk ids never pollute the stats ledger, then delegates the
+     * tally to `MemoryStatsStore.recordOutcome`.
+     */
+    async handleReportOutcome(args: any): Promise<ToolResult> {
+        const id = typeof args?.id === 'string' ? args.id : '';
+        if (id.trim().length === 0) {
+            return textResult("Error: 'id' is required.", true);
+        }
+        const outcome = args?.outcome;
+        if (outcome !== 'worked' && outcome !== 'failed' && outcome !== 'stale') {
+            return textResult("Error: 'outcome' must be one of 'worked', 'failed', or 'stale'.", true);
+        }
+        if (args?.note !== undefined && typeof args.note !== 'string') {
+            return textResult("Error: 'note' must be a string when provided.", true);
+        }
+        const note: string | undefined = args?.note;
+        try {
+            const memory = await this.store.get(id);
+            if (!memory) {
+                return textResult(`Failed to report outcome: Memory not found: ${id}`, true);
+            }
+            const stats = this.statsStore.recordOutcome(id, outcome as MemoryOutcome, note);
+            const lines = [
+                `Recorded outcome for "${memory.title}".`,
+                `id: ${id}`,
+                `track record: recalled ${stats.recallCount}×, worked ${stats.workedCount}×, ` +
+                `failed ${stats.failedCount}×, stale ${stats.staleCount}×`,
+            ];
+            return textResult(lines.join('\n'));
+        } catch (error) {
+            return textResult(`Failed to report outcome: ${errorMessage(error)}`, true);
         }
     }
 }

@@ -20,12 +20,12 @@ test, and style rules live in the root `AGENTS.md` — they are not repeated her
 | `memory/remote-backend.ts` | `RemoteMemoryBackend`, `RemoteMemoryError` | HTTP client implementing the same `MemoryBackend`; talks to a Gemdex Server (server owns embedding). |
 | `memory/blob-store.ts` | `BlobStore`, `FileBlobStore` (default `~/.gemdex/blobs`), `S3BlobStore` | Raw attachment bytes, addressed by opaque `blobRef`; kept out of the vector table. |
 | `memory/attachment-validator.ts` | `validateAttachments`, `DEFAULT_ATTACHMENT_LIMITS`, `SUPPORTED_MIME_TYPES`, `mimeToKind` | Decodes + validates inline media (type allowlist, per-modality caps, byte/duration/page limits). |
-| `memory/types.ts` | `Memory`, `MemorySummary`, `MemoryRecallResult`, `SaveMemoryInput`, `UpdateMemoryInput`, attachment types | Public memory model. |
+| `memory/types.ts` | `Memory`, `MemorySummary`, `MemoryRecallResult`, `SaveMemoryInput`, `UpdateMemoryInput`, `SaveResult`, `SimilarMemoryRef`, attachment types | Public memory model. `SaveResult` = `Memory` + optional `similar` (save-time detection candidates). |
 | `embedding/gemini-embedding.ts` | `GeminiEmbedding` (`gemini-embedding-2`) | Multimodal Gemini embeddings; Matryoshka dimensions. |
 | `embedding/base-embedding.ts` | `Embedding`, `EmbeddingContent`, `EmbeddingVector` | Abstract provider base; `embedContentBatch` is the text-or-inline-media entry point. |
 | `vectordb/lancedb-vectordb.ts` | `LanceDBVectorDatabase`, `DEFAULT_RRF_K=60` | Embedded LanceDB: dense kNN + BM25/FTS fused with RRF; SQL-filter translation. |
 | `vectordb/types.ts` | `VectorDatabase`, `VectorDocument`, `HybridSearchRequest/Result`, `HybridSubScores` | Generic vector-store contract used by the memory layer. |
-| `hygiene/candidate-finder.ts` | `findCandidateClusters`, `DEFAULT_HYGIENE_THRESHOLD=0.90`, `MAX_CLUSTER_MEMBERS=8`, `clusterIdFor` | Local vector clustering of similar memories (centroid cosine + size-capped greedy agglomeration). Zero API calls. |
+| `hygiene/candidate-finder.ts` | `findCandidateClusters`, `DEFAULT_HYGIENE_THRESHOLD` (re-exported from `utils/centroid.ts`), `MAX_CLUSTER_MEMBERS=8`, `clusterIdFor` | Local vector clustering of similar memories (centroid cosine + size-capped greedy agglomeration). Zero API calls. |
 | `hygiene/judge.ts` | `ClusterJudge`, `buildJudgePrompt`, `parseJudgeResponse` | Gemini LLM judge: per-memory keep/duplicate/superseded/contradicted verdicts with evidence. |
 | `hygiene/hygiene-manager.ts` | `HygieneManager` | Orchestrates scan (clusters + cost estimate) → run (judge clusters) → apply (human-approved deletes) → dismiss. |
 | `hygiene/hygiene-report.ts` | `HygieneReportStore` | Persisted report + dismissals ledger at `~/.gemdex/hygiene.json`. |
@@ -33,6 +33,8 @@ test, and style rules live in the root `AGENTS.md` — they are not repeated her
 | `config/remote-config.ts` | `resolveMode`, `loadRemoteConfig`, `resolveRemoteConnection` | Local-vs-remote mode + remote URL/token resolution from env. |
 | `config/version-compat.ts` | `checkServerCompatibility`, `CLIENT_VERSION`, `SUPPORTED_API_VERSION='v1'`, `SUPPORTED_PROTOCOL_VERSION=1` | Client↔server handshake gate (fails closed on bad/old versions). |
 | `utils/env-manager.ts` | `EnvManager`, `envManager` | Env reads with priority `process.env` → `~/.gemdex/.env`. |
+| `utils/centroid.ts` | `normalizedCentroid`, `cosine`, `DEFAULT_HYGIENE_THRESHOLD=0.90` | Shared L2-normalized-centroid + cosine math and the default similarity threshold, used by **both** memory hygiene clustering and save-time similar-memory detection — one definition of "similar" for the whole product. |
+| `stats/memory-stats-store.ts` | `MemoryStatsStore`, `MemoryStats`, `MemoryOutcome` | Client-side outcome-feedback ledger (`~/.gemdex/stats.json` by default, `GEMDEX_STATS_PATH` override) for the `report_outcome` MCP tool: recall counts + worked/failed/stale tallies per memory id. Consumed entirely from `gemdex-mcp`; `MemoryStore`/`MemoryBackend` never touch it. |
 
 All rows for all memories live in **one global collection** (default table
 `memories`). Each stored row is *either* one text chunk *or* one attachment.
@@ -94,6 +96,23 @@ An attachment is **its own embedding unit** — it bypasses text chunking entire
 the prior rows/blobs for the id, then inserts. A failed (network) embed leaves
 the existing memory intact rather than wiping it. Attachments require a
 multimodal model — supplying media to a non-multimodal model throws.
+
+**Save-time similar-memory detection reuses those same vectors (embed →
+write → detect):** `MemoryStore.save` calls `writeMemory` (embed → delete →
+insert, per above) and then — only on the `save` path, not `update` or
+`importRecords` — runs `findSimilarParents(newVectors, excludeId)` with the
+chunk/attachment vectors `writeMemory` already returned. That means detection
+costs **zero extra embedding calls**: one local ANN `db.search` for candidate
+discovery (score used only to shortlist parent ids, never as the reported
+similarity) plus up to `SIMILAR_MAX_RESCORED` (8) filtered `db.query` reads to rebuild
+each candidate's own centroid and score it exactly with `cosine` from
+`utils/centroid.ts` — the same math and default threshold
+(`DEFAULT_HYGIENE_THRESHOLD = 0.90`) as memory hygiene clustering. Wrapped in
+try/catch: any detection failure degrades to "no `similar` field," never fails
+or delays the save. Config: `GEMDEX_SIMILAR_ON_SAVE=false` disables it
+entirely; `GEMDEX_SIMILAR_THRESHOLD` overrides the bar (fails fast outside
+`(0, 1]`). Local-mode only in v1 — `RemoteMemoryBackend.save` passes through
+whatever the BYOI server returns, which today never sets `similar`.
 
 **Caption edits skip re-embedding:** `updateAttachmentCaptions` reads every row
 back *with its `vector` column*, rewrites only the caption-derived `content` and
@@ -275,3 +294,13 @@ from an explicit human approval in the desktop app**, never by an agent tool.
   existing memory.
 - **No agent-facing delete in the API by design** beyond `DELETE /memories/:id`;
   deletion is a deliberate action, not part of recall/save flows.
+- **`MemoryStatsStore` never touches LanceDB or `MemoryStore`.** The
+  `report_outcome` feedback loop is a plain JSON sidecar ledger consumed by
+  `gemdex-mcp` only — `recall`'s "pure relevance ranking" contract inside
+  `gemdex-core` is untouched; ranking changes (when opted in) happen entirely
+  in the MCP layer, above this package.
+- **`save()`'s `SaveResult` widening is additive, not breaking.** `similar` is
+  an optional field on top of `Memory`; with detection disabled or no
+  candidates found, a `SaveResult` is structurally identical to the old
+  `Memory` return, so existing callers that only read `Memory` fields keep
+  working unmodified.

@@ -1,13 +1,12 @@
 import * as crypto from 'node:crypto';
 import type { ParentVectorData } from '../memory/memory-store';
+import { DEFAULT_HYGIENE_THRESHOLD, normalizedCentroid } from '../utils/centroid';
 import { HygieneCluster, HygieneClusterMember } from './types';
 
-/**
- * Default centroid cosine-similarity threshold for clustering. Calibrated on a
- * real ~1.9k-memory store: 0.90 surfaces tight duplicate/superseded groups,
- * while 0.80 flags the majority of the store as candidates.
- */
-export const DEFAULT_HYGIENE_THRESHOLD = 0.90;
+// Re-exported for existing importers — the threshold now lives in
+// `utils/centroid.ts` so save-time similar-memory detection can share it
+// without a memory <-> hygiene module cycle.
+export { DEFAULT_HYGIENE_THRESHOLD };
 
 /** Largest cluster the judge is asked to reason about at once. */
 export const MAX_CLUSTER_MEMBERS = 8;
@@ -73,23 +72,15 @@ export function findCandidateClusters(
     const dim = usable[0].vectors[0].length;
 
     // One contiguous Float64Array of all L2-normalized centroids keeps the
-    // O(n^2) similarity loop allocation-free.
+    // O(n^2) similarity loop allocation-free. Each parent's centroid itself
+    // comes from the shared `normalizedCentroid` util (also used by save-time
+    // detection in memory-store.ts) so the two features never diverge on the
+    // definition of "similar".
     const centroids = new Float64Array(n * dim);
     for (let p = 0; p < n; p++) {
         const base = p * dim;
-        for (const vector of usable[p].vectors) {
-            for (let d = 0; d < dim; d++) centroids[base + d] += vector[d];
-        }
-        const count = usable[p].vectors.length;
-        let norm = 0;
-        for (let d = 0; d < dim; d++) {
-            centroids[base + d] /= count;
-            norm += centroids[base + d] * centroids[base + d];
-        }
-        norm = Math.sqrt(norm);
-        if (norm > 0) {
-            for (let d = 0; d < dim; d++) centroids[base + d] /= norm;
-        }
+        const centroid = normalizedCentroid(usable[p].vectors);
+        for (let d = 0; d < dim; d++) centroids[base + d] = centroid[d];
     }
 
     // With normalized centroids, cosine similarity is a plain dot product.

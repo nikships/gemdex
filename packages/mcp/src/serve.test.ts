@@ -433,15 +433,28 @@ test("shared memory API handler mounts data routes without desktop /config", asy
         const createRes = await fetch(`${srvBase}/memories`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ content: "shared handler memory" }),
+            body: JSON.stringify({ content: "shared handler memory notarize build with signing identity" }),
         });
         assert.equal(createRes.status, 201);
         assert.equal(createRes.headers.get("access-control-allow-origin"), "https://server.example.test");
 
+        // Save-time similar-memory detection (#109): a near-duplicate create on
+        // the SAME shared store instance surfaces the first memory in
+        // `memory.similar` — additive field, single POST /memories round-trip.
+        const duplicateRes = await fetch(`${srvBase}/memories`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ content: "shared handler memory notarize build with signing identity tool" }),
+        });
+        assert.equal(duplicateRes.status, 201);
+        const { memory: duplicateMemory } = await json(duplicateRes);
+        assert.ok(Array.isArray(duplicateMemory.similar) && duplicateMemory.similar.length > 0, "expected memory.similar on a near-duplicate create");
+        assert.ok(duplicateMemory.similar[0].similarity >= 0.9);
+
         const listRes = await fetch(`${srvBase}/memories`);
         assert.equal(listRes.status, 200);
         const { memories } = await json(listRes);
-        assert.equal(memories.length, 1);
+        assert.equal(memories.length, 2);
     } finally {
         await new Promise<void>((resolve) => srv.close(() => resolve()));
         fs.rmSync(dbDir, { recursive: true, force: true });

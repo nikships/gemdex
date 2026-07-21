@@ -15,15 +15,15 @@ build/test/lint/style rules are repo-wide — see the root `AGENTS.md`.
 
 | File | Role |
 |------|------|
-| `src/index.ts` | The single entry point + `bin`. Reroutes console→stderr, decides which of the three modes to run, defines the three MCP tool **schemas/descriptions**, runs the stdio server. |
+| `src/index.ts` | The single entry point + `bin`. Reroutes console→stderr, decides which of the three modes to run, defines the five MCP tool **schemas/descriptions**, constructs the `MemoryStatsStore`, runs the stdio server. |
 | `src/serve.ts` | `gemdex serve` localhost HTTP sidecar: bind/token/origin auth + sidecar-only `/config` & `/settings*` routes; delegates data routes to core. |
-| `src/handlers.ts` | MCP tool **logic** (`save_memory`/`recall`/`update_memory`): arg validation, attachment resolution, result formatting. Never throws to the protocol. |
+| `src/handlers.ts` | MCP tool **logic** (`save_memory`/`recall`/`update_memory`/`list_memories`/`report_outcome`): arg validation, attachment resolution, result formatting, recall stats bump + track-record rendering + opt-in trust re-ranking, save-time similar-memory advisory rendering. Never throws to the protocol. |
 | `src/cli.ts` | CLI verbs (`init-remote`, `remote …`, `mode …`, `status`, `import-local-to-remote`). |
 | `src/config.ts` | `createConfig()` — turns env into a `GemdexConfig`; `resolveMode` picks local vs remote. Also `--help`. |
 | `src/memory.ts` | `createMemoryBackend(config)` — the one place that picks `LocalMemoryBackend` vs `RemoteMemoryBackend`. |
 | `src/cli-config.ts` | `ClientConfigStore` — reads/writes `~/.gemdex/config.json` (named remotes) and `~/.gemdex/.env` (tokens, `0600`). |
 | `src/embedding.ts` | `createEmbeddingInstance` — **throws if no `GEMINI_API_KEY`** in local mode. |
-| `src/tool-names.ts` | The frozen tuple `['save_memory','recall','update_memory','list_memories']`; indices are referenced positionally in `index.ts`. |
+| `src/tool-names.ts` | The frozen tuple `['save_memory','recall','update_memory','list_memories','report_outcome']`; indices are referenced positionally in `index.ts`. |
 | `integration/byoi.mjs` | End-to-end BYOI harness (real server + built mcp dist + Postgres/pgvector). |
 
 ## One binary, three modes — how `main()` routes
@@ -115,16 +115,17 @@ JSON → `400`.
 
 ## MCP tool contract
 
-Schemas/descriptions live in `index.ts`; logic in `handlers.ts`. Four tools.
+Schemas/descriptions live in `index.ts`; logic in `handlers.ts`. Five tools.
 **Handlers never throw to the protocol** — on failure they return
 `{ content:[…], isError:true }` with a human-readable message.
 
 | Tool | Required | Optional | Returns |
 |------|----------|----------|---------|
-| `save_memory` | `content` **OR** ≥1 attachment | `content`, `title`, `attachments` | `Saved memory.` + `id:` + `title:` (+ `attachments:` count) |
-| `recall` | `query` **OR** ≥1 attachment | `query`, `limit` (default 10, clamped to 50), `detail` (`full`\|`summary`), `attachments` | Header + each memory with `id:`, an `updated: <age>` line, a `Scores: fused=… · dense=… · bm25=…` line, an `attachments:` line when present, and the **full** content (or a preview when `detail:"summary"`) |
+| `save_memory` | `content` **OR** ≥1 attachment | `content`, `title`, `attachments` | `Saved memory.` + `id:` + `title:` (+ `attachments:` count) (+ a `⚠ similar existing memories already stored:` advisory block when the backend's save-time detection found candidates) |
+| `recall` | `query` **OR** ≥1 attachment | `query`, `limit` (default 10, clamped to 50), `detail` (`full`\|`summary`), `attachments` | Header + each memory with `id:`, an `updated: <age>` line, a `Scores: fused=… [· trust=×…] · dense=… · bm25=…` line, a `track record: …` line when stats exist (⚠-prefixed once failed/stale is non-zero), an `attachments:` line when present, and the **full** content (or a preview when `detail:"summary"`) |
 | `update_memory` | `id` + ≥1 of `content`/`edits`/`title`/`attachments` | `content`, `edits`, `title`, `attachments` | `Updated memory.` + `id:` + `title:` |
 | `list_memories` | — | `filter` (case-insensitive substring over title+preview), `limit` (default 50, max 200) | Header + each memory as `title`, `id: … · updated <age>` (+ media counts), and a `preview` — read-only browse, **not** semantic search |
+| `report_outcome` | `id`, `outcome` (`worked`\|`failed`\|`stale`) | `note` (≤500 chars) | `Recorded outcome for "<title>".` + `id:` + `track record: recalled N×, worked N×, failed N×, stale N×` |
 
 Invariants:
 - **No delete tool — by design.** Deletion is a deliberate human action in the
@@ -154,6 +155,29 @@ Invariants:
   reads + base64-encodes the bytes so no megabytes ride in tool-call args) or
   inline `data`+`mimeType`. Media requires the **`gemini-embedding-2`** model.
   Per-modality caps: ≤6 images, ≤1 PDF, ≤1 audio, ≤1 video.
+- **`report_outcome` validates the id against the backend first** (`store.get`,
+  works on both local and remote) so a junk id can never pollute the stats
+  ledger; only then does it call `MemoryStatsStore.recordOutcome`. This is the
+  one gemdex tool an agent is told to call proactively (right after a clear
+  worked/failed/stale outcome), not only when the user points at memory.
+- **`recall`'s stats bump/read is best-effort, never fatal.** `statsStore.recordRecall`
+  (after fetching) and `statsStore.get` (per hit, for the track-record line and
+  trust ranking) are each wrapped so a stats-store failure degrades to "no
+  stats for this hit" rather than breaking the whole recall.
+- **Trust-weighted re-ranking is opt-in** (`GEMDEX_TRUST_RANKING=true`, read
+  once per call via `envManager`; anything else, including unset, is off).
+  Off: `recall` fetches exactly `limit` from the backend and returns backend
+  order unchanged — byte-identical to pre-#108 behavior. On: over-fetches
+  `fetchLimit = min(max(limit*2, limit+5), 50)`, multiplies each hit's score by
+  a deterministic `trustMultiplier(stats)` in `[0.6, 1.4]` (1 for an untracked
+  memory), re-sorts, then slices to `limit`. The multiplier and the `trust=×…`
+  factor in the `Scores:` line are computed in `handlers.ts`, not core —
+  `MemoryStore.recall`'s "pure relevance" contract is untouched.
+- **Save-time similar-memory detection is core's job, MCP only renders it.**
+  `handleSaveMemory` appends the `⚠ similar existing memories already stored:`
+  block purely from `SaveResult.similar` when non-empty; it never calls back
+  into detection logic. Full ids are shown (not truncated) since the advisory
+  text tells the agent to pass one straight into `update_memory`.
 
 ## Local vs remote is per-process
 
@@ -184,10 +208,11 @@ independent pools; the local and remote pools never merge.
   `PORT=… TOKEN=…` handshake is the *only* sanctioned raw-stdout write.
 - **MCP local mode fails fast on a missing key; the sidecar boots into a repairable gate.** The stdio server builds the backend at startup, so `createEmbeddingInstance` throws `GEMINI_API_KEY is required` and the process exits non-zero. The sidecar starts its management routes, validates a saved key asynchronously, and serves `503 {needsKey:true}` for local data work until readiness is `valid`.
 - **History ingestion is permanently new-sessions-only.** The core manager runs only ledger-new files. Changed previously ingested sessions may appear in scan diagnostics but are never passed to standard or batch digestion; the sidecar ignores legacy `newOnly` request fields and the CLI exposes no override.
-- **Tool routing is positional**: `index.ts` switches on `MCP_TOOL_NAMES[0..3]`.
-  Reordering `tool-names.ts` silently rewires the handlers. Adding a tool means
-  appending to the tuple, defining its schema in `index.ts`, adding a `case`, and
-  a `handle*` method in `handlers.ts`.
+- **Tool routing is positional**: `index.ts` switches on `MCP_TOOL_NAMES[0..4]`.
+  Reordering `tool-names.ts` silently rewires the handlers — `report_outcome`
+  was appended as index `4`, so the first four indices are stable. Adding a
+  tool means appending to the tuple, defining its schema in `index.ts`, adding
+  a `case`, and a `handle*` method in `handlers.ts`.
 - **`runCli` returning `null` means "not mine, fall through to MCP."** A new verb
   that isn't added to `CLI_COMMANDS` will boot the stdio server instead of erroring.
 - **No MCP delete tool**, but `DELETE /memories/:id` exists in the

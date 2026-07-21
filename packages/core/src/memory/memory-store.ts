@@ -7,6 +7,7 @@ import {
     HybridSearchResult,
 } from '../vectordb';
 import { envManager } from '../utils/env-manager';
+import { DEFAULT_HYGIENE_THRESHOLD, normalizedCentroid, cosine } from '../utils/centroid';
 import { chunkMemory, deriveTitle, ChunkOptions } from './chunker';
 import { BlobStore, FileBlobStore } from './blob-store';
 import {
@@ -25,6 +26,8 @@ import {
     MemorySummary,
     MemoryRecallResult,
     SaveMemoryInput,
+    SaveResult,
+    SimilarMemoryRef,
     UpdateMemoryInput,
     MemoryExportRecord,
     MemoryExportAttachment,
@@ -38,6 +41,15 @@ const LIST_FETCH_LIMIT = 100000;
 /** Reciprocal Rank Fusion constant, shared by the hybrid text path and the
  *  cross-branch fusion used by recall-by-media. */
 const RECALL_RRF_K = 100;
+/**
+ * Save-time similar-memory detection: how many ANN candidates to pull for
+ * discovery (cheap, approximate — only used to shortlist parent ids) and how
+ * many of those candidates get an exact centroid-vs-centroid rescoring (the
+ * one authoritative "similarity" number reported back to the caller).
+ */
+const SIMILAR_ANN_CANDIDATES = 20;
+const SIMILAR_MAX_RESCORED = 8;
+const SIMILAR_MAX_RESULTS = 3;
 
 /**
  * Internal mapping between the memory model and the generic hybrid vector
@@ -282,6 +294,11 @@ export class MemoryStore {
      * blobs already under `id`, then persists the supplied text + attachments.
      * Throws if attachments are supplied to a non-multimodal embedding model, or
      * if the resulting memory would be completely empty.
+     *
+     * Also returns the vectors it just computed (`chunkVectors`,
+     * `attachmentVectors`) so `save` can reuse them for similar-memory
+     * detection with zero extra embedding calls; `update`/`importRecords`
+     * simply ignore them.
      */
     private async writeMemory(
         id: string,
@@ -290,7 +307,7 @@ export class MemoryStore {
         attachmentsInput: MemoryAttachmentInput[],
         createdAt: number,
         updatedAt: number,
-    ): Promise<Memory> {
+    ): Promise<{ memory: Memory; chunkVectors: EmbeddingVector[]; attachmentVectors: EmbeddingVector[] }> {
         const text = content ?? '';
         const validated = attachmentsInput.length > 0
             ? await validateAttachments(attachmentsInput, this.attachmentLimits)
@@ -351,12 +368,16 @@ export class MemoryStore {
             await this.db.insertHybrid(this.collectionName, rows);
 
             return {
-                id,
-                title,
-                content: text,
-                attachments: MemoryStore.toPublicAttachments(stored),
-                createdAt,
-                updatedAt,
+                memory: {
+                    id,
+                    title,
+                    content: text,
+                    attachments: MemoryStore.toPublicAttachments(stored),
+                    createdAt,
+                    updatedAt,
+                },
+                chunkVectors,
+                attachmentVectors,
             };
         } catch (error) {
             // Don't leave orphan blobs behind if blob writes or the insert failed.
@@ -368,9 +389,15 @@ export class MemoryStore {
     /**
      * Persist a new memory. Text is chunked + embedded; each attachment is one
      * media embedding stored as its own row with its bytes on disk. Returns the
-     * created memory (including the resolved title + attachment metadata).
+     * created memory (including the resolved title + attachment metadata) plus
+     * advisory `similar` candidates when save-time detection finds any.
+     *
+     * Detection runs AFTER the write succeeds (the saved memory itself is the
+     * priority, and this keeps `writeMemory`'s shared save/update/import
+     * semantics untouched) and is wrapped in try/catch: a detection failure of
+     * any kind can never fail or delay-fail the save — see `findSimilarParents`.
      */
-    async save(input: SaveMemoryInput): Promise<Memory> {
+    async save(input: SaveMemoryInput): Promise<SaveResult> {
         const content = input.content ?? '';
         const attachmentsInput = input.attachments ?? [];
         if (content.trim().length === 0 && attachmentsInput.length === 0) {
@@ -378,7 +405,105 @@ export class MemoryStore {
         }
         const id = MemoryStore.newId();
         const now = Date.now();
-        return this.writeMemory(id, content, input.title, attachmentsInput, now, now);
+        const { memory, chunkVectors, attachmentVectors } =
+            await this.writeMemory(id, content, input.title, attachmentsInput, now, now);
+
+        let similar: SimilarMemoryRef[] = [];
+        try {
+            const newVectors = [...chunkVectors, ...attachmentVectors].map((v) => v.vector);
+            similar = await this.findSimilarParents(newVectors, id);
+        } catch (error) {
+            // Advisory only — never let detection failure taint a successful save.
+            console.error('[MemoryStore] Save-time similar-memory detection failed:', error);
+        }
+
+        return { ...memory, ...(similar.length > 0 && { similar }) };
+    }
+
+    /** Read the `GEMDEX_SIMILAR_THRESHOLD` override, validating it fails fast. */
+    private static resolveSimilarThreshold(): number {
+        const raw = envManager.get('GEMDEX_SIMILAR_THRESHOLD');
+        if (raw === undefined) return DEFAULT_HYGIENE_THRESHOLD;
+        const parsed = Number(raw);
+        if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 1) {
+            throw new Error(
+                `Invalid GEMDEX_SIMILAR_THRESHOLD '${raw}': must be a number in (0, 1].`,
+            );
+        }
+        return parsed;
+    }
+
+    /**
+     * Save-time similar-memory/conflict detection. Reuses the vectors `save`
+     * already computed for the new memory — zero extra embedding/network
+     * calls, one local ANN query plus a handful of filtered reads. Semantics
+     * intentionally match memory hygiene (`hygiene/candidate-finder.ts`):
+     * centroid-vs-centroid cosine similarity over a memory's row vectors, at
+     * the same default threshold (`DEFAULT_HYGIENE_THRESHOLD`) — one mental
+     * model for "similar" across the product.
+     *
+     * Disabled entirely when `GEMDEX_SIMILAR_ON_SAVE` is `'false'` (on by
+     * default — purely additive). Returns `[]` on an empty/nonexistent
+     * collection or when the new memory has no vectors (e.g. import paths
+     * never call this at all). `excludeId` drops the just-saved memory itself
+     * out of its own candidate list.
+     */
+    private async findSimilarParents(
+        newVectors: number[][],
+        excludeId: string,
+    ): Promise<SimilarMemoryRef[]> {
+        const enabled = (envManager.get('GEMDEX_SIMILAR_ON_SAVE') ?? 'true').toLowerCase() !== 'false';
+        if (!enabled || newVectors.length === 0) return [];
+
+        const threshold = MemoryStore.resolveSimilarThreshold();
+
+        const exists = await this.db.hasCollection(this.collectionName);
+        if (!exists) return [];
+
+        const centroid = normalizedCentroid(newVectors);
+
+        // Candidate discovery: the ANN score itself is only used to shortlist
+        // parent ids, never as the reported similarity (metric-agnostic — the
+        // exact score always comes from the centroid-vs-centroid rescoring below).
+        const annHits = await this.db.search(this.collectionName, centroid, { topK: SIMILAR_ANN_CANDIDATES });
+        const candidateIds: string[] = [];
+        const seen = new Set<string>();
+        for (const hit of annHits) {
+            const parentId = hit.document.relativePath;
+            if (!parentId || parentId === excludeId || seen.has(parentId)) continue;
+            seen.add(parentId);
+            candidateIds.push(parentId);
+            if (candidateIds.length >= SIMILAR_MAX_RESCORED) break;
+        }
+        if (candidateIds.length === 0) return [];
+
+        // Exact scoring: rebuild each candidate's own centroid from ALL of its
+        // row vectors (reusing the row-reading/vector-coercion pattern from
+        // `listParentsWithVectors`/`updateAttachmentCaptions`) and compare.
+        // Candidates are independent reads, so run them concurrently
+        // (≤ `SIMILAR_MAX_RESCORED` at once) to keep the save path fast.
+        const scored = await Promise.all(candidateIds.map(async (parentId): Promise<SimilarMemoryRef | null> => {
+            const filter = `relativePath == '${MemoryStore.escapeLiteral(parentId)}'`;
+            const rows = await this.db.query(
+                this.collectionName,
+                filter,
+                ['vector', 'metadata'],
+                LIST_FETCH_LIMIT,
+            );
+            if (rows.length === 0) return null;
+            const parentVectors = rows.map((row) =>
+                Array.isArray(row.vector) ? (row.vector as number[]) : Array.from(row.vector as Iterable<number>));
+            const parentCentroid = normalizedCentroid(parentVectors);
+            const similarity = cosine(centroid, parentCentroid);
+            if (similarity < threshold) return null;
+            const meta = this.rowToParentMeta(this.parseMetadata(rows[0].metadata));
+            return { id: parentId, title: meta.title, similarity, updatedAt: meta.updatedAt };
+        }));
+
+        return scored
+            .filter((r): r is SimilarMemoryRef => r !== null)
+            .sort((a, b) => b.similarity - a.similarity)
+            .slice(0, SIMILAR_MAX_RESULTS);
     }
 
     /**
@@ -541,7 +666,8 @@ export class MemoryStore {
         }
 
         const now = Date.now();
-        return this.writeMemory(id, content, title, attachmentsInput, existing.createdAt, now);
+        const { memory } = await this.writeMemory(id, content, title, attachmentsInput, existing.createdAt, now);
+        return memory;
     }
 
     /**

@@ -8,7 +8,7 @@
 [![npm downloads](https://img.shields.io/npm/dm/gemdex-mcp?color=cf6a4c&label=downloads&logo=npm)](https://www.npmjs.com/package/gemdex-mcp)
 [![GitHub stars](https://img.shields.io/github/stars/anand-92/gemdex?style=flat&color=e9b949&logo=github)](https://github.com/anand-92/gemdex/stargazers)
 [![License: MIT](https://img.shields.io/badge/License-MIT-7a9e7e.svg)](LICENSE)
-[![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A520-7a9e7e.svg?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A524-7a9e7e.svg?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![MCP](https://img.shields.io/badge/MCP-compatible-cf6a4c)](https://modelcontextprotocol.io)
 [![Powered by Gemini](https://img.shields.io/badge/embeddings-Gemini-4285F4?logo=google)](https://ai.google.dev/)
 [![Powered by LanceDB](https://img.shields.io/badge/vector_db-LanceDB-9933ff)](https://lancedb.com/)
@@ -115,8 +115,9 @@ and reads on command.
 ```markdown
 ## Memory layer (Gemdex)
 
-`gemdex` MCP exposes `save_memory`, `recall`, and `update_memory` — a global,
-durable memory store shared across every repo and session. EXPLICIT ONLY:
+`gemdex` MCP exposes `save_memory`, `recall`, `update_memory`, and the
+read-only `list_memories` — a global, durable memory store shared across every
+repo and session. EXPLICIT ONLY:
 
 - `save_memory(content, title?)` when the user says remember/save to memory.
 - `recall(query, limit?)` when the user points at memory ("check your memory
@@ -125,6 +126,11 @@ durable memory store shared across every repo and session. EXPLICIT ONLY:
 - `update_memory(id, content?, edits?, title?)` to revise a stored memory —
   `edits` for a targeted find-and-replace (change part of a large memory without
   resending it), or `content` for a full rewrite.
+- `list_memories(filter?, limit?)` to browse stored memories or get an exact
+  `id`, when a fuzzy `recall` isn't precise enough.
+- `report_outcome(id, outcome, note?)` right after you act on a recalled memory
+  and the result is clear (`worked` / `failed` / `stale`) — this is the one
+  gemdex tool to call without being asked, whenever a clear outcome exists.
 
 Never auto-capture a session and never recall unprompted. There's no delete
 tool — deletion is a human action in the Gemdex desktop app. If these tools
@@ -134,17 +140,21 @@ aren't in your toolset, the MCP isn't connected.
 **For Codex CLI, Cursor, Windsurf, Cline, Continue, Zed** — paste the same
 snippet into your client's root instructions file (conventionally `AGENTS.md`).
 
-## The 3 MCP tools
+## The 5 MCP tools
 
 | Tool | Input | Returns | When the agent calls it |
 |------|-------|---------|-------------------------|
-| `save_memory` | `content` and/or `attachments`, `title` (optional) | new `id` + resolved title | only when told to remember/save |
-| `recall` | `query` and/or `attachments` (at least one required), `limit` (optional, ~10) | full memories ranked by relevance | only when pointed at memory |
+| `save_memory` | `content` and/or `attachments`, `title` (optional) | new `id` + resolved title (+ a ⚠ similar-memories warning when a near-duplicate is already stored) | only when told to remember/save |
+| `recall` | `query` and/or `attachments` (at least one required), `limit` (optional, ~10) | full memories ranked by relevance, each with a track-record line | only when pointed at memory |
 | `update_memory` | `id` (required); `content` **or** `edits`, `title`, `attachments` (optional — at least one required) | updated `id` + title | to revise a stored memory (`edits` = partial find-and-replace; `content` = full rewrite) |
+| `list_memories` | `filter` (optional substring), `limit` (optional, ~50) | newest-first summaries (title, id, age, preview) | to browse, or to get an exact `id` for `update_memory` |
+| `report_outcome` | `id` (required), `outcome` (`worked`\|`failed`\|`stale`, required), `note` (optional) | confirmation + updated track record | right after acting on a recalled memory, whenever the outcome is clear |
 
 Deletion is intentionally **not** an agent tool — it's a deliberate human action
-in the desktop app. All three tools embed via Gemini. Local mode requires
-`GEMINI_API_KEY`; remote mode uses the Gemdex Server owner's key.
+in the desktop app. All five tools embed via Gemini where embedding applies
+(`report_outcome` and `list_memories` don't embed — they read/write local
+state only). Local mode requires `GEMINI_API_KEY`; remote mode uses the Gemdex
+Server owner's key.
 
 ### Multimodal attachments
 
@@ -162,6 +172,24 @@ them to a text-only model returns a clear error.
 attachment is embedded into the shared space and runs its own similarity branch,
 fused with the text branch via Reciprocal Rank Fusion — so you can recall a
 memory from a screenshot, an audio clip, or a PDF as easily as from a phrase.
+
+### Outcome feedback
+
+`recall` is fire-and-forget by default — no signal about whether a memory
+actually helped ever flows back. `report_outcome(id, outcome, note?)` closes
+that loop: right after acting on a recalled memory, tell gemdex whether it
+`worked`, `failed` (its info was wrong or broken), or was `stale` (clearly
+outdated — rotated credentials, moved paths). Every `recall` hit then shows a
+track record (`recalled 7×, worked 3× (last: worked 2d ago)`, prefixed with
+`⚠` once it has failed or gone stale before) so you can judge trustworthiness
+at a glance.
+
+Stats live in a small per-client ledger (`~/.gemdex/stats.json` by default,
+override with `GEMDEX_STATS_PATH`) — never written into the memory rows
+themselves, and never shared across machines in v1. Track-record *display* is
+always on; actually changing recall **ranking** by trust is opt-in via
+`GEMDEX_TRUST_RANKING=true` (pure relevance ranking otherwise, exactly as
+before).
 
 ## How it works
 
@@ -182,6 +210,21 @@ memory from a screenshot, an audio clip, or a PDF as easily as from a phrase.
 
 This is the well-worn **parent-document retriever** ("small-to-big") pattern:
 sharp matching on long content, but the agent always gets the whole memory.
+
+### Save-time conflict detection
+
+Memory hygiene (below) finds duplicate/contradicted memories **after the
+fact** — weeks later, in a manual desktop scan. `save_memory` now checks **at
+the moment of save** instead: the new memory's vectors are already computed
+before insert, so checking for near-duplicates costs zero extra
+embedding/network calls — just one local ANN query plus a handful of filtered
+reads, reusing the exact same centroid-cosine math and default threshold
+(`0.90`) as hygiene clustering. When something similar is already stored, the
+`save_memory` response carries a `similar` field and a `⚠` advisory block
+naming the existing memory — advisory only, the save always succeeds. On by
+default; disable with `GEMDEX_SIMILAR_ON_SAVE=false` or loosen/tighten the bar
+with `GEMDEX_SIMILAR_THRESHOLD`. Local mode only in v1 — a BYOI remote save
+simply carries no `similar` field yet.
 
 ## The desktop app
 
@@ -320,7 +363,7 @@ console.log(hits[0].content); // the full memory, never a fragment
 | Package | Description |
 |---------|-------------|
 | [`gemdex-core`](packages/core) | Memory store (parent-document chunking), Gemini embedding client, embedded LanceDB hybrid retrieval |
-| [`gemdex-mcp`](packages/mcp) | MCP server (`save_memory`/`recall`/`update_memory`) + `gemdex serve` localhost sidecar |
+| [`gemdex-mcp`](packages/mcp) | MCP server (`save_memory`/`recall`/`update_memory`/`list_memories`/`report_outcome`) + `gemdex serve` localhost sidecar |
 | [`gemdex-server`](packages/server) | Self-hosted BYOI HTTP backend using Postgres/pgvector and file or S3-compatible blobs |
 | [`packages/app`](packages/app) | native SwiftUI macOS app to manage the memory layer |
 
@@ -341,6 +384,10 @@ console.log(hits[0].content); // the full memory, never a fragment
 | `GEMDEX_MODE` | no | `local` | Select the embedded `local` backend or a configured `remote` backend |
 | `GEMDEX_REMOTE_URL` | remote only | — | Gemdex Server root URL |
 | `GEMDEX_REMOTE_TOKEN` | remote only | — | Gemdex Server bearer token |
+| `GEMDEX_STATS_PATH` | no | `~/.gemdex/stats.json` | Where the `report_outcome` feedback ledger is stored |
+| `GEMDEX_TRUST_RANKING` | no | `false` | Set `true` to re-rank `recall` results by track record (worked/failed/stale); display of the track-record line stays on either way |
+| `GEMDEX_SIMILAR_ON_SAVE` | no | `true` | Set `false` to disable save-time similar-memory detection |
+| `GEMDEX_SIMILAR_THRESHOLD` | no | `0.90` | Centroid cosine-similarity bar for save-time detection (same scale as memory hygiene) |
 
 </details>
 
