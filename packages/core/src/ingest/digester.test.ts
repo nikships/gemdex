@@ -98,8 +98,8 @@ describe('memoryIdForSession', () => {
 describe('estimateCost', () => {
     it('computes standard and 50% batch pricing per model', () => {
         const estimates = estimateCost(1_000_000, 0);
-        const flash = estimates.find((estimate) => estimate.model === 'gemini-3.5-flash')!;
-        expect(flash.standardUsd).toBeCloseTo(DIGEST_MODELS['gemini-3.5-flash'].inputUsdPerMTok, 2);
+        const flash = estimates.find((estimate) => estimate.model === 'gemini-3.6-flash')!;
+        expect(flash.standardUsd).toBeCloseTo(DIGEST_MODELS['gemini-3.6-flash'].inputUsdPerMTok, 2);
         expect(flash.batchUsd).toBeCloseTo(flash.standardUsd / 2, 2);
         expect(estimates).toHaveLength(Object.keys(DIGEST_MODELS).length);
     });

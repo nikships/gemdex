@@ -3,7 +3,7 @@ import { ModelCostEstimate, ParsedSession, SessionDigest, SessionMeta } from './
 import { renderTranscript } from './transcript-parser';
 
 /** Default digest model — frontier-quality extraction. */
-export const DEFAULT_DIGEST_MODEL = 'gemini-3.5-flash';
+export const DEFAULT_DIGEST_MODEL = 'gemini-3.6-flash';
 
 export interface DigestModelInfo {
     /** USD per 1M input tokens (text), standard pricing. */
@@ -21,7 +21,7 @@ export const DIGEST_PRICING_AS_OF = '2026-06-10';
  * Batch API is 50% of these rates across the board.
  */
 export const DIGEST_MODELS: Record<string, DigestModelInfo> = {
-    'gemini-3.5-flash': {
+    'gemini-3.6-flash': {
         inputUsdPerMTok: 1.5,
         outputUsdPerMTok: 9.0,
         description: 'Best extraction quality (default)',
@@ -31,7 +31,7 @@ export const DIGEST_MODELS: Record<string, DigestModelInfo> = {
         outputUsdPerMTok: 3.0,
         description: 'Strong quality at lower cost',
     },
-    'gemini-3.1-flash-lite': {
+    'gemini-3.5-flash-lite': {
         inputUsdPerMTok: 0.25,
         outputUsdPerMTok: 1.5,
         description: 'Cost-efficient',
