@@ -18,7 +18,7 @@ import {
     ListToolsRequestSchema,
     CallToolRequestSchema
 } from "@modelcontextprotocol/sdk/types.js";
-import { MemoryBackend } from "gemdex-core";
+import { MemoryBackend, MemoryStatsStore } from "gemdex-core";
 
 import { createConfig, logConfigurationSummary, showHelpMessage, GemdexConfig } from "./config.js";
 import { createMemoryBackend } from "./memory.js";
@@ -42,6 +42,11 @@ media alongside the text. Each attachment is either a local file \`path\`
 (preferred — the server reads + encodes the bytes, so you don't emit base64) or
 inline base64 \`data\`. Requires the gemini-embedding-2 model. Either \`content\`
 or at least one attachment is required.
+
+If the response includes a "⚠ similar existing memories already stored" block,
+the store found near-duplicate/conflicting memories already there — read it and
+consolidate with \`update_memory\` (or confirm with the user which should win)
+rather than leaving both.
 `;
 
 const RECALL_DESCRIPTION = `
@@ -65,6 +70,13 @@ attachment bytes from the desktop sidecar at
 \`GET /memories/:id/attachments/:attachmentId\`. Pass \`detail: "summary"\` to
 get title + preview + score only (cheap to scan many hits), then re-run with
 \`detail: "full"\` (the default) for the complete content you need.
+
+When available, each hit also shows a "track record" line (recalled/worked/
+failed/stale counts from prior \`report_outcome\` calls) so you can judge how
+trustworthy this memory has been in practice — a \`⚠\` prefix means it has
+failed or gone stale before. Setting \`GEMDEX_TRUST_RANKING=true\` additionally
+re-ranks results by that track record (off by default; ranking stays pure
+relevance until you opt in).
 
 If a recalled memory includes a "Full transcript:" path (often a .jsonl session
 log) and the summary does not answer the user's question with enough detail,
@@ -109,6 +121,24 @@ text, leave out \`attachments\` to keep the prior media (pass \`attachments: []\
 to clear it). Each attachment is either a local file \`path\` (preferred) or
 inline base64 \`data\`. There is no delete via MCP — deletion is a human action
 in the desktop app.
+`;
+
+const REPORT_OUTCOME_DESCRIPTION = `
+Report how acting on a recalled memory went, so the memory layer learns which
+memories are trustworthy.
+
+🎯 **When to use**: right after you used a recalled memory and the outcome is
+clear — \`worked\` (followed it and it was correct), \`failed\` (its information
+was wrong or broken), \`stale\` (clearly outdated, e.g. rotated credentials or
+moved paths). One call per memory actually used; do not report memories you
+merely saw in results. This is meta-feedback on the memory layer itself and is
+the one gemdex tool you should call without being asked, whenever a clear
+outcome exists.
+
+Recorded locally in a per-client ledger keyed by memory id (not written back
+into the memory itself). With \`GEMDEX_TRUST_RANKING=true\` it also adjusts
+future \`recall\` ranking — proven memories rank higher, memories that have
+burned the agent rank lower.
 `;
 
 // JSON-schema fragment for the optional media array shared by save_memory /
@@ -160,7 +190,8 @@ class GemdexMemoryServer {
         );
 
         const store: MemoryBackend = createMemoryBackend(config);
-        this.handlers = new MemoryToolHandlers(store);
+        const statsStore = new MemoryStatsStore();
+        this.handlers = new MemoryToolHandlers(store, statsStore);
 
         this.setupTools();
     }
@@ -280,6 +311,29 @@ class GemdexMemoryServer {
                         required: [],
                     },
                 },
+                {
+                    name: MCP_TOOL_NAMES[4],
+                    description: REPORT_OUTCOME_DESCRIPTION,
+                    inputSchema: {
+                        type: "object",
+                        properties: {
+                            id: {
+                                type: "string",
+                                description: "The id of the memory you acted on (from a prior save_memory or recall result).",
+                            },
+                            outcome: {
+                                type: "string",
+                                enum: ["worked", "failed", "stale"],
+                                description: "'worked' — followed it and it was correct. 'failed' — its information was wrong or broken. 'stale' — clearly outdated (e.g. rotated credentials, moved paths).",
+                            },
+                            note: {
+                                type: "string",
+                                description: "Optional one-line note on what happened (e.g. \"notarytool flags changed; --wait no longer accepts --timeout\"). Capped at 500 characters.",
+                            },
+                        },
+                        required: ["id", "outcome"],
+                    },
+                },
             ],
         }));
 
@@ -294,6 +348,8 @@ class GemdexMemoryServer {
                     return await this.handlers.handleUpdateMemory(args);
                 case MCP_TOOL_NAMES[3]:
                     return await this.handlers.handleListMemories(args);
+                case MCP_TOOL_NAMES[4]:
+                    return await this.handlers.handleReportOutcome(args);
                 default:
                     throw new Error(`Unknown tool: ${name}`);
             }

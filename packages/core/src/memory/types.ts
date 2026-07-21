@@ -67,6 +67,26 @@ export interface MemoryRecallResult extends Memory {
     subScores?: HybridSubScores;
 }
 
+/**
+ * A near-duplicate/conflict candidate surfaced by save-time detection
+ * (`MemoryStore.save` → `findSimilarParents`). Uses the same centroid-cosine
+ * math and default threshold as memory hygiene clustering — one mental model
+ * for "similar" across the product.
+ */
+export interface SimilarMemoryRef {
+    id: string;
+    title: string;
+    /** Centroid cosine similarity in [0, 1] (hygiene semantics). */
+    similarity: number;
+    updatedAt: number;
+}
+
+/** `save()` result: the created memory plus advisory conflict candidates. */
+export interface SaveResult extends Memory {
+    /** Present only when detection ran and found candidates >= threshold. */
+    similar?: SimilarMemoryRef[];
+}
+
 export interface SaveMemoryInput {
     /** Overall caption / BM25 text. Optional when at least one attachment is supplied. */
     content?: string;

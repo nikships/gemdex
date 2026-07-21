@@ -34,7 +34,7 @@ export function Footer() {
                             <h6>Learn</h6>
                             <a href="#why">Why gemdex</a>
                             <a href="#how">How it works</a>
-                            <a href="#tools">The 3 tools</a>
+                            <a href="#tools">The MCP tools</a>
                             <a href="#quickstart">Quickstart</a>
                         </div>
                         <div className="foot-col">

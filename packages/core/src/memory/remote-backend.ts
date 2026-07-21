@@ -7,6 +7,7 @@ import {
     MemorySummary,
     MemoryAttachmentInput,
     SaveMemoryInput,
+    SaveResult,
     UpdateMemoryInput,
 } from './types';
 import type { MemoryBackend } from './backend';
@@ -98,8 +99,12 @@ export class RemoteMemoryBackend implements MemoryBackend {
         this.fetchImpl = options.fetch ?? fetch;
     }
 
-    async save(input: SaveMemoryInput): Promise<Memory> {
-        const response = await this.request<{ memory: Memory }>('/v1/memories', {
+    // Local-mode-only in v1 (see MemoryStore.findSimilarParents): the BYOI
+    // server does not run detection yet, so `similar` is simply absent from
+    // the response here — `SaveResult`'s `similar` field being optional makes
+    // that a type-compatible no-op rather than a wire-contract change.
+    async save(input: SaveMemoryInput): Promise<SaveResult> {
+        const response = await this.request<{ memory: SaveResult }>('/v1/memories', {
             method: 'POST',
             body: input,
         });

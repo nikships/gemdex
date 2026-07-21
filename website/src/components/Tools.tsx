@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { PencilIcon, SaveIcon, SearchIcon } from "./icons";
+import { CheckIcon, PencilIcon, SaveIcon, SearchIcon } from "./icons";
 
 interface Tool {
     icon: ReactNode;
@@ -22,7 +22,7 @@ const TOOLS: Tool[] = [
         ),
         returns: (
             <>
-                new <code>id</code> + resolved title
+                new <code>id</code> + resolved title (+ a similar-memory warning on a near-duplicate)
             </>
         ),
         when: <>you say remember / save.</>,
@@ -36,7 +36,7 @@ const TOOLS: Tool[] = [
                 <code>query</code> and/or <code>attachments</code>, optional <code>limit</code> (~10)
             </>
         ),
-        returns: "full memories ranked by relevance",
+        returns: "full memories ranked by relevance, each with a track record",
         when: <>&ldquo;check your memory layer&rdquo;.</>,
     },
     {
@@ -55,6 +55,18 @@ const TOOLS: Tool[] = [
         ),
         when: <>you revise a memory.</>,
     },
+    {
+        icon: <CheckIcon />,
+        name: "report_outcome",
+        lede: "Tells gemdex whether a recalled memory actually worked. Meta-feedback, not capture.",
+        input: (
+            <>
+                <code>id</code> + <code>outcome</code> (worked / failed / stale), optional <code>note</code>
+            </>
+        ),
+        returns: "confirmation + updated track record",
+        when: <>right after acting on a recall, when the outcome is clear.</>,
+    },
 ];
 
 export function Tools() {
@@ -64,7 +76,7 @@ export function Tools() {
                 <div className="sec-head reveal">
                     <div className="kicker">The MCP surface</div>
                     <h2>
-                        Three tools. <em>That's the whole API.</em>
+                        Four tools decide, one reports back. <em>That's the whole API.</em>
                     </h2>
                     <p>
                         Deletion is intentionally <b>not</b> an agent tool — it's a deliberate human action in the desktop

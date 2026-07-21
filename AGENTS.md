@@ -72,7 +72,13 @@ Two facts that explain most of the codebase:
 ## Cross-cutting mechanics (where to look)
 
 - **Save → recall pipeline** (chunking, attachments-as-rows, two RRF layers,
-  embed-before-delete): `gemdex-core` → [core/AGENTS.md](packages/core/AGENTS.md).
+  embed-before-delete, embed → **detect** (save-time similar-memory check) →
+  insert on the save path): `gemdex-core` → [core/AGENTS.md](packages/core/AGENTS.md).
+- **Outcome feedback loop** (`report_outcome` + `recall`'s track-record line
+  and opt-in trust re-ranking): a client-side ledger in `gemdex-core`
+  (`stats/memory-stats-store.ts`, `~/.gemdex/stats.json`), consumed entirely
+  from `gemdex-mcp` — zero `MemoryStore`/wire-contract changes, so it works
+  identically local and remote (BYOI). Stats are per-client in v1.
 - **Local vs remote** (per-process via `GEMDEX_MODE`; pools never merge; copy via
   `import-local-to-remote`): mcp + core.
 - **The shared store** lives at `~/.gemdex` (LanceDB at `~/.gemdex/lance`, blob
@@ -87,14 +93,17 @@ Two facts that explain most of the codebase:
 - **BYOI wire contract / compat floor** (`/v1`, bearer auth, `minClientVersion`):
   server + [docs/BYOI_REMOTE_MODE.md](docs/BYOI_REMOTE_MODE.md).
 
-## Four tools, no delete
+## Five tools, no delete
 
-The MCP surface is `save_memory`, `recall`, `update_memory`, and the read-only
+The MCP surface is `save_memory`, `recall`, `update_memory`, the read-only
 `list_memories` (browse summaries newest-first, optional substring filter — for
-orienting and getting exact ids; `recall` remains the relevance-ranked path).
-**There is no agent delete tool by design** — deletion is a deliberate human
-action in the desktop app (the sidecar/core `DELETE /memories/:id` route exists;
-the MCP tools deliberately don't expose it).
+orienting and getting exact ids; `recall` remains the relevance-ranked path),
+and `report_outcome` (record whether a recalled memory `worked`/`failed`/`stale`
+— the outcome feedback loop; per-client stats ledger, no LanceDB writes, opt-in
+trust-weighted re-ranking via `GEMDEX_TRUST_RANKING`). **There is no agent
+delete tool by design** — deletion is a deliberate human action in the desktop
+app (the sidecar/core `DELETE /memories/:id` route exists; the MCP tools
+deliberately don't expose it).
 
 ## Conventions (TS packages)
 

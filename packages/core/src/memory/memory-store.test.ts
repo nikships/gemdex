@@ -577,3 +577,165 @@ describe('MemoryStore (attachments)', () => {
         ).rejects.toThrow(/not found/i);
     });
 });
+
+/** Counts embedding calls so a test can prove detection costs zero extras. */
+class CountingEmbedding extends FakeEmbedding {
+    embedCalls = 0;
+    async embed(text: string): Promise<EmbeddingVector> {
+        this.embedCalls += 1;
+        return super.embed(text);
+    }
+    async embedBatch(texts: string[]): Promise<EmbeddingVector[]> {
+        this.embedCalls += 1;
+        return super.embedBatch(texts);
+    }
+}
+
+describe('MemoryStore (save-time similar-memory detection)', () => {
+    let tmpDir: string;
+    let store: MemoryStore;
+    const ENV_KEYS = ['GEMDEX_SIMILAR_ON_SAVE', 'GEMDEX_SIMILAR_THRESHOLD'] as const;
+    const savedEnv: Record<string, string | undefined> = {};
+
+    beforeEach(async () => {
+        for (const key of ENV_KEYS) savedEnv[key] = process.env[key];
+        tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'gemdex-similar-test-'));
+        const db = new LanceDBVectorDatabase({ uri: tmpDir });
+        store = new MemoryStore({ embedding: new FakeEmbedding(), vectorDatabase: db });
+    });
+
+    afterEach(async () => {
+        for (const key of ENV_KEYS) {
+            if (savedEnv[key] === undefined) delete process.env[key];
+            else process.env[key] = savedEnv[key];
+        }
+        await fs.rm(tmpDir, { recursive: true, force: true });
+    });
+
+    const NOTARIZE_A = 'Notarize builds with the gemdex signing identity and the xcrun notarytool submit command';
+    const NOTARIZE_B = 'Notarize builds with the gemdex signing identity and the xcrun notarytool submit tool';
+    const UNRELATED = 'The quick brown fox jumps over the lazy dog in the meadow near the river';
+
+    it('the first save into an empty store has no similar candidates', async () => {
+        const a = await store.save({ content: NOTARIZE_A, title: 'Notarization A' });
+        expect(a.similar).toBeUndefined();
+    });
+
+    it('a near-identical save surfaces the earlier memory as similar (>= 0.90)', async () => {
+        const a = await store.save({ content: NOTARIZE_A, title: 'Notarization A' });
+        const b = await store.save({ content: NOTARIZE_B, title: 'Notarization B' });
+
+        expect(b.similar).toBeDefined();
+        expect(b.similar).toHaveLength(1);
+        expect(b.similar![0].id).toBe(a.id);
+        expect(b.similar![0].title).toBe('Notarization A');
+        expect(b.similar![0].similarity).toBeGreaterThanOrEqual(0.90);
+        expect(b.similar![0].updatedAt).toBe(a.updatedAt);
+    });
+
+    it('distinct content has no similar candidates', async () => {
+        await store.save({ content: NOTARIZE_A, title: 'Notarization A' });
+        const c = await store.save({ content: UNRELATED, title: 'Unrelated' });
+        expect(c.similar).toBeUndefined();
+    });
+
+    it('GEMDEX_SIMILAR_ON_SAVE=false disables detection entirely', async () => {
+        process.env.GEMDEX_SIMILAR_ON_SAVE = 'false';
+        await store.save({ content: NOTARIZE_A, title: 'Notarization A' });
+        const b = await store.save({ content: NOTARIZE_B, title: 'Notarization B' });
+        expect(b.similar).toBeUndefined();
+    });
+
+    it('GEMDEX_SIMILAR_THRESHOLD loosens the match bar', async () => {
+        process.env.GEMDEX_SIMILAR_THRESHOLD = '0.3';
+        const a = await store.save({ content: NOTARIZE_A, title: 'Notarization A' });
+        // UNRELATED does not clear the default 0.90 bar, but does clear 0.3.
+        const c = await store.save({ content: UNRELATED, title: 'Unrelated' });
+        expect(c.similar).toBeDefined();
+        expect(c.similar![0].id).toBe(a.id);
+        expect(c.similar![0].similarity).toBeLessThan(0.90);
+    });
+
+    it('an invalid GEMDEX_SIMILAR_THRESHOLD fails fast with a clear error, but never breaks the save', async () => {
+        process.env.GEMDEX_SIMILAR_THRESHOLD = 'not-a-number';
+        // The save itself must still succeed — detection failure is advisory-only.
+        const a = await store.save({ content: NOTARIZE_A, title: 'Notarization A' });
+        expect(a.id).toBeTruthy();
+        expect(a.similar).toBeUndefined();
+    });
+
+    it('a threshold outside (0, 1] is rejected the same way (never breaks the save)', async () => {
+        process.env.GEMDEX_SIMILAR_THRESHOLD = '1.5';
+        const a = await store.save({ content: NOTARIZE_A, title: 'Notarization A' });
+        expect(a.id).toBeTruthy();
+        expect(a.similar).toBeUndefined();
+    });
+
+    it('a db.search failure during detection never fails the save', async () => {
+        await store.save({ content: NOTARIZE_A, title: 'Notarization A' });
+
+        // A second store over the SAME on-disk db whose `search` (the
+        // detection step's ANN query) always throws, simulating a local
+        // failure mid-detection. writeMemory's own collection plumbing
+        // (query/insert/hasCollection) is untouched.
+        const db = new LanceDBVectorDatabase({ uri: tmpDir });
+        let searchCallCount = 0;
+        db.search = async () => {
+            searchCallCount += 1;
+            throw new Error('simulated ANN failure');
+        };
+        const failingStore = new MemoryStore({ embedding: new FakeEmbedding(), vectorDatabase: db });
+
+        const b = await failingStore.save({ content: NOTARIZE_B, title: 'Notarization B' });
+        expect(b.id).toBeTruthy();
+        expect(b.similar).toBeUndefined();
+        expect(searchCallCount).toBeGreaterThan(0);
+    });
+
+    it('costs zero extra embedding calls (reuses the vectors save already computed)', async () => {
+        const counting = new CountingEmbedding();
+        const db = new LanceDBVectorDatabase({ uri: tmpDir });
+        const countingStore = new MemoryStore({ embedding: counting, vectorDatabase: db });
+
+        await countingStore.save({ content: NOTARIZE_A, title: 'Notarization A' });
+        const callsAfterFirstSave = counting.embedCalls;
+        expect(callsAfterFirstSave).toBeGreaterThan(0);
+
+        // The second save embeds its OWN content once (via embedBatch for its
+        // chunk(s)) and detection must add nothing on top of that.
+        await countingStore.save({ content: NOTARIZE_B, title: 'Notarization B' });
+        expect(counting.embedCalls).toBe(callsAfterFirstSave + 1);
+    });
+
+    it('update never reports similar candidates (detection is save-only)', async () => {
+        await store.save({ content: NOTARIZE_A, title: 'Notarization A' });
+        const b = await store.save({ content: NOTARIZE_B, title: 'Notarization B' });
+        expect(b.similar).toBeDefined();
+
+        // Updating B to be even MORE similar to A must not gain a `similar`
+        // field — update() returns a plain Memory, which has no such field.
+        const updated = await store.update(b.id, { content: NOTARIZE_A });
+        expect((updated as { similar?: unknown }).similar).toBeUndefined();
+    });
+
+    it('importRecords never reports similar candidates (detection is save-only)', async () => {
+        await store.save({ content: NOTARIZE_A, title: 'Notarization A' });
+        const { imported } = await store.importRecords([
+            {
+                id: 'imported-near-dup',
+                title: 'Imported near-dup',
+                content: NOTARIZE_B,
+                createdAt: Date.now(),
+                updatedAt: Date.now(),
+            },
+        ]);
+        expect(imported).toBe(1);
+        // importRecords' return type has no `similar` field at all — the type
+        // system already enforces this; this test documents the behavior.
+    });
+
+    it('a saved memory never reports itself as similar to itself', async () => {
+        const a = await store.save({ content: NOTARIZE_A, title: 'Notarization A' });
+        expect(a.similar).toBeUndefined();
+    });
+});

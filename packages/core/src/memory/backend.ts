@@ -8,6 +8,7 @@ import {
     MemorySummary,
     MemoryAttachmentInput,
     SaveMemoryInput,
+    SaveResult,
     UpdateMemoryInput,
 } from './types';
 
@@ -18,7 +19,7 @@ import {
  * chunking with full-parent recall results, and attachment reads by memory id.
  */
 export interface MemoryBackend {
-    save(input: SaveMemoryInput): Promise<Memory>;
+    save(input: SaveMemoryInput): Promise<SaveResult>;
     recall(query?: string, limit?: number, queryAttachments?: MemoryAttachmentInput[]): Promise<MemoryRecallResult[]>;
     update(id: string, input: UpdateMemoryInput): Promise<Memory>;
     updateAttachmentCaptions(id: string, captions: AttachmentCaptionUpdate[]): Promise<Memory>;
@@ -46,7 +47,7 @@ export class LocalMemoryBackend implements MemoryBackend {
         return this.store;
     }
 
-    save(input: SaveMemoryInput): Promise<Memory> {
+    save(input: SaveMemoryInput): Promise<SaveResult> {
         return this.store.save(input);
     }
 

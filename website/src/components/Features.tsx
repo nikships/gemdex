@@ -21,7 +21,9 @@ const FEATURES: Feature[] = [
         body: (
             <>
                 Explicit <code>save_memory</code> / <code>recall</code> / <code>update_memory</code>. No silent capture,
-                no background recall — it only acts when you point at it.
+                no background recall — it only acts when you point at it. The one exception is meta-feedback:
+                <code>report_outcome</code> lets the agent tell gemdex whether a recalled memory actually worked,
+                without you asking, so recall gets sharper over time.
             </>
         ),
     },
@@ -36,7 +38,8 @@ const FEATURES: Feature[] = [
         body: (
             <>
                 Hybrid semantic + BM25 over internal chunks — but recall always returns the{" "}
-                <b>full memory, never a fragment.</b>
+                <b>full memory, never a fragment.</b> Saving warns you about near-duplicates up front, so conflicts get
+                caught at the source instead of found weeks later.
             </>
         ),
     },

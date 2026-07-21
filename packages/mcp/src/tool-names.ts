@@ -3,4 +3,5 @@ export const MCP_TOOL_NAMES = [
     'recall',
     'update_memory',
     'list_memories',
+    'report_outcome',
 ] as const;
