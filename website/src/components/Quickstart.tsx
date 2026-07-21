@@ -1,17 +1,16 @@
 import { useState } from "react";
 import { CodeBlock } from "./CodeBlock";
 
-type TabKey = "plugin" | "manual" | "other" | "lib";
+type TabKey = "claude" | "other" | "lib";
 
 const TABS: { key: TabKey; label: string }[] = [
-    { key: "plugin", label: "Claude Code · plugin" },
-    { key: "manual", label: "Claude Code · manual" },
+    { key: "claude", label: "Claude Code" },
     { key: "other", label: "Cursor / Codex / others" },
     { key: "lib", label: "As a library" },
 ];
 
 export function Quickstart() {
-    const [tab, setTab] = useState<TabKey>("plugin");
+    const [tab, setTab] = useState<TabKey>("claude");
 
     return (
         <section
@@ -41,24 +40,7 @@ export function Quickstart() {
                         ))}
                     </div>
                     <div className="tab-body">
-                        {tab === "plugin" && (
-                            <div className="tab-panel active">
-                                <CodeBlock title="claude code" copyable>
-                                    <span className="c-cmt"># one-command plugin install — recommended</span>
-                                    {"\n"}
-                                    <span className="c-fn">/plugin</span> marketplace add anand-92/gemdex{"\n"}
-                                    <span className="c-fn">/plugin</span> install gemdex@gemdex
-                                </CodeBlock>
-                                <p className="note">
-                                    You'll be prompted for <code>GEMINI_API_KEY</code> — stored in your OS keychain. The
-                                    plugin ships the <code>gemdex</code> MCP server (runs via{" "}
-                                    <code>npx -y gemdex-mcp@latest</code>, no local checkout) and a <code>memory</code>{" "}
-                                    skill that nudges your agent to save / recall only when you explicitly point at
-                                    memory.
-                                </p>
-                            </div>
-                        )}
-                        {tab === "manual" && (
+                        {tab === "claude" && (
                             <div className="tab-panel active">
                                 <CodeBlock title="terminal" copyable>
                                     <span className="c-prompt">$</span> claude mcp add gemdex \{"\n"}
@@ -67,7 +49,8 @@ export function Quickstart() {
                                     {"    "}-- npx -y gemdex-mcp@latest
                                 </CodeBlock>
                                 <p className="note">
-                                    No plugin, no marketplace — just registers the MCP server directly with Claude Code.
+                                    Registers the MCP server directly with Claude Code — it runs via{" "}
+                                    <code>npx -y gemdex-mcp@latest</code>, so there's no local checkout to manage.
                                 </p>
                             </div>
                         )}

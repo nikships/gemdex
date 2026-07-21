@@ -67,8 +67,7 @@ Two facts that explain most of the codebase:
 | `packages/server` | `gemdex-server` | Self-hosted BYOI backend: thin `node:http` shell (`/v1`, auth, CORS, migrations) over Postgres/pgvector + file/S3 blobs, server-side embedding. | [server/AGENTS.md](packages/server/AGENTS.md) |
 | `packages/app` | — | Native SwiftUI macOS manage-only app; spawns the sidecar and is a thin HTTP client. Swift, not TS. | [app/AGENTS.md](packages/app/AGENTS.md) |
 
-`plugin/` is the Claude Code plugin (the `memory` skill + manifest). `docs/` holds
-the BYOI operations guide and the remote-mode wire contract.
+`docs/` holds the BYOI operations guide and the remote-mode wire contract.
 
 ## Cross-cutting mechanics (where to look)
 

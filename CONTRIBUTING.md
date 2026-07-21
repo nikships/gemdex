@@ -72,7 +72,6 @@ The monorepo is small — find the right layer before you change anything:
   `serve.ts`, the localhost HTTP sidecar that backs the desktop app.
 - `packages/app` — the native SwiftUI macOS desktop manager (Apple Silicon).
   No memory logic lives in the app.
-- `plugin/` — the Claude Code plugin (the `memory` skill + manifest).
 
 When adding behaviour, add a unit test next to the code it covers.
 

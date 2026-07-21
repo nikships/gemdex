@@ -65,23 +65,7 @@ There's **no setup step** for the store — LanceDB is embedded and persists at
 
 ### Wire Gemdex into your agent
 
-**Claude Code (one-command plugin install — recommended):**
-
-```bash
-/plugin marketplace add anand-92/gemdex
-/plugin install gemdex@gemdex
-```
-
-You'll be prompted for `GEMINI_API_KEY`. Sensitive values are stored in your OS
-keychain. The plugin ships:
-
-- the `gemdex` MCP server (no local checkout — runs via `npx -y gemdex-mcp@latest`), and
-- a `memory` skill that nudges Claude to save / recall / update **only when you
-  explicitly point at memory**.
-
-See [`plugin/README.md`](plugin/README.md) for the full layout.
-
-**Claude Code (manual, no plugin):**
+**Claude Code:**
 
 ```bash
 claude mcp add gemdex \
@@ -149,9 +133,6 @@ aren't in your toolset, the MCP isn't connected.
 
 **For Codex CLI, Cursor, Windsurf, Cline, Continue, Zed** — paste the same
 snippet into your client's root instructions file (conventionally `AGENTS.md`).
-
-> If you installed the Claude Code plugin, this nudge already ships as a bundled
-> `memory` skill — you can skip `CLAUDE.md` and it'll still work.
 
 ## The 3 MCP tools
 
