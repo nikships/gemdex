@@ -122,6 +122,29 @@ actor APIClient {
         throw APIError(status: http.statusCode, message: message, needsKey: needsKey)
     }
 
+    // MARK: - Local embedding settings
+
+    func embeddingStatus() async throws -> EmbeddingStatus {
+        let (data, _) = try await send(makeRequest("GET", "/settings/embedding"))
+        return try decode(EmbeddingStatus.self, from: data)
+    }
+
+    func installEmbedding() async throws -> EmbeddingStatus {
+        let (data, _) = try await send(makeRequest("POST", "/settings/embedding/install", body: Data("{}".utf8)))
+        return try decode(EmbeddingStatus.self, from: data)
+    }
+
+    func migrateEmbedding() async throws -> EmbeddingStatus {
+        let (data, _) = try await send(makeRequest("POST", "/settings/embedding/migrate", body: Data("{}".utf8)))
+        return try decode(EmbeddingStatus.self, from: data)
+    }
+
+    func setEmbeddingProvider(_ provider: String) async throws -> EmbeddingStatus {
+        let body = try JSONSerialization.data(withJSONObject: ["provider": provider])
+        let (data, _) = try await send(makeRequest("POST", "/settings/embedding/provider", body: body))
+        return try decode(EmbeddingStatus.self, from: data)
+    }
+
     // MARK: - Memories
 
     func listMemories() async throws -> [MemorySummary] {

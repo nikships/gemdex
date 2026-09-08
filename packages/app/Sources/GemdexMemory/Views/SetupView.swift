@@ -1,7 +1,6 @@
 import SwiftUI
 
-/// Blocking first-run and recovery screen. Local mode never reaches the manager
-/// until the sidecar proves the configured key with a real Gemini embedding call.
+/// First-run and recovery screen: choose verified Gemini, local MLX, or remote.
 struct SetupView: View {
     @EnvironmentObject var model: AppModel
 
@@ -9,6 +8,7 @@ struct SetupView: View {
         ScrollView {
             VStack(spacing: 24) {
                 header
+                ActivityRail()
                 GeminiReadinessAlert(
                     readiness: model.geminiReadiness,
                     detail: model.setupNotice
@@ -36,7 +36,7 @@ struct SetupView: View {
             } else {
                 Text("Gemdex Memory").font(.largeTitle.bold())
             }
-            Text("Gemdex stays locked until Gemini accepts a small embedding request. That keeps saves, search, import, and session ingestion from failing later without a clear reason.")
+            Text("Choose Gemini, install local MLX for key-free text embeddings, or connect a server. Media and legacy Gemini operations, chat-history ingestion, and hygiene analysis still require a verified Gemini key.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -47,8 +47,10 @@ struct SetupView: View {
     private var localCard: some View {
         SetupCard(
             title: "Use this Mac",
-            subtitle: "Validate Gemini, then store memories locally with LanceDB. The key is written only after Gemini accepts it."
+            subtitle: "Store memories locally with LanceDB. Use Gemini, or explicitly install MLX for local text embeddings without a key."
         ) {
+            Button("Set up local MLX (no key required)") { model.showSettings = true }
+                .brandPrimary()
             GeminiKeySetupPanel(primaryButtonTitle: "Validate & unlock Gemdex")
         }
     }
@@ -134,10 +136,10 @@ struct GeminiReadinessAlert: View {
 
     private var fallbackDetail: String {
         switch status {
-        case "checking": return "This usually takes a few seconds. Gemdex unlocks automatically when the embedding request succeeds."
+        case "checking": return "This usually takes a few seconds. Gemini features become available when validation succeeds; MLX text storage does not require this key."
         case "invalid": return "Enter a working key below. Nothing is written to ~/.gemdex/.env until Gemini accepts it."
-        case "unavailable": return "Check your network and retry, or enter a different key. Local work stays locked until validation succeeds."
-        default: return "Add a Gemini API key below. Gemdex tests it with a real embedding request before enabling local work."
+        case "unavailable": return "Check your network and retry, or enter a different key. Gemini features stay blocked; local MLX text storage can work without this key."
+        default: return "Add a key for Gemini embeddings, media, and ingestion, or set up local MLX for key-free text storage."
         }
     }
 }

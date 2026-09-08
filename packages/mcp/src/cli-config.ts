@@ -237,8 +237,15 @@ export class ClientConfigStore {
         for (const [name, value] of remaining) {
             lines.push(`${name}=${value}`);
         }
-        fs.writeFileSync(this.envPath, `${lines.join('\n')}\n`, { encoding: 'utf8', mode: 0o600 });
-        fs.chmodSync(this.envPath, 0o600);
+        // Readers see either the prior configuration or the complete new one.
+        const temporaryPath = `${this.envPath}.${process.pid}.tmp`;
+        try {
+            fs.writeFileSync(temporaryPath, `${lines.join('\n')}\n`, { encoding: 'utf8', mode: 0o600 });
+            fs.chmodSync(temporaryPath, 0o600);
+            fs.renameSync(temporaryPath, this.envPath);
+        } finally {
+            fs.rmSync(temporaryPath, { force: true });
+        }
     }
 
     private writeConfig(config: StoredClientConfig): void {

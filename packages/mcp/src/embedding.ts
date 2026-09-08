@@ -1,5 +1,25 @@
-import { GeminiEmbedding, envManager } from "gemdex-core";
+import { Embedding, EmbeddingContent, EmbeddingVector, GeminiEmbedding, envManager } from "gemdex-core";
 import { GemdexConfig } from "./config.js";
+
+/** Keeps stored Gemini rows readable without pretending cloud inference is available. */
+export class UnconfiguredGeminiEmbedding extends Embedding {
+    protected maxTokens = 8192;
+    constructor(private dimension = 3072) { super(); }
+    getDimension(): number { return this.dimension; }
+    getProvider(): string { return 'Gemini'; }
+    isMultimodal(): boolean { return true; }
+    async detectDimension(): Promise<number> { return this.dimension; }
+    async embed(_text: string): Promise<EmbeddingVector> {
+        throw new Error('Gemini is required to search existing Gemini memories or embed media. Run npx gemdex-mcp setup gemini. Local MLX text remains stored safely.');
+    }
+    async embedBatch(_texts: string[]): Promise<EmbeddingVector[]> {
+        await this.embed('');
+        return [];
+    }
+    async embedContentBatch(_contents: EmbeddingContent[]): Promise<EmbeddingVector[]> {
+        return this.embedBatch([]);
+    }
+}
 
 export function createEmbeddingInstance(config: GemdexConfig): GeminiEmbedding {
     if (!config.geminiApiKey) {

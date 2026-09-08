@@ -36,8 +36,24 @@ test, and style rules live in the root `AGENTS.md` — they are not repeated her
 | `utils/centroid.ts` | `normalizedCentroid`, `cosine`, `DEFAULT_HYGIENE_THRESHOLD=0.90` | Shared L2-normalized-centroid + cosine math and the default similarity threshold, used by **both** memory hygiene clustering and save-time similar-memory detection — one definition of "similar" for the whole product. |
 | `stats/memory-stats-store.ts` | `MemoryStatsStore`, `MemoryStats`, `MemoryOutcome` | Client-side outcome-feedback ledger (`~/.gemdex/stats.json` by default, `GEMDEX_STATS_PATH` override) for the `report_outcome` MCP tool: recall counts + worked/failed/stale tallies per memory id. Consumed entirely from `gemdex-mcp`; `MemoryStore`/`MemoryBackend` never touch it. |
 
-All rows for all memories live in **one global collection** (default table
-`memories`). Each stored row is *either* one text chunk *or* one attachment.
+By default rows live in `memories`. Local clients can additionally configure
+`MemoryStore.textEmbedding` and `textProvider` for a separate
+`memories_mlx_bge_m3_8bit` collection (1024 dimensions). Media always remains in
+the Gemini collection; metadata/read/update/delete/export/import cover both
+banks. Recall searches each nonempty bank in its own space and fuses whole
+parents; unavailable populated banks fail explicitly rather than disappearing.
+`migrateTextToMlx` embeds/upserts text before removing source text, preserving
+media rows and blobs byte-for-byte. LanceDB mutations take a cross-process
+writer lock before snapshots. Mixed-space hygiene is explicitly rejected;
+similarity operates within one space. There is no crash-atomic cross-table
+transaction: failed dual writes attempt rollback, and stale locks require
+stopping writers before manual removal. BYOI remains Gemini-only.
+
+`embedding/mlx-embedding.ts` and its runtime installer own managed local BGE-M3
+inference. Installation is explicit; normal inference never downloads tooling
+or model weights. `embedQuery` defaults to plain `embed`; BGE-M3 uses CLS pooling
+and normalization, without a query instruction. Each stored row is *either* one
+text chunk *or* one attachment.
 
 ## 1. Parent-document retrieval ("small-to-big")
 

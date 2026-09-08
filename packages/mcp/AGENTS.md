@@ -177,16 +177,35 @@ Invariants:
   into detection logic. Full ids are shown (not truncated) since the advisory
   text tells the agent to pass one straight into `update_memory`.
 
+## Local text providers and first-run setup
+
+`local-model.ts` owns shared CLI/sidecar install, provider persistence and text
+migration orchestration. `install` explicitly downloads the managed BGE-M3 MLX
+runtime and activates text MLX without migrating. `migrate-text` is separate;
+`embedding mlx|gemini` changes future text writes. `setup gemini` validates a
+hidden-prompt key before writing `0600` settings. Authenticated
+`/settings/embedding*` routes expose the same operations with async job polling.
+The Swift app's MLX text gate is independent of Gemini readiness; history
+digestion and media still require Gemini.
+
+MCP startup no longer constructs the backend. All six tools remain discoverable
+without configuration, return `onboarding.ts` setup choices before executing any
+handler, and re-read saved configuration on subsequent calls. The factory always
+knows both local banks so switch-back cannot hide historical MLX rows. A missing
+Gemini placeholder allows local MLX-only use but throws if cloud embeddings are
+actually needed; populated-bank recall failures are never silently omitted.
+
 ## Local vs remote is per-process
 
 `GEMDEX_MODE` (via `resolveMode` in `createConfig`) selects the backend in
 `createMemoryBackend`: `local` → `LocalMemoryBackend` over embedded LanceDB
 (`~/.gemdex/lance`), `remote` → `RemoteMemoryBackend` over HTTP to a self-hosted
-Gemdex Server. **The choice is fixed per process** — run two processes for two
-independent pools; the local and remote pools never merge.
+Gemdex Server. Each backend instance represents one pool; stdio re-resolves saved
+configuration per tool call, and sidecar mode changes replace its backend. The
+local and remote pools never merge.
 
-- **Remote mode needs no client `GEMINI_API_KEY`** — the server embeds. (Local
-  mode requires it; see the startup-vs-lazy gotcha below.)
+- **Remote mode needs no client `GEMINI_API_KEY`** — the server embeds. Local
+  MLX text also needs no key; local Gemini/media and digestion do.
 - **Named remotes** live in `~/.gemdex/config.json` (`{url, tokenEnvVar}` per
   name). **Tokens never go in that file** — they live in `~/.gemdex/.env`
   (`0600`, dir `0700`) under `GEMDEX_REMOTE_TOKEN_<NAME>` and are never printed.
@@ -263,7 +282,7 @@ loopback redirect. Consequences worth knowing:
 - **`RemoteSyncTarget` is an `IngestTarget`, not a `MemoryBackend`** — deliberately
   write-only, so the sync path cannot read or delete the host's memories. Don't
   "simplify" it by widening it to `MemoryBackend`.
-- **MCP local mode fails fast on a missing key; the sidecar boots into a repairable gate.** The stdio server builds the backend at startup, so `createEmbeddingInstance` throws `GEMINI_API_KEY is required` and the process exits non-zero. The sidecar starts its management routes, validates a saved key asynchronously, and serves `503 {needsKey:true}` for local data work until readiness is `valid`.
+- **Missing configuration is repairable.** MCP returns setup guidance for every tool instead of exiting. The sidecar validates Gemini asynchronously and gates Gemini-mode work; active MLX text does not require that key. The low-level Gemini factory still requires a key, but the local dual-bank factory supplies a throwing placeholder when MLX is active without one.
 - **History ingestion is permanently new-sessions-only.** The core manager runs only ledger-new files. Changed previously ingested sessions may appear in scan diagnostics but are never passed to standard or batch digestion; the sidecar ignores legacy `newOnly` request fields and the CLI exposes no override.
 - **Tool routing is positional**: `index.ts` switches on `MCP_TOOL_NAMES[0..5]`.
   Reordering `tool-names.ts` silently rewires the handlers. Adding a tool means

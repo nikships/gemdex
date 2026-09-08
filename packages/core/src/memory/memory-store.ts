@@ -111,6 +111,11 @@ export interface ParentVectorData {
 export interface MemoryStoreConfig {
     embedding: Embedding;
     vectorDatabase: VectorDatabase;
+    /** Optional local text space; media always uses embedding. */
+    textEmbedding?: Embedding;
+    textCollectionName?: string;
+    /** Evaluated once per write. Defaults to MLX when textEmbedding is supplied. */
+    textProvider?: () => 'mlx' | 'gemini';
     /** Override the single global table name. Defaults to `memories`. */
     collectionName?: string;
     /** Chunking parameters; sensible defaults applied when omitted. */
@@ -129,11 +134,20 @@ export class MemoryStore {
     private blobStore: BlobStore;
     private attachmentLimits: AttachmentLimits;
     private collectionReady?: Promise<void>;
+    private textEmbedding?: Embedding;
+    private textCollectionName: string;
+    private textProvider: () => 'mlx' | 'gemini';
 
     constructor(config: MemoryStoreConfig) {
         this.embedding = config.embedding;
         this.db = config.vectorDatabase;
         this.collectionName = config.collectionName ?? DEFAULT_COLLECTION;
+        this.textEmbedding = config.textEmbedding;
+        this.textCollectionName = config.textCollectionName ?? 'memories_mlx_bge_m3_8bit';
+        this.textProvider = config.textProvider ?? (() => config.textEmbedding ? 'mlx' : 'gemini');
+        if (this.textEmbedding && this.textCollectionName === this.collectionName) {
+            throw new Error('Text and Gemini collections must have different names');
+        }
         this.chunkOptions = config.chunkOptions ?? {};
         this.blobStore = config.blobStore ?? new FileBlobStore();
         this.attachmentLimits = config.attachmentLimits ?? DEFAULT_ATTACHMENT_LIMITS;
@@ -156,6 +170,35 @@ export class MemoryStore {
 
     private static newId(): string {
         return crypto.randomUUID();
+    }
+
+    private get banks(): string[] {
+        return this.textEmbedding ? [this.collectionName, this.textCollectionName] : [this.collectionName];
+    }
+
+    private withWriteLock<T>(operation: () => Promise<T>): Promise<T> {
+        return this.db.withMemoryWriteLock ? this.db.withMemoryWriteLock(operation) : operation();
+    }
+
+    private textBank(): { collection: string; embedding: Embedding } {
+        if (this.textProvider() === 'mlx') {
+            if (!this.textEmbedding) throw new Error('MLX text embedding is not configured');
+            return { collection: this.textCollectionName, embedding: this.textEmbedding };
+        }
+        return { collection: this.collectionName, embedding: this.embedding };
+    }
+
+    private async queryBanks(filter: string, fields: string[]): Promise<Record<string, any>[]> {
+        const rows: Record<string, any>[] = [];
+        for (const collection of this.banks) {
+            if (!await this.db.hasCollection(collection)) continue;
+            // Bulk operations must cover the entire bank, not silently stop at
+            // the old 100k-row browse cap (one parent may own many chunks).
+            for (const row of await this.db.query(collection, filter, fields)) {
+                rows.push({ ...row, bank: collection });
+            }
+        }
+        return rows;
     }
 
     private static chunkRowId(parentId: string, chunkIndex: number): string {
@@ -231,9 +274,18 @@ export class MemoryStore {
         return rows;
     }
 
-    private async embedChunks(chunks: string[]): Promise<EmbeddingVector[]> {
+    private async embedChunks(chunks: string[], embedding = this.embedding): Promise<EmbeddingVector[]> {
         if (chunks.length === 0) return [];
-        return this.embedding.embedContentBatch(chunks);
+        if (embedding === this.textEmbedding) {
+            // A large parent can contain thousands of chunks. Keep each local
+            // request bounded without imposing the worker's batch cap on parents.
+            const vectors: EmbeddingVector[] = [];
+            for (let offset = 0; offset < chunks.length; offset += 16) {
+                vectors.push(...await embedding.embedContentBatch(chunks.slice(offset, offset + 16)));
+            }
+            return vectors;
+        }
+        return embedding.embedContentBatch(chunks);
     }
 
     private async embedAttachments(attachments: ValidatedAttachment[]): Promise<EmbeddingVector[]> {
@@ -322,7 +374,8 @@ export class MemoryStore {
         attachmentsInput: MemoryAttachmentInput[],
         createdAt: number,
         updatedAt: number,
-    ): Promise<{ memory: Memory; chunkVectors: EmbeddingVector[]; attachmentVectors: EmbeddingVector[] }> {
+    ): Promise<{ memory: Memory; chunkVectors: EmbeddingVector[]; attachmentVectors: EmbeddingVector[]; textCollection: string }> {
+        const textBank = this.textBank();
         const text = content ?? '';
         const validated = attachmentsInput.length > 0
             ? await validateAttachments(attachmentsInput, this.attachmentLimits)
@@ -343,7 +396,6 @@ export class MemoryStore {
             throw new Error('Cannot persist an empty memory (no content and no attachments)');
         }
 
-        await this.ensureCollection();
         const title = MemoryStore.resolveTitle(explicitTitle, text, validated);
 
         // Embed FIRST — this is the failure-prone (network) step. Computing the
@@ -358,8 +410,12 @@ export class MemoryStore {
         if (chunks.length === 0 && embeddable.length === 0 && validated.length > 0) {
             chunks = [title];
         }
-        const chunkVectors = await this.embedChunks(chunks);
+        const chunkVectors = await this.embedChunks(chunks, textBank.embedding);
         const embeddableVectors = await this.embedAttachments(embeddable);
+        if (chunks.length > 0) {
+            await this.db.createHybridCollection(textBank.collection, textBank.embedding.getDimension(), 'Gemdex memory layer');
+        }
+        if (embeddable.length > 0) await this.ensureCollection();
         const vectorsByStoredIndex = new Map<number, EmbeddingVector>();
         let embeddableCursor = 0;
         for (let i = 0; i < validated.length; i++) {
@@ -371,11 +427,21 @@ export class MemoryStore {
         // actually exist (text chunks + embeddable media).
         const attachmentVectors = embeddableVectors;
 
-        // Embedding succeeded — only now is it safe to clear prior state for this id.
-        await this.deleteChunkRows(id);
-        await this.blobStore.deleteParent(id);
+        // Keep a rollback snapshot for a dual-bank write: neither table can
+        // transactionally commit the other table's rows or the blob store.
+        const previous = this.textEmbedding ? await this.queryBanks(
+            `relativePath == '${MemoryStore.escapeLiteral(id)}'`,
+            ['id', 'vector', 'content', 'relativePath', 'startLine', 'endLine', 'fileExtension', 'metadata'],
+        ) : [];
+        const previousMeta = previous.length ? this.rowToParentMeta(this.parseMetadata(previous[0].metadata)) : null;
+        const previousBlobs = await Promise.all((previousMeta?.attachments ?? []).map(async att => ({
+            id: att.id, bytes: await this.blobStore.get(att.blobRef),
+        })));
 
         try {
+            // Embedding succeeded — only now clear prior state.
+            await this.deleteChunkRows(id);
+            await this.blobStore.deleteParent(id);
             // Persist blob bytes so metadata can reference them (including non-embedded files).
             // Preserve caller-supplied attachment ids (e.g. "transcript") for idempotent re-import.
             const usedIds = new Set<string>();
@@ -401,12 +467,14 @@ export class MemoryStore {
 
             const meta: ParentMeta = { title, fullContent: text, createdAt, updatedAt, attachments: stored };
 
-            const rows = [
-                ...this.buildChunkRows(id, chunks, chunkVectors, meta),
-                ...this.buildAttachmentRows(id, stored, vectorsByStoredIndex, meta),
-            ];
-
-            await this.db.insertHybrid(this.collectionName, rows);
+            const textRows = this.buildChunkRows(id, chunks, chunkVectors, meta);
+            const mediaRows = this.buildAttachmentRows(id, stored, vectorsByStoredIndex, meta);
+            if (textBank.collection === this.collectionName) {
+                await this.db.insertHybrid(this.collectionName, [...textRows, ...mediaRows]);
+            } else {
+                if (textRows.length) await this.db.insertHybrid(textBank.collection, textRows);
+                if (mediaRows.length) await this.db.insertHybrid(this.collectionName, mediaRows);
+            }
 
             return {
                 memory: {
@@ -419,10 +487,21 @@ export class MemoryStore {
                 },
                 chunkVectors,
                 attachmentVectors,
+                textCollection: textBank.collection,
             };
         } catch (error) {
             // Don't leave orphan blobs behind if blob writes or the insert failed.
+            await this.deleteChunkRows(id).catch(() => undefined);
             await this.blobStore.deleteParent(id).catch(() => undefined);
+            for (const blob of previousBlobs) await this.blobStore.put(id, blob.id, blob.bytes);
+            for (const bank of this.banks) {
+                const documents = previous.filter(row => row.bank === bank).map(row => ({
+                    ...row,
+                    vector: Array.from(row.vector as Iterable<number>),
+                    metadata: this.parseMetadata(row.metadata),
+                } as VectorDocument));
+                if (documents.length) await this.db.insertHybrid(bank, documents);
+            }
             throw error;
         }
     }
@@ -439,6 +518,10 @@ export class MemoryStore {
      * any kind can never fail or delay-fail the save — see `findSimilarParents`.
      */
     async save(input: SaveMemoryInput): Promise<SaveResult> {
+        return this.withWriteLock(() => this.saveUnlocked(input));
+    }
+
+    private async saveUnlocked(input: SaveMemoryInput): Promise<SaveResult> {
         const content = input.content ?? '';
         const attachmentsInput = input.attachments ?? [];
         if (content.trim().length === 0 && attachmentsInput.length === 0) {
@@ -446,13 +529,22 @@ export class MemoryStore {
         }
         const id = MemoryStore.newId();
         const now = Date.now();
-        const { memory, chunkVectors, attachmentVectors } =
+        const { memory, chunkVectors, attachmentVectors, textCollection } =
             await this.writeMemory(id, content, input.title, attachmentsInput, now, now);
 
         let similar: SimilarMemoryRef[] = [];
         try {
-            const newVectors = [...chunkVectors, ...attachmentVectors].map((v) => v.vector);
-            similar = await this.findSimilarParents(newVectors, id);
+            if (textCollection === this.collectionName) {
+                similar = await this.findSimilarParents([...chunkVectors, ...attachmentVectors].map(v => v.vector), id);
+            } else {
+                const candidates = [
+                    ...await this.findSimilarParents(chunkVectors.map(v => v.vector), id, textCollection),
+                    ...await this.findSimilarParents(attachmentVectors.map(v => v.vector), id),
+                ];
+                similar = [...new Map(candidates.sort((a, b) => a.similarity - b.similarity)
+                    .map(candidate => [candidate.id, candidate])).values()]
+                    .sort((a, b) => b.similarity - a.similarity).slice(0, SIMILAR_MAX_RESULTS);
+            }
         } catch (error) {
             // Advisory only — never let detection failure taint a successful save.
             console.error('[MemoryStore] Save-time similar-memory detection failed:', error);
@@ -492,13 +584,14 @@ export class MemoryStore {
     private async findSimilarParents(
         newVectors: number[][],
         excludeId: string,
+        collection = this.collectionName,
     ): Promise<SimilarMemoryRef[]> {
         const enabled = (envManager.get('GEMDEX_SIMILAR_ON_SAVE') ?? 'true').toLowerCase() !== 'false';
         if (!enabled || newVectors.length === 0) return [];
 
         const threshold = MemoryStore.resolveSimilarThreshold();
 
-        const exists = await this.db.hasCollection(this.collectionName);
+        const exists = await this.db.hasCollection(collection);
         if (!exists) return [];
 
         const centroid = normalizedCentroid(newVectors);
@@ -506,7 +599,7 @@ export class MemoryStore {
         // Candidate discovery: the ANN score itself is only used to shortlist
         // parent ids, never as the reported similarity (metric-agnostic — the
         // exact score always comes from the centroid-vs-centroid rescoring below).
-        const annHits = await this.db.search(this.collectionName, centroid, { topK: SIMILAR_ANN_CANDIDATES });
+        const annHits = await this.db.search(collection, centroid, { topK: SIMILAR_ANN_CANDIDATES });
         const candidateIds: string[] = [];
         const seen = new Set<string>();
         for (const hit of annHits) {
@@ -526,7 +619,7 @@ export class MemoryStore {
         const scored = await Promise.all(candidateIds.map(async (parentId): Promise<SimilarMemoryRef | null> => {
             const filter = `relativePath == '${MemoryStore.escapeLiteral(parentId)}'`;
             const rows = await this.db.query(
-                this.collectionName,
+                collection,
                 filter,
                 ['vector', 'metadata'],
                 LIST_FETCH_LIMIT,
@@ -583,8 +676,12 @@ export class MemoryStore {
             );
         }
 
-        const exists = await this.db.hasCollection(this.collectionName);
-        if (!exists) return [];
+        const nonemptyBanks: string[] = [];
+        for (const bank of this.banks) {
+            if (await this.db.hasCollection(bank) &&
+                (await this.db.query(bank, '', ['id'], 1)).length > 0) nonemptyBanks.push(bank);
+        }
+        if (nonemptyBanks.length === 0) return [];
 
         // Over-fetch chunks so that after dedupe-by-parent we still have enough
         // distinct memories to satisfy `limit`.
@@ -592,7 +689,7 @@ export class MemoryStore {
 
         // Text-only fast path: preserve the exact prior behavior, including the
         // per-branch subScores that callers surface beneath each hit.
-        if (hasText && !hasAttachments) {
+        if (hasText && !hasAttachments && !this.textEmbedding) {
             const hits = await this.searchText(trimmed, chunkLimit);
             return this.resolveHitsToParents(hits, limit);
         }
@@ -600,9 +697,13 @@ export class MemoryStore {
         // Otherwise build one ranked list per query signal and fuse with RRF.
         const rankedLists: HybridSearchResult[][] = [];
         if (hasText) {
-            rankedLists.push(await this.searchText(trimmed, chunkLimit));
+            for (const bank of nonemptyBanks) {
+                const embedding = bank === this.collectionName ? this.embedding : this.textEmbedding!;
+                // A populated bank must not silently disappear when its provider fails.
+                rankedLists.push(await this.searchText(trimmed, chunkLimit, bank, embedding));
+            }
         }
-        if (validatedQuery.length > 0) {
+        if (validatedQuery.length > 0 && nonemptyBanks.includes(this.collectionName)) {
             const vectors = await this.embedAttachments(validatedQuery);
             for (const vec of vectors) {
                 const dense = await this.db.search(this.collectionName, vec.vector, { topK: chunkLimit });
@@ -610,24 +711,25 @@ export class MemoryStore {
             }
         }
 
-        const fused = MemoryStore.fuseByRrf(rankedLists);
+        const fused = MemoryStore.fuseByRrf(rankedLists, RECALL_RRF_K, !!this.textEmbedding);
         return this.resolveHitsToParents(fused, limit);
     }
 
     /** One text branch: hybrid (dense + BM25) when enabled, else dense-only. */
-    private async searchText(trimmed: string, chunkLimit: number): Promise<HybridSearchResult[]> {
-        const queryEmbedding = await this.embedding.embed(trimmed);
+    private async searchText(trimmed: string, chunkLimit: number,
+        collection = this.collectionName, embedding = this.embedding): Promise<HybridSearchResult[]> {
+        const queryEmbedding = await embedding.embedQuery(trimmed);
         if (this.getIsHybrid()) {
             const requests: HybridSearchRequest[] = [
                 { data: queryEmbedding.vector, anns_field: 'vector', param: {}, limit: chunkLimit },
                 { data: trimmed, anns_field: 'sparse_vector', param: {}, limit: chunkLimit },
             ];
-            return this.db.hybridSearch(this.collectionName, requests, {
+            return this.db.hybridSearch(collection, requests, {
                 rerank: { strategy: 'rrf', params: { k: RECALL_RRF_K } },
                 limit: chunkLimit,
             });
         }
-        const dense = await this.db.search(this.collectionName, queryEmbedding.vector, { topK: chunkLimit });
+        const dense = await this.db.search(collection, queryEmbedding.vector, { topK: chunkLimit });
         return dense.map((r) => ({ document: r.document, score: r.score }));
     }
 
@@ -637,13 +739,17 @@ export class MemoryStore {
      * rank), deduped at the row (`document.id`) level. Scale-free, so a dense
      * media branch and a fused text branch combine without score normalization.
      */
-    private static fuseByRrf(lists: HybridSearchResult[][], k = RECALL_RRF_K): HybridSearchResult[] {
+    private static fuseByRrf(lists: HybridSearchResult[][], k = RECALL_RRF_K, parents = false): HybridSearchResult[] {
         const byRow = new Map<string, HybridSearchResult>();
         for (const list of lists) {
-            list.forEach((hit, index) => {
-                const rowId = hit.document.id;
+            const seen = new Set<string>();
+            let rank = 0;
+            list.forEach((hit) => {
+                const rowId = parents ? hit.document.relativePath : hit.document.id;
                 if (!rowId) return;
-                const contribution = 1 / (k + index + 1);
+                if (seen.has(rowId)) return;
+                seen.add(rowId);
+                const contribution = 1 / (k + ++rank);
                 const existing = byRow.get(rowId);
                 if (existing) {
                     existing.score += contribution;
@@ -693,6 +799,10 @@ export class MemoryStore {
      * Throws if the id does not exist.
      */
     async update(id: string, input: UpdateMemoryInput): Promise<Memory> {
+        return this.withWriteLock(() => this.updateUnlocked(id, input));
+    }
+
+    private async updateUnlocked(id: string, input: UpdateMemoryInput): Promise<Memory> {
         const existing = await this.loadParentMeta(id);
         if (!existing) {
             throw new Error(`Memory not found: ${id}`);
@@ -726,16 +836,13 @@ export class MemoryStore {
      * exist, or if a supplied caption id matches no attachment.
      */
     async updateAttachmentCaptions(id: string, captions: AttachmentCaptionUpdate[]): Promise<Memory> {
-        const exists = await this.db.hasCollection(this.collectionName);
+        return this.withWriteLock(() => this.updateAttachmentCaptionsUnlocked(id, captions));
+    }
+
+    private async updateAttachmentCaptionsUnlocked(id: string, captions: AttachmentCaptionUpdate[]): Promise<Memory> {
         const filter = `relativePath == '${MemoryStore.escapeLiteral(id)}'`;
-        const rows = exists
-            ? await this.db.query(
-                this.collectionName,
-                filter,
-                ['id', 'vector', 'content', 'relativePath', 'startLine', 'endLine', 'fileExtension', 'metadata'],
-                LIST_FETCH_LIMIT,
-            )
-            : [];
+        const rows = await this.queryBanks(filter,
+            ['id', 'vector', 'content', 'relativePath', 'startLine', 'endLine', 'fileExtension', 'metadata']);
         if (rows.length === 0) {
             throw new Error(`Memory not found: ${id}`);
         }
@@ -776,7 +883,7 @@ export class MemoryStore {
             const vector = Array.isArray(row.vector)
                 ? (row.vector as number[])
                 : Array.from(row.vector as Iterable<number>);
-            const isAttachmentRow = rowId.includes('::att::');
+            const isAttachmentRow = rowId.startsWith(`${id}::att::`);
             // Attachment rows: BM25 text = new caption (resolved by the row's
             // attachment index, which buildAttachmentRows stores in startLine)
             // or the title. Chunk rows: preserve the stored chunk text verbatim.
@@ -795,9 +902,26 @@ export class MemoryStore {
             };
         });
 
-        const oldIds = rows.map((r) => r.id as string).filter(Boolean);
-        await this.db.delete(this.collectionName, oldIds);
-        await this.db.insertHybrid(this.collectionName, rebuilt);
+        try {
+            for (const bank of this.banks) {
+                const bankRows = rebuilt.filter((_, index) => rows[index].bank === bank);
+                if (!bankRows.length) continue;
+                await this.db.delete(bank, bankRows.map(row => row.id));
+                await this.db.insertHybrid(bank, bankRows);
+            }
+        } catch (error) {
+            // Restore every bank's original metadata if a later bank failed.
+            for (const bank of this.banks) {
+                const original = rows.filter(row => row.bank === bank).map(row => ({
+                    ...row, vector: Array.from(row.vector as Iterable<number>),
+                    metadata: this.parseMetadata(row.metadata),
+                } as VectorDocument));
+                if (!original.length) continue;
+                await this.db.delete(bank, original.map(row => row.id));
+                await this.db.insertHybrid(bank, original);
+            }
+            throw error;
+        }
 
         return {
             id,
@@ -844,29 +968,15 @@ export class MemoryStore {
 
     /** Load the shared parent metadata for an id from any one of its rows. */
     private async loadParentMeta(id: string): Promise<ParentMeta | null> {
-        const exists = await this.db.hasCollection(this.collectionName);
-        if (!exists) return null;
         const filter = `relativePath == '${MemoryStore.escapeLiteral(id)}'`;
-        const rows = await this.db.query(
-            this.collectionName,
-            filter,
-            ['relativePath', 'metadata', 'startLine'],
-            LIST_FETCH_LIMIT,
-        );
+        const rows = await this.queryBanks(filter, ['relativePath', 'metadata', 'startLine']);
         if (rows.length === 0) return null;
         return this.rowToParentMeta(this.parseMetadata(rows[0].metadata));
     }
 
     /** List all memories (sorted by updatedAt desc) for browsing. */
     async list(): Promise<MemorySummary[]> {
-        const exists = await this.db.hasCollection(this.collectionName);
-        if (!exists) return [];
-        const rows = await this.db.query(
-            this.collectionName,
-            '',
-            ['relativePath', 'metadata'],
-            LIST_FETCH_LIMIT,
-        );
+        const rows = await this.queryBanks('', ['relativePath', 'metadata']);
 
         const byParent = new Map<string, ParentMeta>();
         for (const row of rows) {
@@ -893,14 +1003,10 @@ export class MemoryStore {
      * calls — so hygiene clustering can reuse the vectors already paid for.
      */
     async listParentsWithVectors(): Promise<ParentVectorData[]> {
-        const exists = await this.db.hasCollection(this.collectionName);
-        if (!exists) return [];
-        const rows = await this.db.query(
-            this.collectionName,
-            '',
-            ['id', 'vector', 'relativePath', 'metadata'],
-            LIST_FETCH_LIMIT,
-        );
+        const rows = await this.queryBanks('', ['id', 'vector', 'relativePath', 'metadata']);
+        if (new Set(rows.map(row => row.bank)).size > 1) {
+            throw new Error('Hygiene requires a single embedding space; mixed Gemini/MLX banks cannot be clustered together');
+        }
 
         const byParent = new Map<string, ParentVectorData>();
         for (const row of rows) {
@@ -930,8 +1036,54 @@ export class MemoryStore {
 
     /** Delete a memory (all its chunk + attachment rows and its blobs). No-op if absent. */
     async delete(id: string): Promise<void> {
-        await this.deleteChunkRows(id);
-        await this.blobStore.deleteParent(id);
+        return this.withWriteLock(async () => {
+            await this.deleteChunkRows(id);
+            await this.blobStore.deleteParent(id);
+        });
+    }
+
+    /** Move only text rows. Destination commits before source deletion; reruns
+     * upsert stable ids, including after a failed source delete. No blob/media
+     * read, write or embedding is performed. Progress counts text parents. */
+    async migrateTextToMlx(onProgress?: (completed: number, total: number) => void): Promise<void> {
+        if (!this.db.withMemoryWriteLock) throw new Error('Text migration requires cross-process write locking');
+        return this.withWriteLock(() => this.migrateTextToMlxUnlocked(onProgress));
+    }
+
+    private async migrateTextToMlxUnlocked(onProgress?: (completed: number, total: number) => void): Promise<void> {
+        if (!this.textEmbedding) throw new Error('MLX text embedding is not configured');
+        if (!this.db.upsertHybrid) throw new Error('Text migration requires atomic vector upsert support');
+        const rows = await this.queryBanks('',
+            ['id', 'content', 'relativePath', 'startLine', 'endLine', 'fileExtension', 'metadata']);
+        const parents = new Map<string, Record<string, any>[]>();
+        for (const row of rows) {
+            const parentId = row.relativePath as string;
+            if ((row.id as string).startsWith(`${parentId}::att::`)) continue;
+            const parent = parents.get(parentId) ?? [];
+            parent.push(row);
+            parents.set(parentId, parent);
+        }
+        onProgress?.(0, parents.size);
+        let completed = 0;
+        for (const parent of parents.values()) {
+            const unique = [...new Map(parent.map(row => [row.id as string, row])).values()];
+            const vectors = await this.embedChunks(unique.map(row => row.content as string), this.textEmbedding);
+            const documents: VectorDocument[] = unique.map((row, index) => ({
+                id: row.id as string,
+                content: row.content as string,
+                vector: vectors[index].vector,
+                relativePath: row.relativePath as string,
+                startLine: Number(row.startLine),
+                endLine: Number(row.endLine),
+                fileExtension: row.fileExtension as string,
+                metadata: this.parseMetadata(row.metadata),
+            }));
+            await this.db.createHybridCollection(this.textCollectionName, this.textEmbedding.getDimension());
+            await this.db.upsertHybrid(this.textCollectionName, documents);
+            const legacyIds = parent.filter(row => row.bank === this.collectionName).map(row => row.id as string);
+            if (legacyIds.length) await this.db.delete(this.collectionName, legacyIds);
+            onProgress?.(++completed, parents.size);
+        }
     }
 
     /** Export all memories as portable records (sorted by updatedAt desc). */
@@ -963,7 +1115,10 @@ export class MemoryStore {
      * restore midway.
      */
     async importRecords(records: MemoryExportRecord[]): Promise<ImportRecordsResult> {
-        await this.ensureCollection();
+        return this.withWriteLock(() => this.importRecordsUnlocked(records));
+    }
+
+    private async importRecordsUnlocked(records: MemoryExportRecord[]): Promise<ImportRecordsResult> {
         let imported = 0;
         const errors: ImportRecordError[] = [];
         for (let index = 0; index < records.length; index++) {
@@ -1003,6 +1158,7 @@ export class MemoryStore {
             try {
                 const bytes = await this.blobStore.get(att.blobRef);
                 out.push({
+                    id: att.id,
                     mimeType: att.mimeType,
                     data: bytes.toString('base64'),
                     ...(att.caption && { caption: att.caption }),
@@ -1034,13 +1190,11 @@ export class MemoryStore {
     }
 
     private async deleteChunkRows(parentId: string): Promise<void> {
-        const exists = await this.db.hasCollection(this.collectionName);
-        if (!exists) return;
         const filter = `relativePath == '${MemoryStore.escapeLiteral(parentId)}'`;
-        const rows = await this.db.query(this.collectionName, filter, ['id'], LIST_FETCH_LIMIT);
-        const ids = rows.map((r) => r.id as string).filter(Boolean);
-        if (ids.length > 0) {
-            await this.db.delete(this.collectionName, ids);
+        const rows = await this.queryBanks(filter, ['id']);
+        for (const bank of this.banks) {
+            const ids = rows.filter(row => row.bank === bank).map(row => row.id as string);
+            if (ids.length) await this.db.delete(bank, ids);
         }
     }
 

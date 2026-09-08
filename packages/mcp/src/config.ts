@@ -19,6 +19,7 @@ export interface GemdexConfig {
     name: string;
     version: string;
     embeddingModel: string;
+    embeddingProvider?: 'gemini' | 'mlx';
     geminiApiKey?: string;
     geminiBaseUrl?: string;
     lancedbPath?: string;
@@ -36,11 +37,16 @@ export function getEmbeddingModel(getEnv: EnvGetter = defaultEnvGetter): string 
 
 export function createConfig(getEnv: EnvGetter = defaultEnvGetter): GemdexConfig {
     const mode = resolveMode(getEnv);
+    const embeddingProvider = getEnv('GEMDEX_EMBEDDING_PROVIDER') ?? 'gemini';
+    if (mode === 'local' && embeddingProvider !== 'gemini' && embeddingProvider !== 'mlx') {
+        throw new Error('GEMDEX_EMBEDDING_PROVIDER must be gemini or mlx.');
+    }
     const remoteConfig = mode === 'remote' ? loadRemoteConfig(getEnv) : null;
     return {
         name: getEnv('MCP_SERVER_NAME') || "Gemdex Memory MCP",
         version: getEnv('MCP_SERVER_VERSION') || PACKAGE_VERSION,
         embeddingModel: getEmbeddingModel(getEnv),
+        embeddingProvider: embeddingProvider === 'mlx' ? 'mlx' : 'gemini',
         geminiApiKey: getEnv('GEMINI_API_KEY'),
         geminiBaseUrl: getEnv('GEMINI_BASE_URL'),
         lancedbPath: getEnv('LANCEDB_PATH'),
@@ -59,7 +65,7 @@ export function logConfigurationSummary(config: GemdexConfig): void {
         console.log(`[MCP]   Embedding: managed by remote Gemdex Server`);
         return;
     }
-    console.log(`[MCP]   Embedding: Gemini / ${config.embeddingModel}`);
+    console.log(`[MCP]   Text embedding: ${config.embeddingProvider ?? 'gemini'}; media: Gemini / ${config.embeddingModel}`);
     console.log(`[MCP]   Gemini API Key: ${config.geminiApiKey ? '✅ Configured' : '❌ Missing'}`);
     if (config.geminiBaseUrl) console.log(`[MCP]   Gemini Base URL: ${config.geminiBaseUrl}`);
     console.log(`[MCP]   LanceDB Path: ${config.lancedbPath || '[default: ~/.gemdex/lance]'}`);
@@ -70,6 +76,13 @@ export function showHelpMessage(): void {
 Gemdex — memory layer for AI coding agents (Gemini embeddings + LanceDB)
 
 Usage:
+  npx gemdex-mcp setup gemini     Validate and securely save a Gemini key.
+  npx gemdex-mcp install          Install managed BGE-M3 MLX and activate local text
+                                   (Apple Silicon only; no migration).
+  npx gemdex-mcp migrate-text     Re-embed existing text into MLX; preserve media.
+  npx gemdex-mcp embedding mlx|gemini
+                                   Persist provider for future text writes.
+  npx gemdex-mcp status           Show setup/provider status without printing keys.
   npx gemdex-mcp@latest            Start the MCP server (stdio) exposing
                                    save_memory, recall, update_memory.
   npx gemdex serve [--port N]      Start the localhost HTTP sidecar that backs
@@ -107,7 +120,8 @@ Usage:
 
 Optional:
   GEMDEX_MODE             local (default) or remote.
-  GEMINI_API_KEY          Required in local mode for save/recall/update.
+  GEMINI_API_KEY          Required for Gemini text, media and history digestion.
+  GEMDEX_EMBEDDING_PROVIDER gemini (default) or mlx; prefer persistent CLI settings.
   EMBEDDING_MODEL         Gemini model name (default: gemini-embedding-2).
                           Supported: gemini-embedding-2, gemini-embedding-001.
   EMBEDDING_DIMENSION     Override the embedding output dimension.

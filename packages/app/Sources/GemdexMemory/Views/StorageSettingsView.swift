@@ -12,6 +12,8 @@ struct StorageSettingsView: View {
     @State private var status: String = ""
     @State private var statusIsError = false
     @State private var error: String?
+    @State private var confirmMigration = false
+    @State private var confirmInstall = false
 
     // Add/update remote form.
     @State private var formName = ""
@@ -29,6 +31,7 @@ struct StorageSettingsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     appearanceSection
+                    embeddingSection
                     geminiSection
                     modeChooser
                     remoteChooser
@@ -45,6 +48,71 @@ struct StorageSettingsView: View {
         .frame(maxWidth: isEmbedded ? 640 : .infinity, maxHeight: isEmbedded ? .infinity : nil)
         .background(isEmbedded ? nil : BrandBackdrop())
         .task { await refresh() }
+        .alert("Install local MLX embeddings?", isPresented: $confirmInstall) {
+            Button("Cancel", role: .cancel) {}
+            Button("Download & install") { Task { await model.changeEmbedding(install: true) } }
+        } message: {
+            Text("Download the MLX runtime and BGE-M3 model to this Mac and activate MLX for new text. Installation does not migrate existing memories. Keep Gemdex running until it finishes.")
+        }
+        .alert("Migrate existing text to MLX?", isPresented: $confirmMigration) {
+            Button("Cancel", role: .cancel) {}
+            Button("Migrate text") { Task { await model.changeEmbedding(migrate: true) } }
+        } message: {
+            Text("Re-embed existing text locally using MLX. This can take time; keep Gemdex running. Media and legacy Gemini operations still require a Gemini key. Nothing is migrated until you confirm.")
+        }
+    }
+
+    private var embeddingSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Local text embeddings").font(.headline)
+            Text("MLX runs BGE-M3 text embeddings on this Mac without a Gemini key. Media, legacy Gemini memories, chat-history digestion, and hygiene analysis still need a verified Gemini key. Installation activates MLX for new text; migration is a separate explicit action.")
+                .font(.caption).foregroundStyle(.secondary)
+            if model.backendIsRemote {
+                Text("Remote mode uses the server’s embedding provider. Local install, migration, and provider changes are unavailable; switch to Local first.")
+                    .font(.callout).foregroundStyle(.secondary)
+            } else {
+                if let state = model.embeddingStatus {
+                    Text("Model: \(state.model)").font(.caption).textSelection(.enabled)
+                    Text("Status: \(state.status)").font(.callout.bold())
+                    if let message = state.message {
+                        Text(message).font(.callout)
+                            .foregroundStyle(state.status == "error" ? Brand.terracotta : Color.secondary)
+                            .textSelection(.enabled)
+                    }
+                    if state.isRunning {
+                        if let total = state.total, total > 0 {
+                            ProgressView(value: Double(min(state.completed ?? 0, total)), total: Double(total))
+                            Text("\(state.completed ?? 0) / \(total)").font(.caption.monospacedDigit())
+                        } else {
+                            ProgressView().controlSize(.small)
+                        }
+                        Text("You can close this panel. Progress remains in Activity Center; keep the app running.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Toggle("Use MLX for local text embeddings", isOn: Binding(
+                        get: { model.embeddingStatus?.provider == "mlx" },
+                        set: { enabled in Task { await model.changeEmbedding(provider: enabled ? "mlx" : "gemini") } }
+                    ))
+                    .disabled(model.embeddingIsBusy || (!state.installed && state.provider != "mlx"))
+                    Text("Turning this off requires a working Gemini key. Switching does not migrate existing memories.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    HStack {
+                        Button(state.status == "error" ? "Retry installation…" : "Install MLX…") { confirmInstall = true }
+                            .disabled(model.embeddingIsBusy || (state.installed && state.status != "error"))
+                        Button(state.status == "error" ? "Retry text migration…" : "Migrate existing text…") { confirmMigration = true }
+                            .disabled(model.embeddingIsBusy || !state.installed)
+                    }
+                } else {
+                    Text("Load local embedding status to see installation options.").font(.callout)
+                }
+                if model.embeddingRequestPending { ProgressView().controlSize(.small) }
+                if let error = model.embeddingError {
+                    Text(error).font(.callout).foregroundStyle(Brand.terracotta).textSelection(.enabled)
+                }
+                Button("Refresh status") { Task { await model.refreshEmbeddingStatus() } }
+                    .disabled(model.embeddingRequestPending)
+            }
+        }
     }
 
     private var header: some View {
@@ -102,7 +170,7 @@ struct StorageSettingsView: View {
 
     private var modeChooser: some View {
         HStack(spacing: 12) {
-            ModeCard(title: "Local", subtitle: "Gemini + LanceDB on this machine",
+            ModeCard(title: "Local", subtitle: "Gemini or MLX + LanceDB on this machine",
                      active: settings?.mode == "local") {
                 Task { await apply(mode: "local") }
             }
@@ -198,6 +266,7 @@ struct StorageSettingsView: View {
     private func refresh() async {
         await model.refreshSettings()
         await model.refreshConfig()
+        await model.refreshEmbeddingStatus()
         if selectedRemote.isEmpty {
             selectedRemote = model.config?.activeRemote?.name ?? remotes.first?.name ?? ""
         }

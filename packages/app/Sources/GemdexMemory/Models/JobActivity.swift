@@ -6,6 +6,7 @@ enum JobKind: String, Equatable, CaseIterable, Sendable {
     case hygiene
     case importFile
     case migration
+    case embedding
 
     var systemImage: String {
         switch self {
@@ -13,6 +14,7 @@ enum JobKind: String, Equatable, CaseIterable, Sendable {
         case .hygiene: return "sparkles"
         case .importFile: return "square.and.arrow.down"
         case .migration: return "arrow.triangle.2.circlepath"
+        case .embedding: return "cpu"
         }
     }
 
@@ -22,6 +24,7 @@ enum JobKind: String, Equatable, CaseIterable, Sendable {
         case .hygiene: return "Hygiene"
         case .importFile: return "Import"
         case .migration: return "Local → remote"
+        case .embedding: return "Local embeddings"
         }
     }
 }

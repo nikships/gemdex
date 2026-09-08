@@ -85,6 +85,24 @@ export class LanceDBVectorDatabase implements VectorDatabase {
         return this.connectionPromise;
     }
 
+    async withMemoryWriteLock<T>(operation: () => Promise<T>): Promise<T> {
+        const lock = path.join(this.config.uri!, '.gemdex-memory-write.lock');
+        try {
+            await fs.promises.mkdir(lock);
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+            throw new Error(`Memory store is busy with another write or migration. Retry after it finishes. ` +
+                `If a writer crashed, stop all Gemdex processes before removing ${lock}.`);
+        }
+        // Never steal an aged lock: model downloads/embedding can take arbitrarily
+        // long. A crash requires explicit recovery rather than risking two writers.
+        try {
+            return await operation();
+        } finally {
+            await fs.promises.rmdir(lock);
+        }
+    }
+
     private buildSchema(dimension: number): Schema {
         return new Schema([
             new Field('id', new Utf8(), false),
@@ -212,6 +230,14 @@ export class LanceDBVectorDatabase implements VectorDatabase {
         // Storage is identical for dense and hybrid collections; the FTS index
         // is built lazily on first hybrid search, so inserts share one path.
         await this.insert(collectionName, documents);
+    }
+
+    async upsertHybrid(collectionName: string, documents: VectorDocument[]): Promise<void> {
+        if (documents.length === 0) return;
+        const db = await this.connection();
+        const table = await db.openTable(collectionName);
+        await table.mergeInsert('id').whenMatchedUpdateAll().whenNotMatchedInsertAll()
+            .execute(documents.map(doc => this.documentToRow(doc)));
     }
 
     async search(collectionName: string, queryVector: number[], options?: SearchOptions): Promise<VectorSearchResult[]> {

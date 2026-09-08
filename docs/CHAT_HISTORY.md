@@ -26,6 +26,13 @@ That single fact is why the paths compose instead of colliding:
 All paths also share the same cleaning and the same digest prompt. The digest
 text is embedded; the transcript body is **not**.
 
+With local MLX enabled, local `ingest-history` writes digest text into the MLX
+bank through the same `MemoryStore` import path; transcript `file` blobs stay
+non-embedded and readable without Gemini. Digestion itself still uses Gemini
+and needs a key (`packages/mcp/src/cli.ts`, `serve.ts`). `migrate-text` moves only
+stored text rows, never re-digests sessions or embeds transcript blobs. The
+deterministic ids, ledger, remote sync, and new-sessions-only rules are unchanged.
+
 Ingestion is **new-sessions-only**. A session that was already ingested is never
 reprocessed, even if its transcript later changes.
 

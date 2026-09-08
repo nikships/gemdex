@@ -158,6 +158,7 @@ private struct ActivityRow: View {
         case .hygiene: return Brand.sage
         case .importFile: return Brand.gold
         case .migration: return Brand.sage
+        case .embedding: return Brand.sage
         }
     }
 
@@ -178,7 +179,7 @@ private struct ActivityRow: View {
             return "Stop analysis. Partial findings are kept so you can review what finished."
         case .importFile:
             return "Stop after the current batch. Already-imported memories stay."
-        case .migration:
+        case .migration, .embedding:
             return "This job cannot be cancelled mid-flight."
         }
     }

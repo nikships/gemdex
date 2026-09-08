@@ -64,6 +64,11 @@ export abstract class Embedding {
      */
     abstract embed(text: string): Promise<EmbeddingVector>;
 
+    /** Retrieval query embedding; providers may apply a query-only instruction. */
+    embedQuery(text: string): Promise<EmbeddingVector> {
+        return this.embed(text);
+    }
+
     /**
      * Generate text embedding vectors in batch
      * @param texts Text array
