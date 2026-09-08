@@ -48,6 +48,10 @@ export class LocalMemoryBackend implements MemoryBackend {
         return this.store;
     }
 
+    migrateTextToMlx(onProgress?: (completed: number, total: number) => void): Promise<void> {
+        return this.store.migrateTextToMlx(onProgress);
+    }
+
     save(input: SaveMemoryInput): Promise<SaveResult> {
         return this.store.save(input);
     }

@@ -115,6 +115,12 @@ export interface VectorDatabase {
      */
     insertHybrid(collectionName: string, documents: VectorDocument[]): Promise<void>;
 
+    /** Atomic per-table upsert by row id, required for local text migration. */
+    upsertHybrid?(collectionName: string, documents: VectorDocument[]): Promise<void>;
+
+    /** Cross-process exclusion for multi-table memory mutations, when local. */
+    withMemoryWriteLock?<T>(operation: () => Promise<T>): Promise<T>;
+
     /**
      * Search similar vectors
      * @param collectionName Collection name

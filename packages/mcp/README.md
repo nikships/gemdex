@@ -8,10 +8,32 @@ Part of [Gemdex](https://github.com/anand-92/gemdex).
 ## Install for Claude Code
 
 ```bash
-claude mcp add gemdex \
-  -e GEMINI_API_KEY=your-key \
-  -- npx -y gemdex-mcp@latest
+claude mcp add gemdex -- npx -y gemdex-mcp@latest
 ```
+
+All six tools return setup guidance until you choose a backend. Ask Claude to
+help choose, then run one command on your machine:
+
+- `npx gemdex-mcp setup gemini` — hidden key prompt, validated before persistence.
+- `npx gemdex-mcp install` — Apple Silicon only: installs managed Python/MLX and
+  pinned `mlx-community/bge-m3-mlx-8bit`, then activates local text embeddings.
+  Requires macOS 14+ and native arm64 Node (not Rosetta).
+  No preinstalled Python, uv, Homebrew, Hugging Face tooling or compiler needed.
+- `npx gemdex-mcp init-remote home https://memory.example.com` — connect an
+  existing server, with a hidden bearer-token prompt.
+
+Install needs network access and **does not migrate existing memories**. Use
+`npx gemdex-mcp migrate-text` separately to move text into a new 1024-dimensional
+bank, with rerunnable progress. Media/attachment rows stay on Gemini. Recall
+searches both banks; it reports a Gemini failure rather than silently hiding
+legacy/media memories. New MLX-only text works offline without a Gemini key.
+
+Use `npx gemdex-mcp embedding gemini` or `embedding mlx` to switch future text
+writes, and `npx gemdex-mcp status` to inspect configuration. Settings are saved
+under `~/.gemdex` and shared with the Swift app's **Storage & Gemini** controls.
+Remove conflicting launch environment overrides before switching. Retry the tool
+after setup; reconnect via Claude Code `/mcp` if needed. History digestion and
+media still need Gemini; BYOI continues to embed server-side unchanged.
 
 No Docker, no daemon. Memories live at `~/.gemdex/lance` by default.
 

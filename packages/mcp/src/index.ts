@@ -26,6 +26,8 @@ import { MemoryToolHandlers } from "./handlers.js";
 import { runServe } from "./serve.js";
 import { MCP_TOOL_NAMES } from "./tool-names.js";
 import { runCli } from "./cli.js";
+import { ClientConfigStore } from "./cli-config.js";
+import { SETUP_GUIDANCE } from "./onboarding.js";
 
 const SAVE_MEMORY_DESCRIPTION = `
 Persist a new memory to the user's global, durable memory layer.
@@ -39,7 +41,8 @@ without waiting for permission. Explicit user requests ("remember that…", "sav
 this") are just one trigger among many. Keep memories to durable, reusable facts
 — skip one-off trivia and anything easily re-derived from the current context.
 
-Behavior: the content is chunked, embedded via Gemini, and stored globally
+Behavior: the content is chunked, embedded via the selected text provider
+(Gemini or local MLX), and stored globally
 (searchable from every repo and session). Returns the new memory id.
 
 Multimodal: optionally pass \`attachments\` (image/audio/video/PDF) to embed
@@ -188,17 +191,14 @@ const ATTACHMENTS_SCHEMA = {
 
 class GemdexMemoryServer {
     private server: Server;
-    private handlers: MemoryToolHandlers;
+    private handlers?: MemoryToolHandlers;
+    private configSignature?: string;
 
     constructor(config: GemdexConfig) {
         this.server = new Server(
             { name: config.name, version: config.version },
             { capabilities: { tools: {} } },
         );
-
-        const store: MemoryBackend = createMemoryBackend(config);
-        const statsStore = new MemoryStatsStore();
-        this.handlers = new MemoryToolHandlers(store, statsStore);
 
         this.setupTools();
     }
@@ -349,6 +349,21 @@ class GemdexMemoryServer {
 
         this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             const { name, arguments: args } = request.params;
+            if (!MCP_TOOL_NAMES.some((tool) => tool === name)) throw new Error(`Unknown tool: ${name}`);
+            // Configuration is repairable while Claude Code remains connected.
+            // Resolve before every tool, including metadata/feedback tools.
+            try {
+                const configStore = new ClientConfigStore();
+                const config = createConfig((key) => configStore.getEnv(key));
+                const signature = JSON.stringify(config);
+                if (!this.handlers || signature !== this.configSignature) {
+                    const store: MemoryBackend = createMemoryBackend(config);
+                    this.handlers = new MemoryToolHandlers(store, new MemoryStatsStore());
+                    this.configSignature = signature;
+                }
+            } catch {
+                return { content: [{ type: 'text', text: SETUP_GUIDANCE }], isError: true };
+            }
             switch (name) {
                 case MCP_TOOL_NAMES[0]:
                     return await this.handlers.handleSaveMemory(args);
@@ -397,8 +412,14 @@ async function main() {
         return;
     }
 
-    const config = createConfig();
-    logConfigurationSummary(config);
+    let config: GemdexConfig;
+    try {
+        config = createConfig();
+        logConfigurationSummary(config);
+    } catch {
+        // Keep discovery and setup guidance available for incomplete remotes too.
+        config = createConfig(() => undefined);
+    }
 
     const server = new GemdexMemoryServer(config);
     await server.start();

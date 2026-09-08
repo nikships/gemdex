@@ -103,9 +103,10 @@ set: `GET /hygiene/report`, `POST /hygiene/scan`, `POST /hygiene/start`,
 
 `GET /config` carries an explicit Gemini readiness state (`missing`, `checking`,
 `valid`, `invalid`, or `unavailable`). In local mode,
-`AppModel.syncConfigGate()` keeps the manager unmounted until readiness is
-`valid`; missing/rejected/unverifiable keys route to `SetupView` with a prominent
-red blocking alert. `POST /config` validates a candidate with a real embedding
+`AppModel.syncConfigGate()` keeps Gemini storage unmounted until readiness is
+`valid`; configured local MLX text storage bypasses that Gemini gate. Missing,
+rejected, or unverifiable keys still block Gemini-only operations.
+`POST /config` validates a candidate with a real embedding
 request **before** persistence, and `POST /config/validate` retries a saved key.
 
 `SetupView` offers two cards: **Use this Mac** validates and persists
@@ -113,6 +114,21 @@ request **before** persistence, and `POST /config/validate` retries a saved key.
 `StorageSettingsView`. Remote mode can mount the manager without a local key,
 but `MainView` keeps a red ingestion warning visible and `IngestView` disables
 scan/start until the local Gemini readiness state is `valid`.
+
+### Local MLX settings
+
+The existing **Storage & Gemini** panel exposes `GET /settings/embedding`,
+explicit `POST /settings/embedding/install` and `/migrate` jobs, and
+`POST /settings/embedding/provider`. Installation and text migration each require
+confirmation; switching providers does neither implicitly. All use the existing
+tokened API client. Remote mode hides/disallows local operations.
+
+`AppModel` owns status, errors, request exclusion, and Activity Center polling,
+including reconciliation after an ambiguous POST response. Closing the panel
+does not stop polling; the app must remain running. Setup links directly to
+these controls without requiring a key and shows the activity rail. MLX is
+text-only: media, legacy Gemini operations, ingestion, and hygiene still need
+Gemini readiness; a rejected Gemini key does not lock working MLX storage.
 
 ## Remote / BYOI mode (`StorageSettingsView`)
 
@@ -163,8 +179,9 @@ binary directly (not `open`) against a local sidecar build with
   (`AppModel.runSearch` → `searchState`), listing the parent-document hybrid
   ranking. Editing or clearing the query returns to the local title filter.
 - The sidecar child is killed on app quit and must never outlive the app.
-- A network install happens **only** through the explicit
-  `bootstrap(install: true)` path; every other mode is offline/probe-only.
+- Sidecar bootstrap downloads happen **only** through explicit
+  `bootstrap(install: true)`; MLX runtime/model downloads separately require the
+  confirmed Storage & Gemini install action. Neither happens silently.
 - Sparkle/updater code is gated behind `#if SPARKLE_ENABLED`; dev/CI builds need
   no Sparkle framework.
 - Release DMGs bundle their own Node runtime + sidecar under

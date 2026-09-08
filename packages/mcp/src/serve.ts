@@ -14,6 +14,7 @@ import {
     MemoryStore,
     RemoteMemoryBackend,
     envManager,
+    getMlxStatus,
 } from "gemdex-core";
 import {
     DIGEST_MODELS,
@@ -34,6 +35,7 @@ import { createConfig, GemdexConfig } from "./config.js";
 import { errorMessage } from "./errors.js";
 import { createEmbeddingInstance } from "./embedding.js";
 import { createMemoryBackend } from "./memory.js";
+import { chooseTextProvider, installLocalModel, localModelStatus, LocalModelStatus, migrateLocalText } from './local-model.js';
 
 /** Read a string field from a parsed JSON body, trimmed; '' when absent or non-string. */
 function trimmedString(value: unknown): string {
@@ -82,13 +84,15 @@ export interface ServeContext {
     geminiValidation?: Promise<void>;
     /** Injectable validation probe for tests. */
     validateGeminiKey?: (config: GemdexConfig) => Promise<void>;
+    localModelJob?: LocalModelStatus;
 }
 
 function buildStore(
     config: GemdexConfig,
     createBackend: (config: GemdexConfig) => MemoryBackend = createMemoryBackend,
 ): MemoryBackend | null {
-    if (config.mode === 'local' && !config.geminiApiKey) return null;
+    if (config.mode === 'local' && !config.geminiApiKey && config.embeddingProvider !== 'mlx') return null;
+    if (config.mode === 'local' && config.embeddingProvider === 'mlx' && !getMlxStatus().installed) return null;
     return createBackend(config);
 }
 
@@ -227,7 +231,7 @@ function geminiIsReady(ctx: ServeContext): boolean {
 
 /** Persist a validated key, expose it to this process, and rebuild the local store. */
 function configureApiKey(ctx: ServeContext, apiKey: string, readiness: GeminiReadiness): void {
-    envManager.set('GEMINI_API_KEY', apiKey);
+    clientConfigStore(ctx).setEnv('GEMINI_API_KEY', apiKey);
     process.env['GEMINI_API_KEY'] = apiKey;
     ctx.config = {
         ...ctx.config,
@@ -251,6 +255,7 @@ interface DesktopRemoteSummary extends StoredRemote {
 
 interface DesktopSettingsSummary {
     mode: 'local' | 'remote';
+    embeddingProvider: 'mlx' | 'gemini';
     activeRemote?: string;
     configured: boolean;
     localConfigured: boolean;
@@ -261,6 +266,7 @@ interface DesktopSettingsSummary {
 interface DesktopConfigSummary {
     configured: boolean;
     mode: 'local' | 'remote';
+    embeddingProvider: 'mlx' | 'gemini';
     needsKey: boolean;
     gemini: Omit<GeminiReadiness, 'keyFingerprint'>;
     activeRemote?: Pick<DesktopRemoteSummary, 'name' | 'url' | 'hasToken'>;
@@ -311,13 +317,14 @@ function settingsSummary(ctx: ServeContext): DesktopSettingsSummary {
     const configStore = clientConfigStore(ctx);
     const gemini = publicGeminiReadiness(ctx);
     const configured = ctx.config.mode === 'local'
-        ? ctx.store !== null && gemini.status === 'valid'
+        ? ctx.store !== null && (ctx.config.embeddingProvider === 'mlx' || gemini.status === 'valid')
         : ctx.store !== null;
     return {
         mode: ctx.config.mode,
+        embeddingProvider: ctx.config.embeddingProvider ?? 'gemini',
         ...(ctx.config.mode === 'remote' && ctx.config.remoteName && { activeRemote: ctx.config.remoteName }),
         configured,
-        localConfigured: gemini.status === 'valid',
+        localConfigured: ctx.config.embeddingProvider === 'mlx' || gemini.status === 'valid',
         gemini,
         remotes: configStore.list().map((remote) => ({
             ...remote,
@@ -345,12 +352,13 @@ function configSummary(ctx: ServeContext): DesktopConfigSummary {
     const activeRemote = activeRemoteSummary(ctx);
     const gemini = publicGeminiReadiness(ctx);
     const configured = ctx.config.mode === 'local'
-        ? ctx.store !== null && gemini.status === 'valid'
+        ? ctx.store !== null && (ctx.config.embeddingProvider === 'mlx' || gemini.status === 'valid')
         : ctx.store !== null;
     return {
         configured,
         mode: ctx.config.mode,
-        needsKey: ctx.config.mode === 'local' && gemini.status !== 'valid',
+        embeddingProvider: ctx.config.embeddingProvider ?? 'gemini',
+        needsKey: ctx.config.mode === 'local' && ctx.config.embeddingProvider !== 'mlx' && gemini.status !== 'valid',
         gemini,
         ...(activeRemote && { activeRemote }),
     };
@@ -397,7 +405,7 @@ async function migrateLocalToRemote(
     name: string,
 ): Promise<{ created: number; updated: number; skipped: number }> {
     const sourceConfig = localConfig(ctx);
-    if (!sourceConfig.geminiApiKey) {
+    if (!sourceConfig.geminiApiKey && sourceConfig.embeddingProvider !== 'mlx') {
         throw new Error('Configure GEMINI_API_KEY before importing local memories.');
     }
     const local = ctx.config.mode === 'local' && ctx.store
@@ -718,6 +726,20 @@ export function createServer(ctx: ServeContext): http.Server {
                 return;
             }
 
+            if (ctx.config.mode === 'local') {
+                const configStore = clientConfigStore(ctx);
+                const provider = configStore.getEnv('GEMDEX_EMBEDDING_PROVIDER') ?? ctx.config.embeddingProvider ?? 'gemini';
+                if ((provider === 'mlx' || provider === 'gemini') &&
+                    provider !== (ctx.config.embeddingProvider ?? 'gemini')) {
+                    const next: GemdexConfig = { ...ctx.config, embeddingProvider: provider, geminiApiKey: configStore.getEnv('GEMINI_API_KEY') ?? ctx.config.geminiApiKey };
+                    const nextStore = buildStore(next, ctx.createBackend);
+                    ctx.config = next;
+                    ctx.store = nextStore;
+                    ctx.localModelJob = undefined;
+                    startConfiguredKeyValidation(ctx);
+                }
+            }
+
             // Configuration routes are intentionally excluded from the token
             // requirement: the desktop app must be able to repair a missing or
             // rejected key before data-route authentication is established.
@@ -788,6 +810,57 @@ export function createServer(ctx: ServeContext): http.Server {
                 return;
             }
 
+            if (pathname === '/settings/embedding' && method === 'GET') {
+                sendJson(res, 200, ctx.localModelJob ?? localModelStatus(clientConfigStore(ctx)), corsHeaders);
+                return;
+            }
+            if (pathname.startsWith('/settings/embedding/') && method === 'POST') {
+                if (ctx.config.mode !== 'local') {
+                    sendJson(res, 400, { error: 'Local model operations are unavailable in remote mode. Switch storage to local first.' }, corsHeaders);
+                    return;
+                }
+                if (ctx.localModelJob?.status === 'installing' || ctx.localModelJob?.status === 'migrating') {
+                    sendJson(res, 409, { error: 'A local model operation is already running.' }, corsHeaders);
+                    return;
+                }
+                const body = await readBody(req);
+                const configStore = clientConfigStore(ctx);
+                if (pathname === '/settings/embedding/provider') {
+                    try {
+                        if (trimmedString(body?.provider) === 'gemini' && !geminiIsReady(ctx)) {
+                            throw new Error('Validate your Gemini key in Storage & Gemini before switching text to Gemini.');
+                        }
+                        chooseTextProvider(configStore, trimmedString(body?.provider));
+                        ctx.config = { ...ctx.config, embeddingProvider: localModelStatus(configStore).provider };
+                        ctx.store = buildStore(ctx.config, ctx.createBackend);
+                        ctx.localModelJob = undefined;
+                        sendJson(res, 200, localModelStatus(configStore), corsHeaders);
+                    } catch (error) {
+                        sendJson(res, 400, { error: errorMessage(error) }, corsHeaders);
+                    }
+                    return;
+                }
+                const installing = pathname === '/settings/embedding/install';
+                if (!installing && pathname !== '/settings/embedding/migrate') {
+                    sendJson(res, 404, { error: 'Unknown local model action.' }, corsHeaders);
+                    return;
+                }
+                ctx.localModelJob = { ...localModelStatus(configStore), status: installing ? 'installing' : 'migrating' };
+                const job = ctx.localModelJob;
+                const operation = installing
+                    ? installLocalModel(configStore, (message) => { job.message = message; })
+                    : migrateLocalText(configStore, (completed, total) => { job.completed = completed; job.total = total; });
+                void operation.then(() => {
+                    ctx.config = { ...ctx.config, embeddingProvider: localModelStatus(configStore).provider };
+                    ctx.store = buildStore(ctx.config, ctx.createBackend);
+                    ctx.localModelJob = { ...localModelStatus(configStore), message: installing ? 'Installed. Existing memories were not migrated.' : 'Text migration complete. Media remains on Gemini.' };
+                }).catch((error: unknown) => {
+                    ctx.localModelJob = { ...job, status: 'error', message: errorMessage(error) };
+                });
+                sendJson(res, 202, job, corsHeaders);
+                return;
+            }
+
             if (method === 'GET' && pathname === '/settings') {
                 sendJson(res, 200, settingsSummary(ctx), corsHeaders);
                 return;
@@ -853,6 +926,10 @@ export function createServer(ctx: ServeContext): http.Server {
             }
 
             if (method === 'POST' && pathname === '/settings/mode') {
+                if (ctx.localModelJob?.status === 'installing' || ctx.localModelJob?.status === 'migrating') {
+                    sendJson(res, 409, { error: 'Wait for the local model operation to finish before switching storage.' }, corsHeaders);
+                    return;
+                }
                 const body = await readBody(req);
                 const mode = trimmedString(body?.mode).toLowerCase();
                 try {
@@ -909,7 +986,7 @@ export function createServer(ctx: ServeContext): http.Server {
 
             // Local memory operations are blocked until the configured key has
             // completed a real Gemini embedding request during this sidecar run.
-            if (ctx.config.mode === 'local' && !geminiIsReady(ctx)) {
+            if (ctx.config.mode === 'local' && ctx.config.embeddingProvider !== 'mlx' && !geminiIsReady(ctx)) {
                 const gemini = publicGeminiReadiness(ctx);
                 sendJson(res, 503, {
                     error: gemini.message ?? 'Gemini API key validation is required.',

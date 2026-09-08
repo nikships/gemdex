@@ -26,6 +26,8 @@ import { createMemoryBackend } from './memory.js';
 import { authorizeSync } from './sync-auth.js';
 import { SyncCredentialStore } from './sync-config.js';
 import { RemoteSyncTarget } from './sync-target.js';
+import { chooseTextProvider, installLocalModel, localModelStatus, migrateLocalText } from './local-model.js';
+import { createEmbeddingInstance } from './embedding.js';
 
 interface CliIo {
     stdout: (message: string) => void;
@@ -48,6 +50,7 @@ interface CliDependencies {
     openBrowser?: (url: string) => void | Promise<void>;
     /** Overridable so tests can use a temp dir for stored OAuth state. */
     createSyncCredentialStore?: (mcpUrl: string) => SyncCredentialStore;
+    validateGeminiKey?: (key: string) => Promise<void>;
 }
 
 const defaultIo: CliIo = {
@@ -60,6 +63,10 @@ function usage(): string {
     return `Gemdex remote configuration
 
 Usage:
+  gemdex setup gemini [--key-stdin]
+  gemdex install
+  gemdex migrate-text
+  gemdex embedding mlx|gemini
   gemdex init-remote <name> <url> [--token-env VAR | --token-stdin] [--import-local] [--no-activate]
   gemdex remote add <name> <url> [--token-env VAR | --token-stdin]
   gemdex remote list
@@ -128,7 +135,7 @@ async function readSecret(prompt: string, fromStdin: boolean): Promise<string> {
         return value.replace(/\r?\n$/, '').trim();
     }
     if (!process.stdin.isTTY || !process.stdout.isTTY || !process.stdin.setRawMode) {
-        throw new Error('Interactive token entry needs a TTY. Use --token-stdin or --token-env VAR.');
+        throw new Error('Interactive secret entry needs a terminal. For automation use setup gemini --key-stdin, or remote commands with --token-stdin/--token-env VAR.');
     }
 
     process.stdout.write(prompt);
@@ -469,6 +476,7 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
 
     const [command, subcommand] = args;
     const CLI_COMMANDS = [
+        'setup', 'install', 'migrate-text', 'embedding',
         'remote',
         'mode',
         'status',
@@ -481,6 +489,53 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
     if (!CLI_COMMANDS.includes(command)) return null;
 
     try {
+        if (command === 'setup') {
+            if (subcommand !== 'gemini' || args.some((arg, index) => index > 1 && arg !== '--key-stdin')) {
+                throw new Error('Usage: npx gemdex-mcp setup gemini [--key-stdin]');
+            }
+            if (process.env.GEMDEX_MODE && process.env.GEMDEX_MODE !== 'local') {
+                throw new Error('Remove GEMDEX_MODE from the launch environment before selecting local storage.');
+            }
+            if (process.env.GEMDEX_EMBEDDING_PROVIDER && process.env.GEMDEX_EMBEDDING_PROVIDER !== 'gemini') {
+                throw new Error('Remove GEMDEX_EMBEDDING_PROVIDER from the launch environment before selecting Gemini.');
+            }
+            const key = await io.readSecret('Gemini API key (hidden): ', args.includes('--key-stdin'));
+            if (!key || /[\r\n]/.test(key)) throw new Error('A single non-empty Gemini API key is required.');
+            if (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== key) {
+                throw new Error('GEMINI_API_KEY in the launch environment would override this key. Remove it before setup.');
+            }
+            io.stderr('Validating Gemini key…\n');
+            try {
+                if (dependencies.validateGeminiKey) await dependencies.validateGeminiKey(key);
+                else {
+                    const config = createConfig((name) => name === 'GEMDEX_MODE' ? 'local' : name === 'GEMDEX_EMBEDDING_PROVIDER' ? 'gemini' : store.getEnv(name));
+                    await createEmbeddingInstance({ ...config, geminiApiKey: key }).embed('Gemdex setup validation');
+                }
+            } catch {
+                throw new Error('Gemini validation failed; saved configuration was not changed. Check your key, network, API access and quota, then retry.');
+            }
+            store.setEnvValues({ GEMINI_API_KEY: key, GEMDEX_EMBEDDING_PROVIDER: 'gemini', GEMDEX_MODE: 'local' });
+            io.stdout('Gemini configured. Retry the Gemdex tool in Claude Code. Existing memories were not migrated.\n');
+            return 0;
+        }
+        if (command === 'install' || command === 'migrate-text' || command === 'embedding') {
+            if (store.getEnv('GEMDEX_MODE') === 'remote') throw new Error('This action is local-only. Run npx gemdex-mcp mode local first.');
+            if (command === 'embedding') {
+                if (args.length !== 2) throw new Error('Usage: npx gemdex-mcp embedding mlx|gemini');
+                chooseTextProvider(store, subcommand);
+                io.stdout(`Text provider: ${subcommand}. Historical banks remain searchable.\n`);
+            } else {
+                if (args.length !== 1) throw new Error(`Usage: npx gemdex-mcp ${command}`);
+                if (command === 'install') {
+                    await installLocalModel(store, (message) => io.stderr(`${message}\n`));
+                    io.stdout('Local MLX text is active. Existing memories were not migrated. Run npx gemdex-mcp migrate-text to move existing text; media stays on Gemini.\n');
+                } else {
+                    await migrateLocalText(store, (completed, total) => io.stderr(`Migrating text: ${completed}/${total}\n`));
+                    io.stdout('Text migration complete. Attachment rows and blobs remain on Gemini.\n');
+                }
+            }
+            return 0;
+        }
         if (command === 'remote' && subcommand === 'add') {
             const name = requireArg(args, 2, 'Remote name');
             const url = requireArg(args, 3, 'Remote URL');
@@ -541,6 +596,9 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
             if (mode === 'local' && !requestedName) {
                 io.stdout('Mode: local\n');
                 io.stdout(`Store: ${store.getEnv('LANCEDB_PATH') ?? '~/.gemdex/lance'}\n`);
+                const model = localModelStatus(store);
+                io.stdout(`Text provider: ${model.provider}\nLocal model: ${model.status} (${model.model})\n`);
+                io.stdout(`Gemini key: ${store.getEnv('GEMINI_API_KEY') ? 'configured (not validated by status)' : 'missing — run npx gemdex-mcp setup gemini or install'}\n`);
                 return 0;
             }
             const selected = resolveRemote(store, requestedName);

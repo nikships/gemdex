@@ -165,6 +165,9 @@ struct ConfigSummary: Codable, Sendable {
     let needsKey: Bool
     let gemini: GeminiReadiness
     let activeRemote: ActiveRemote?
+    var embeddingProvider: String? = nil
+
+    var usesLocalMLX: Bool { mode == "local" && embeddingProvider == "mlx" }
 }
 
 /// One configured remote (`GET /settings`).
@@ -183,6 +186,20 @@ struct SettingsSummary: Codable, Sendable {
     let localConfigured: Bool
     let gemini: GeminiReadiness
     let remotes: [RemoteSummary]
+    var embeddingProvider: String? = nil
+}
+
+/// Local embedding runtime and explicit install/migration job snapshot.
+struct EmbeddingStatus: Codable, Sendable {
+    let provider: String
+    let installed: Bool
+    let model: String
+    let status: String
+    let message: String?
+    let completed: Int?
+    let total: Int?
+
+    var isRunning: Bool { status == "installing" || status == "migrating" }
 }
 
 /// Remote connection test result (`POST /settings/test`).

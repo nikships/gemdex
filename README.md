@@ -67,7 +67,7 @@ Different machine, different app:
 |---|---|---|
 | Store | Embedded LanceDB at `~/.gemdex` | Postgres/pgvector + blob storage you own |
 | Setup | Point your agent at `npx gemdex-mcp` | [One command](#self-host-the-whole-stack-one-command) |
-| Needs a Gemini key on each machine | Yes | **No** — the server embeds |
+| Needs a Gemini key on each machine | Gemini/media: yes; MLX text: no | **No** — the server embeds |
 | Shared across machines | No, one pool per machine | Yes, one pool for everything |
 | Human manage surface | The [macOS app](#the-desktop-app-maintenance-only) | The web manager in your browser |
 | Remote agents | stdio only | HTTPS MCP endpoint, OAuth-gated |
@@ -76,7 +76,7 @@ Start local; move to self-hosted when you want one pool across machines or agent
 that aren't on your laptop. Both speak the same MCP tools, so nothing about how
 you use Gemdex changes.
 
-## Quickstart — local (under a minute)
+## Quickstart — choose your embedding path
 
 There's **no setup step** for the store — LanceDB is embedded and persists at
 `~/.gemdex/lance` automatically the first time you save a memory.
@@ -86,10 +86,40 @@ There's **no setup step** for the store — LanceDB is embedded and persists at
 **Claude Code:**
 
 ```bash
-claude mcp add gemdex \
-  -e GEMINI_API_KEY=your-key \
-  -- npx -y gemdex-mcp@latest
+claude mcp add gemdex -- npx -y gemdex-mcp@latest
 ```
+
+If you only add the MCP, all six tools remain available and explain setup rather
+than crashing. Ask Claude to help choose, then run **one** option on your machine:
+
+```bash
+npx gemdex-mcp setup gemini # Hidden API-key prompt; validates before saving
+npx gemdex-mcp install      # Apple Silicon: download runtime + BGE-M3, activate MLX text
+# Or connect an existing server (hidden bearer-token prompt):
+npx gemdex-mcp init-remote home https://memory.example.com
+```
+
+MLX uses [`mlx-community/bge-m3-mlx-8bit`](https://huggingface.co/mlx-community/bge-m3-mlx-8bit).
+It requires macOS 14+ and native arm64 Node (not Rosetta).
+No Python, uv, Homebrew, HF CLI or compiler setup is required: the explicit
+installer manages its own runtime and pinned weights. Installation needs the
+internet; subsequent MLX text embeddings run offline. Allow time for the initial
+download. See [model evidence and platform requirements](docs/MLX_MODELS.md).
+
+**Install is not migration.** To move existing text into its separate 1024-dimensional
+LanceDB bank, run `npx gemdex-mcp migrate-text`. Progress is reported and the command
+is safe to re-run. Media rows/blobs stay on Gemini, including attachments belonging
+to parents whose text moves. Recall searches both banks and returns whole parents.
+Gemini-backed history/media still needs a working key/network; failure is reported,
+not silently presented as complete recall. MLX-only text needs no Gemini key.
+
+`npx gemdex-mcp embedding gemini` switches future text writes back without losing
+MLX history; `embedding mlx` switches again. Settings persist in `~/.gemdex/.env`
+with `0600` permissions and are shared by MCP and the macOS **Storage & Gemini**
+panel (install/progress/migrate/provider controls). Launch environment variables
+override saved settings; remove stale provider/mode/key overrides from your MCP
+configuration before switching. Retry a tool after setup; if needed reconnect via
+Claude Code `/mcp`. `npx gemdex-mcp status` shows readiness without printing secrets.
 
 **Any other MCP client** (Cursor, Codex CLI, Windsurf, Cline, Continue, Zed…):
 
@@ -98,10 +128,7 @@ claude mcp add gemdex \
   "mcpServers": {
     "gemdex": {
       "command": "npx",
-      "args": ["-y", "gemdex-mcp@latest"],
-      "env": {
-        "GEMINI_API_KEY": "your-key"
-      }
+      "args": ["-y", "gemdex-mcp@latest"]
     }
   }
 }

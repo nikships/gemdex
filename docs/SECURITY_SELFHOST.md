@@ -4,6 +4,17 @@ What a public Gemdex deployment actually enforces, where each control lives in
 the code, and what it deliberately does **not** do. Read this before you point a
 DNS record at your stack.
 
+Local-only MLX settings do not add a public BYOI embedding path. The sidecar's
+`/settings/embedding*` routes (`packages/mcp/src/serve.ts`) remain behind its
+per-launch token and Origin checks. Only explicit install downloads runtime/model
+artifacts; no tool performs installation or migration implicitly. The stdio
+first-run gate (`packages/mcp/src/index.ts`, `onboarding.ts`) keeps all six tools
+discoverable and returns setup instructions without memory writes. Local MLX
+text bypasses Gemini readiness, not sidecar authentication; Gemini-dependent
+media and ingestion still require a key. Provider/key persistence uses the
+`0600` client configuration writer (`cli-config.ts`). The MLX worker uses private
+child-process pipes, not a listening HTTP service.
+
 The threat model is narrow and worth stating plainly: **a single-user memory
 store on the public internet.** The memory pool holds whatever you told your
 agent to remember — plausibly API keys, deploy runbooks, and account details in
