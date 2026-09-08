@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+# Fresh-orb bootstrap for Gemdex. Idempotent; safe to re-run on a warm snapshot.
+# Installs toolchains and lockfile deps. Does not start servers or authenticate.
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+# Corepack shims and uv live here; keep them ahead of the image's pnpm 12.
+export PATH="${HOME}/.local/bin:${PATH}"
+export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+
+# Same pin as packages/server/Dockerfile and .github/workflows/ci.yml.
+PNPM_VERSION="10.33.4"
+
+step() {
+    local name="$1"
+    shift
+    local start elapsed
+    start="$(date +%s)"
+    echo "==> $name"
+    "$@"
+    elapsed="$(($(date +%s) - start))"
+    echo "    done in ${elapsed}s"
+}
+
+ensure_apt_packages() {
+    local pkg missing=()
+    for pkg in "$@"; do
+        if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "install ok installed"; then
+            missing+=("$pkg")
+        fi
+    done
+    if ((${#missing[@]} == 0)); then
+        echo "apt packages already present: $*"
+        return 0
+    fi
+    echo "installing apt packages: ${missing[*]}"
+    sudo apt-get update -qq
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}"
+}
+
+ensure_pnpm() {
+    if ! command -v corepack >/dev/null 2>&1; then
+        echo "corepack is required to pin pnpm ${PNPM_VERSION}" >&2
+        exit 1
+    fi
+    mkdir -p "${HOME}/.local/bin"
+    # The image ships pnpm 12 at /usr/local/bin, which treats onlyBuiltDependencies
+    # as legacy and fails install with ERR_PNPM_IGNORED_BUILDS. Pin the CI version
+    # into ~/.local/bin so later login shells keep seeing it.
+    corepack enable --install-directory "${HOME}/.local/bin"
+    corepack prepare "pnpm@${PNPM_VERSION}" --activate
+    hash -r 2>/dev/null || true
+    local version
+    version="$(command -v pnpm >/dev/null && pnpm --version)"
+    if [[ "${version}" != "${PNPM_VERSION}" ]]; then
+        echo "expected pnpm ${PNPM_VERSION}, got ${version:-missing} from $(command -v pnpm 2>/dev/null || echo none)" >&2
+        exit 1
+    fi
+    echo "pnpm ${version} ($(command -v pnpm))"
+}
+
+ensure_uv() {
+    if command -v uv >/dev/null 2>&1; then
+        echo "uv $(uv --version) already on PATH"
+        return 0
+    fi
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    # The installer cannot update this running script's environment.
+    if [[ -f "$HOME/.local/bin/env" ]]; then
+        # shellcheck disable=SC1091
+        source "$HOME/.local/bin/env"
+    fi
+    export PATH="$HOME/.local/bin:$PATH"
+    command -v uv >/dev/null 2>&1 || {
+        echo "uv install succeeded but uv is not on PATH" >&2
+        exit 1
+    }
+}
+
+link_python313() {
+    local python_bin dest
+    python_bin="$(uv python find 3.13)"
+    dest="$HOME/.local/bin/python3.13"
+    mkdir -p "$HOME/.local/bin"
+    ln -sfn "$python_bin" "$dest"
+    echo "python3.13 -> $python_bin"
+}
+
+# Amp starts later in a non-interactive login shell that reads ~/.bash_profile,
+# which does not source ~/.profile (where ~/.local/bin is already added).
+persist_login_path() {
+    local profile="$HOME/.bash_profile"
+    local marker="# gemdex-orb-path"
+    mkdir -p "$(dirname "$profile")"
+    touch "$profile"
+    if grep -Fqx "$marker" "$profile" 2>/dev/null; then
+        echo "login PATH hook already present in $profile"
+        return 0
+    fi
+    cat >>"$profile" <<'EOF'
+
+# gemdex-orb-path
+# Keep uv, python3.13, and corepack's pnpm 10.33.4 ahead of the image's pnpm 12.
+export PATH="$HOME/.local/bin:$PATH"
+export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+EOF
+    echo "appended login PATH hook to $profile"
+}
+
+write_orb_guidance() {
+    local amp_agents="$HOME/.config/amp/AGENTS.md"
+    local marker="<!-- gemdex-orb-toolchain -->"
+    mkdir -p "$(dirname "$amp_agents")"
+    if [[ -f "$amp_agents" ]] && grep -Fq "$marker" "$amp_agents"; then
+        echo "orb guidance already present in $amp_agents"
+        return 0
+    fi
+    mkdir -p "$(dirname "$amp_agents")"
+    {
+        echo
+        echo "$marker"
+        cat <<'EOF'
+# Gemdex orb toolchain
+
+- JS workspace: Node >= 24, pnpm >= 10. From the repo root: `pnpm install --frozen-lockfile`, `pnpm build`, `pnpm lint`, `pnpm typecheck`, `pnpm -r test`.
+- Python packages (`packages/mcp-http`, `packages/web`) need **Python 3.13 via uv**, not the system 3.11. Use `uv run` in those directories (`uv run pytest`, `uv run gemdex-web`). `python3.13` is on `~/.local/bin`.
+- Do not start BYOI / Postgres / compose in setup. Unit tests do not need them. Integration (`pnpm test:byoi`) needs pgvector Postgres and `BYOI_TEST_DATABASE_URL`.
+- `GEMINI_API_KEY` is required for live embedding; read it from the environment/secrets. Never write secrets into the tree.
+EOF
+    } >>"$amp_agents"
+    echo "appended orb guidance to $amp_agents"
+}
+
+echo "Gemdex orb setup — repo $repo_root"
+
+# Native fallback for @lancedb/lancedb if no prebuilt binary is available.
+step "System packages" ensure_apt_packages build-essential
+
+step "pnpm ${PNPM_VERSION}" ensure_pnpm
+step "Login PATH" persist_login_path
+step "uv" ensure_uv
+step "Python 3.13" uv python install 3.13
+step "Link python3.13" link_python313
+
+step "JS workspace (frozen lockfile)" pnpm install --frozen-lockfile
+step "Build TS packages" pnpm build
+
+step "Python: gemdex-mcp-http" uv sync --frozen --python 3.13 --directory packages/mcp-http
+step "Python: gemdex-web" uv sync --frozen --python 3.13 --directory packages/web
+
+if [[ -f website/package-lock.json ]]; then
+    step "Website (npm ci)" npm ci --prefix website
+fi
+
+step "Orb agent guidance" write_orb_guidance
+
+echo "Gemdex orb setup complete."
+echo "node $(node --version)  pnpm $(pnpm --version)  uv $(uv --version)"
+echo "python3.13 $($HOME/.local/bin/python3.13 --version)"

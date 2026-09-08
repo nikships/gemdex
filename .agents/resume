@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Runs after orb activation and on every wake. Keep this under 10 seconds.
+# No installs — only PATH repair so pinned pnpm and uv-managed Python stay first.
+set -euo pipefail
+
+export PATH="${HOME}/.local/bin:${PATH}"
+export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+
+if [[ -f "${HOME}/.local/bin/env" ]]; then
+    # shellcheck disable=SC1091
+    source "${HOME}/.local/bin/env"
+fi
+
+if command -v corepack >/dev/null 2>&1 && [[ -d "${HOME}/.local/bin" ]]; then
+    corepack enable --install-directory "${HOME}/.local/bin" >/dev/null 2>&1 || true
+fi
+
+missing=()
+for cmd in node pnpm uv python3.13; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        missing+=("$cmd")
+    fi
+done
+
+if ((${#missing[@]} > 0)); then
+    echo "orb resume: missing toolchain on PATH: ${missing[*]}" >&2
+    echo "orb resume: re-run .agents/setup if this orb skipped snapshot setup" >&2
+    exit 1
+fi
+
+exit 0

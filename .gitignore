@@ -17,3 +17,6 @@ coverage/
 .vscode/
 .idea/
 *.tsbuildinfo
+
+# Amp orb portal metadata (generated at runtime).
+.amp/portals/*
