@@ -548,4 +548,35 @@ export class MemoryToolHandlers {
             return textResult(`Failed to report outcome: ${errorMessage(error)}`, true);
         }
     }
+
+    /**
+     * Permanently delete a memory by id (chunks, blobs, remote row). Validates
+     * the id against the backend first so a missing id returns a clear error
+     * instead of a silent no-op (local `MemoryStore.delete` is otherwise a
+     * no-op when absent). On success, best-effort clears the per-client stats
+     * ledger via `removeStats` so trust ranking / track-record cannot keep
+     * referring to a gone memory.
+     */
+    async handleDeleteMemory(args: any): Promise<ToolResult> {
+        const id = typeof args?.id === 'string' ? args.id.trim() : '';
+        if (id.length === 0) {
+            return textResult("Error: 'id' is required.", true);
+        }
+        try {
+            const memory = await this.store.get(id);
+            if (!memory) {
+                return textResult(`Failed to delete memory: Memory not found: ${id}`, true);
+            }
+            await this.store.delete(id);
+            try {
+                this.statsStore.removeStats(id);
+            } catch (error) {
+                // Telemetry only — a stats-store failure must never break delete.
+                console.error('Failed to remove recall stats:', errorMessage(error));
+            }
+            return textResult(formatMemoryResult('Deleted', memory));
+        } catch (error) {
+            return textResult(`Failed to delete memory: ${errorMessage(error)}`, true);
+        }
+    }
 }

@@ -12,7 +12,7 @@ import { ClientConfigStore } from './cli-config.js';
 import { runCli } from './cli.js';
 import { MCP_TOOL_NAMES } from './tool-names.js';
 
-test('fresh Claude Code stdio connection discovers all six tools and each explains setup without writes', async () => {
+test('fresh Claude Code stdio connection discovers all seven tools and each explains setup without writes', async () => {
     const home = await fs.mkdtemp(path.join(os.tmpdir(), 'gemdex-onboard-'));
     const transport = new StdioClientTransport({
         command: process.execPath,
@@ -42,7 +42,7 @@ test('fresh Claude Code stdio connection discovers all six tools and each explai
         const incomplete = await client.callTool({ name: 'get_memory', arguments: { id: 'missing' } });
         assert.equal(incomplete.isError, true);
         assert.match(JSON.stringify(incomplete.content), /init-remote/);
-        assert.equal((await client.listTools()).tools.length, 6);
+        assert.equal((await client.listTools()).tools.length, 7);
         let requests = 0;
         const remote = createServer((req, res) => {
             assert.equal(req.headers.authorization, 'Bearer test-token');

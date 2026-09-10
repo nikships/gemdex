@@ -114,25 +114,24 @@ and `CHAT_HISTORY.md` cite specific code paths — update them with the code.
 - **BYOI wire contract / compat floor** (`/v1`, bearer auth, `minClientVersion`):
   server + [docs/BYOI_REMOTE_MODE.md](docs/BYOI_REMOTE_MODE.md).
 
-## Six tools, no delete
+## Seven stdio tools (includes delete)
 
-The MCP surface is `save_memory`, `recall` (cheap ranked **title index**, fixed
-top 10 — never full bodies), `get_memory` (open one full parent by id — the only
-MCP path that returns body text; this is what bumps per-client recall stats),
-`update_memory`, `report_outcome` (record whether a fetched memory
-`worked`/`failed`/`stale` — the outcome feedback loop; per-client stats ledger,
-no LanceDB writes, opt-in trust-weighted title re-ranking via
-`GEMDEX_TRUST_RANKING`), and `read_attachment` (fetch attachment/transcript
-bytes as UTF-8 or base64 for a memory id — used for chat digests that store the
-full session as a non-embedded `file` blob; works local + remote without
-`GEMINI_API_KEY`). **There is no agent delete tool by design** — deletion is a
-deliberate human action (the sidecar/core `DELETE /memories/:id` route exists;
-the MCP tools deliberately don't expose it).
+The **local/stdio** MCP surface (`gemdex-mcp`) is `save_memory`, `recall`
+(cheap ranked **title index**, fixed top 10 — never full bodies), `get_memory`
+(open one full parent by id — the only MCP path that returns body text; this is
+what bumps per-client recall stats), `update_memory`, `report_outcome` (record
+whether a fetched memory `worked`/`failed`/`stale` — the outcome feedback loop;
+per-client stats ledger, no LanceDB writes, opt-in trust-weighted title
+re-ranking via `GEMDEX_TRUST_RANKING`), `read_attachment` (fetch
+attachment/transcript bytes as UTF-8 or base64 for a memory id — used for chat
+digests that store the full session as a non-embedded `file` blob; works local
++ remote without `GEMINI_API_KEY`), and **`delete_memory`** (permanent remove by
+id; clears client stats). Prefer `update_memory` for corrections; delete when
+the memory should be gone.
 
-The human delete surfaces are the desktop app and, for a self-hosted
-deployment, the web manager (`packages/web`, behind its own login and a confirm
-dialog). Keep it that way: making the surfaces "consistent" by adding a delete
-tool to either MCP transport would discard the property on purpose here.
+Human manage UIs (desktop app / web manager) still delete with their own confirm
+flows. **HTTP MCP (`gemdex-mcp-http`) does not expose delete yet** — keep that
+surface separate unless intentionally mirrored.
 
 ## Conventions (TS packages)
 

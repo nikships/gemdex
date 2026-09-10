@@ -1,7 +1,8 @@
 # gemdex-mcp
 
 MCP memory layer for AI coding agents — `save_memory` / `recall` /
-`update_memory` backed by Gemini embeddings + embedded LanceDB.
+`get_memory` / `update_memory` / `delete_memory` (plus outcome + attachment
+tools) backed by Gemini embeddings + embedded LanceDB.
 
 Part of [Gemdex](https://github.com/anand-92/gemdex).
 
@@ -11,7 +12,7 @@ Part of [Gemdex](https://github.com/anand-92/gemdex).
 claude mcp add gemdex -- npx -y gemdex-mcp@latest
 ```
 
-All six tools return setup guidance until you choose a backend. Ask Claude to
+All seven tools return setup guidance until you choose a backend. Ask Claude to
 help choose, then run one command on your machine:
 
 - `npx gemdex-mcp setup gemini` — hidden key prompt, validated before persistence.

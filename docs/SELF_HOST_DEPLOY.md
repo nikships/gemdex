@@ -60,9 +60,10 @@ Two rules the stack enforces, and the reasoning:
 
 **Why two containers rather than one.** They authenticate different kinds of
 caller. A browser cannot present a bearer token, so the UI needs a server-side
-session; and deletion is deliberately absent from the agent surface (root
-`AGENTS.md`: "six tools, no delete"), so folding the UI into MCP would mean
-either giving agents delete or leaving the UI unable to delete.
+session. **HTTP MCP still omits delete** (stdio MCP has `delete_memory`; see
+root `AGENTS.md`), and the web manager keeps a confirm dialog humans expect —
+folding the UI into HTTP MCP would either give remote agents delete or leave
+the UI unable to delete.
 
 ## Why `deploy/` and not `packages/server/docker-compose.yml`
 

@@ -115,8 +115,7 @@ Behavior: re-chunks and re-embeds the resulting content under the same id.
 Omitted fields are preserved — leave out \`content\`/\`edits\` to keep the prior
 text, leave out \`attachments\` to keep the prior media (pass \`attachments: []\`
 to clear it). Each attachment is either a local file \`path\` (preferred) or
-inline base64 \`data\`. There is no delete via MCP — deletion is a human action
-in the desktop app.
+inline base64 \`data\`. To remove a memory entirely, use \`delete_memory\`.
 `;
 
 const REPORT_OUTCOME_DESCRIPTION = `
@@ -149,6 +148,20 @@ fetched over HTTP. No GEMINI_API_KEY required.
 Args: \`memory_id\` (required), optional \`attachment_id\` (omit when there is
 exactly one attachment, or a single transcript/\`file\` attachment), optional
 \`max_chars\` (default ~1.5M; truncates with a clear overflow note).
+`;
+
+
+const DELETE_MEMORY_DESCRIPTION = `
+Permanently delete a stored memory by id (and its attachments/blobs).
+
+🎯 **When to use**: when a memory is obsolete, wrong beyond repair, duplicated
+after consolidation, or the user explicitly asks to forget something. Prefer
+\`update_memory\` when the facts can be corrected in place. Get the id from a
+prior save_memory, recall, or get_memory result.
+
+Behavior: removes the memory from the backend (local LanceDB or remote BYOI
+\`DELETE /v1/memories/:id\`). Also clears this client's per-memory outcome
+stats for that id. Irreversible via MCP — confirm with the user when unsure.
 `;
 
 // JSON-schema fragment for the optional media array shared by save_memory /
@@ -344,6 +357,20 @@ class GemdexMemoryServer {
                         required: ["memory_id"],
                     },
                 },
+                {
+                    name: MCP_TOOL_NAMES[6],
+                    description: DELETE_MEMORY_DESCRIPTION,
+                    inputSchema: {
+                        type: "object",
+                        properties: {
+                            id: {
+                                type: "string",
+                                description: "The id of the memory to delete (from save_memory, recall, or get_memory).",
+                            },
+                        },
+                        required: ["id"],
+                    },
+                },
             ],
         }));
 
@@ -377,6 +404,8 @@ class GemdexMemoryServer {
                     return await this.handlers.handleReportOutcome(args);
                 case MCP_TOOL_NAMES[5]:
                     return await this.handlers.handleReadAttachment(args);
+                case MCP_TOOL_NAMES[6]:
+                    return await this.handlers.handleDeleteMemory(args);
                 default:
                     throw new Error(`Unknown tool: ${name}`);
             }

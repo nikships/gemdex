@@ -73,7 +73,14 @@ class FakeBackend implements MemoryBackend {
         return this.listResults;
     }
 
-    async delete(_id: string): Promise<void> {}
+    lastDeleteId?: string;
+    deleteShouldThrow?: Error;
+
+    async delete(id: string): Promise<void> {
+        this.lastDeleteId = id;
+        if (this.deleteShouldThrow) throw this.deleteShouldThrow;
+        if (this.memory && this.memory.id === id) this.memory = null;
+    }
 
     async exportAll(): Promise<MemoryExportRecord[]> {
         return [];
@@ -105,6 +112,9 @@ class ThrowingStatsStore extends MemoryStatsStore {
     }
     override recordRecall(_ids: string[], _now?: number): never {
         throw new Error('simulated stats write failure');
+    }
+    override removeStats(_id: string): never {
+        throw new Error('simulated stats remove failure');
     }
 }
 
@@ -766,4 +776,78 @@ test('trust ranking treats an unparseable flag value as off (fail-fast-off, not 
         assert.equal(requestedLimit, 10, 'garbage value must not trigger over-fetch');
     });
     cleanup();
+});
+
+test('delete_memory removes the memory and clears client stats', async () => {
+    const { statsStore, cleanup } = makeStatsStore();
+    const backend = new FakeBackend(makeMemory('doomed'));
+    const handlers = new MemoryToolHandlers(backend, statsStore);
+    statsStore.recordRecall(['mem-1']);
+    assert.ok(statsStore.get('mem-1'));
+
+    try {
+        const result = await handlers.handleDeleteMemory({ id: 'mem-1' });
+        assert.equal(result.isError, undefined);
+        assert.match(result.content[0].text, /Deleted memory/);
+        assert.match(result.content[0].text, /id: mem-1/);
+        assert.match(result.content[0].text, /title: Note/);
+        assert.equal(backend.lastDeleteId, 'mem-1');
+        assert.equal(backend.memory, null);
+        assert.equal(statsStore.get('mem-1'), undefined);
+    } finally {
+        cleanup();
+    }
+});
+
+test('delete_memory returns not-found for an unknown id and does not call delete', async () => {
+    const { statsStore, cleanup } = makeStatsStore();
+    const backend = new FakeBackend(makeMemory('still here'));
+    const handlers = new MemoryToolHandlers(backend, statsStore);
+
+    try {
+        const result = await handlers.handleDeleteMemory({ id: 'missing' });
+        assert.equal(result.isError, true);
+        assert.match(result.content[0].text, /Failed to delete memory: Memory not found: missing/);
+        assert.equal(backend.lastDeleteId, undefined);
+        assert.ok(backend.memory);
+    } finally {
+        cleanup();
+    }
+});
+
+test('delete_memory requires an id', async () => {
+    const { statsStore, cleanup } = makeStatsStore();
+    const handlers = new MemoryToolHandlers(new FakeBackend(makeMemory('x')), statsStore);
+    try {
+        const result = await handlers.handleDeleteMemory({});
+        assert.equal(result.isError, true);
+        assert.match(result.content[0].text, /'id' is required/);
+    } finally {
+        cleanup();
+    }
+});
+
+test('delete_memory never breaks when the stats store throws on remove', async () => {
+    const backend = new FakeBackend(makeMemory('doomed'));
+    const handlers = new MemoryToolHandlers(backend, new ThrowingStatsStore());
+    const result = await handlers.handleDeleteMemory({ id: 'mem-1' });
+    assert.equal(result.isError, undefined);
+    assert.match(result.content[0].text, /Deleted memory/);
+    assert.equal(backend.lastDeleteId, 'mem-1');
+    assert.equal(backend.memory, null);
+});
+
+test('delete_memory surfaces backend delete failures cleanly', async () => {
+    const { statsStore, cleanup } = makeStatsStore();
+    const backend = new FakeBackend(makeMemory('doomed'));
+    backend.deleteShouldThrow = new Error('disk full');
+    const handlers = new MemoryToolHandlers(backend, statsStore);
+    try {
+        const result = await handlers.handleDeleteMemory({ id: 'mem-1' });
+        assert.equal(result.isError, true);
+        assert.match(result.content[0].text, /Failed to delete memory: disk full/);
+        assert.ok(backend.memory, 'memory must remain when delete throws');
+    } finally {
+        cleanup();
+    }
 });

@@ -136,9 +136,9 @@ has no reason to have. `test_sync_route.py` asserts the tool list stays at six.
 
 ## Other gotchas
 
-- **Six tools, no delete** — same as the stdio surface, same reason (deletion is
-  a human action in the desktop app). `test_no_delete_tool` guards it. The sync
-  route is not a tool and must not become one.
+- **Six tools, no delete on this HTTP surface** — stdio MCP now has
+  `delete_memory`; HTTP MCP deliberately still does not. `test_no_delete_tool`
+  guards it. The sync route is not a tool and must not become one.
 - **`ToolError`, never a raw exception.** Matches the TS handlers' "never throw
   to the protocol" rule; `GemdexTools._call` wraps every BYOI call so a transport
   failure becomes a readable tool error, not a crash.

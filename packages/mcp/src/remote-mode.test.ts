@@ -92,6 +92,17 @@ async function startFakeRemote(): Promise<{
             res.end(JSON.stringify({ memory }));
             return;
         }
+        if (req.method === 'DELETE' && req.url === '/v1/memories/remote-1') {
+            if (!memory) {
+                res.writeHead(404, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Not found' }));
+                return;
+            }
+            memory = null;
+            res.writeHead(204);
+            res.end();
+            return;
+        }
         res.writeHead(404, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Not found' }));
     });
@@ -107,14 +118,14 @@ async function startFakeRemote(): Promise<{
     };
 }
 
-test('MCP public tool surface remains save_memory, recall, get_memory, update_memory, report_outcome, read_attachment', () => {
+test('MCP public tool surface remains save_memory, recall, get_memory, update_memory, report_outcome, read_attachment, delete_memory', () => {
     assert.deepEqual(
         [...MCP_TOOL_NAMES],
-        ['save_memory', 'recall', 'get_memory', 'update_memory', 'report_outcome', 'read_attachment'],
+        ['save_memory', 'recall', 'get_memory', 'update_memory', 'report_outcome', 'read_attachment', 'delete_memory'],
     );
 });
 
-test('remote-mode MCP handlers save, title-recall, get_memory, and update through HTTP', async () => {
+test('remote-mode MCP handlers save, title-recall, get_memory, update, and delete through HTTP', async () => {
     const remote = await startFakeRemote();
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'gemdex-mcp-remote-'));
     const imagePath = path.join(tmpDir, 'example.png');
@@ -178,6 +189,15 @@ test('remote-mode MCP handlers save, title-recall, get_memory, and update throug
         assert.ok(getReqs.length >= 2, 'expected GETs for get_memory and edit fetch');
         const lastPut = remote.requests.filter((r) => r.method === 'PUT').at(-1);
         assert.equal(lastPut?.body.content, 'partially edited remote parent');
+
+        const deleted = await handlers.handleDeleteMemory({ id: 'remote-1' });
+        assert.equal(deleted.isError, undefined);
+        assert.match(deleted.content[0].text, /Deleted memory/);
+        assert.ok(remote.requests.some((r) => r.method === 'DELETE' && r.path === '/v1/memories/remote-1'));
+
+        const missing = await handlers.handleDeleteMemory({ id: 'remote-1' });
+        assert.equal(missing.isError, true);
+        assert.match(missing.content[0].text, /Memory not found: remote-1/);
     } finally {
         await remote.close();
         await fs.rm(tmpDir, { recursive: true, force: true });
