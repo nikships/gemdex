@@ -109,7 +109,10 @@ any crash-left partial. An exclusive PID lock rejects concurrent installers;
 dead-owner locks can be recovered. The installed marker appears only after
 all download hashes, installed-runtime inventory, and a real 1024d normalized
 embedding smoke test pass. The core installer does not change settings or banks;
-the CLI/sidecar wrapper activates MLX text after successful installation. Moving
+the CLI/sidecar wrapper activates MLX text after successful installation by
+writing `GEMINI_API_KEY=local` (exact lowercase). That sentinel is the only
+activation path for managed local text; `GEMDEX_EMBEDDING_PROVIDER` alone does
+not enable it, and a missing key does not fall through to MLX. Moving
 existing text requires the separate explicit migration action.
 
 Status is synchronous and cheap (marker only). Before first inference per

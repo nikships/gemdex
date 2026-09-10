@@ -94,7 +94,7 @@ than crashing. Ask Claude to help choose, then run **one** option on your machin
 
 ```bash
 npx gemdex-mcp setup gemini # Hidden API-key prompt; validates before saving
-npx gemdex-mcp install      # Apple Silicon: download runtime + BGE-M3, activate MLX text
+npx gemdex-mcp install      # Apple Silicon: download runtime + BGE-M3, set GEMINI_API_KEY=local
 # Or connect an existing server (hidden bearer-token prompt):
 npx gemdex-mcp init-remote home https://memory.example.com
 ```
@@ -111,15 +111,19 @@ LanceDB bank, run `npx gemdex-mcp migrate-text`. Progress is reported and the co
 is safe to re-run. Media rows/blobs stay on Gemini, including attachments belonging
 to parents whose text moves. Recall searches both banks and returns whole parents.
 Gemini-backed history/media still needs a working key/network; failure is reported,
-not silently presented as complete recall. MLX-only text needs no Gemini key.
+not silently presented as complete recall. With `GEMINI_API_KEY=local` (exact
+lowercase), MLX text runs offline; that sentinel is the **only** way to enable
+the local LLM path — any other key value uses Gemini, and a missing key still
+requires setup (`GEMDEX_EMBEDDING_PROVIDER=mlx` alone does not activate it).
 
 `npx gemdex-mcp embedding gemini` switches future text writes back without losing
-MLX history; `embedding mlx` switches again. Settings persist in `~/.gemdex/.env`
-with `0600` permissions and are shared by MCP and the macOS **Storage & Gemini**
-panel (install/progress/migrate/provider controls). Launch environment variables
-override saved settings; remove stale provider/mode/key overrides from your MCP
-configuration before switching. Retry a tool after setup; if needed reconnect via
-Claude Code `/mcp`. `npx gemdex-mcp status` shows readiness without printing secrets.
+MLX history (needs a real key); `embedding mlx` writes `GEMINI_API_KEY=local`
+again. Settings persist in `~/.gemdex/.env` with `0600` permissions and are shared
+by MCP and the macOS **Storage & Gemini** panel (install/progress/migrate/provider
+controls). Launch environment variables override saved settings; remove stale
+provider/mode/key overrides from your MCP configuration before switching. Retry a
+tool after setup; if needed reconnect via Claude Code `/mcp`.
+`npx gemdex-mcp status` shows readiness without printing secrets.
 
 **Any other MCP client** (Cursor, Codex CLI, Windsurf, Cline, Continue, Zed…):
 
