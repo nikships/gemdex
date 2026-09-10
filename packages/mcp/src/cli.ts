@@ -20,7 +20,7 @@ import {
     factoryPresetFolder,
 } from 'gemdex-core';
 import { ClientConfigStore, StoredRemote, tokenEnvVarForRemote } from './cli-config.js';
-import { createConfig } from './config.js';
+import { createConfig, isLocalGeminiApiKey } from './config.js';
 import { errorMessage } from './errors.js';
 import { createMemoryBackend } from './memory.js';
 import { authorizeSync } from './sync-auth.js';
@@ -501,6 +501,9 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
             }
             const key = await io.readSecret('Gemini API key (hidden): ', args.includes('--key-stdin'));
             if (!key || /[\r\n]/.test(key)) throw new Error('A single non-empty Gemini API key is required.');
+            if (isLocalGeminiApiKey(key)) {
+                throw new Error('The literal value "local" activates managed MLX text, not Gemini. Run npx gemdex-mcp install, or enter a real Gemini API key.');
+            }
             if (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== key) {
                 throw new Error('GEMINI_API_KEY in the launch environment would override this key. Remove it before setup.');
             }
@@ -508,8 +511,8 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
             try {
                 if (dependencies.validateGeminiKey) await dependencies.validateGeminiKey(key);
                 else {
-                    const config = createConfig((name) => name === 'GEMDEX_MODE' ? 'local' : name === 'GEMDEX_EMBEDDING_PROVIDER' ? 'gemini' : store.getEnv(name));
-                    await createEmbeddingInstance({ ...config, geminiApiKey: key }).embed('Gemdex setup validation');
+                    const config = createConfig((name) => name === 'GEMDEX_MODE' ? 'local' : name === 'GEMINI_API_KEY' ? key : store.getEnv(name));
+                    await createEmbeddingInstance(config).embed('Gemdex setup validation');
                 }
             } catch {
                 throw new Error('Gemini validation failed; saved configuration was not changed. Check your key, network, API access and quota, then retry.');
@@ -528,7 +531,7 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
                 if (args.length !== 1) throw new Error(`Usage: npx gemdex-mcp ${command}`);
                 if (command === 'install') {
                     await installLocalModel(store, (message) => io.stderr(`${message}\n`));
-                    io.stdout('Local MLX text is active. Existing memories were not migrated. Run npx gemdex-mcp migrate-text to move existing text; media stays on Gemini.\n');
+                    io.stdout('Local MLX text is active (GEMINI_API_KEY=local). Existing memories were not migrated. Run npx gemdex-mcp migrate-text to move existing text; media needs a real Gemini key.\n');
                 } else {
                     await migrateLocalText(store, (completed, total) => io.stderr(`Migrating text: ${completed}/${total}\n`));
                     io.stdout('Text migration complete. Attachment rows and blobs remain on Gemini.\n');
@@ -598,7 +601,11 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
                 io.stdout(`Store: ${store.getEnv('LANCEDB_PATH') ?? '~/.gemdex/lance'}\n`);
                 const model = localModelStatus(store);
                 io.stdout(`Text provider: ${model.provider}\nLocal model: ${model.status} (${model.model})\n`);
-                io.stdout(`Gemini key: ${store.getEnv('GEMINI_API_KEY') ? 'configured (not validated by status)' : 'missing — run npx gemdex-mcp setup gemini or install'}\n`);
+                const rawKey = store.getEnv('GEMINI_API_KEY');
+                const keyStatus = isLocalGeminiApiKey(rawKey)
+                    ? 'local sentinel (MLX text)'
+                    : (rawKey ? 'configured (not validated by status)' : 'missing — run npx gemdex-mcp setup gemini or install');
+                io.stdout(`Gemini key: ${keyStatus}\n`);
                 return 0;
             }
             const selected = resolveRemote(store, requestedName);

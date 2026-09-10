@@ -1,6 +1,6 @@
 import { getMlxStatus, installMlxModel, LocalMemoryBackend } from 'gemdex-core';
 import { ClientConfigStore } from './cli-config.js';
-import { createConfig } from './config.js';
+import { createConfig, isLocalGeminiApiKey, LOCAL_GEMINI_API_KEY_SENTINEL } from './config.js';
 import { createMemoryBackend } from './memory.js';
 
 export type TextProvider = 'gemini' | 'mlx';
@@ -16,7 +16,8 @@ export interface LocalModelStatus {
 
 export function localModelStatus(store = new ClientConfigStore()): LocalModelStatus {
     const runtime = getMlxStatus(store.rootDir);
-    const provider = store.getEnv('GEMDEX_EMBEDDING_PROVIDER') === 'mlx' ? 'mlx' : 'gemini';
+    // Active MLX text is gated solely by GEMINI_API_KEY=local (exact lowercase).
+    const provider: TextProvider = isLocalGeminiApiKey(store.getEnv('GEMINI_API_KEY')) ? 'mlx' : 'gemini';
     return {
         provider, installed: runtime.installed, model: runtime.model,
         status: runtime.installed ? (provider === 'mlx' ? 'active' : 'installed') : 'not-installed',
@@ -28,19 +29,39 @@ export function chooseTextProvider(store: ClientConfigStore, provider: string): 
     if (provider === 'mlx' && !getMlxStatus(store.rootDir).installed) {
         throw new Error('Install the local model first: npx gemdex-mcp install.');
     }
-    if (provider === 'gemini' && !store.getEnv('GEMINI_API_KEY')?.trim()) {
-        throw new Error('Configure Gemini first: npx gemdex-mcp setup gemini.');
+    if (provider === 'gemini') {
+        const key = store.getEnv('GEMINI_API_KEY')?.trim();
+        if (!key || isLocalGeminiApiKey(key)) {
+            throw new Error('Configure Gemini first: npx gemdex-mcp setup gemini.');
+        }
     }
-    const override = process.env.GEMDEX_EMBEDDING_PROVIDER;
-    if (override && override !== provider) {
+    const keyOverride = process.env.GEMINI_API_KEY;
+    if (provider === 'mlx' && keyOverride && !isLocalGeminiApiKey(keyOverride)) {
+        throw new Error('GEMINI_API_KEY in the launch environment overrides local mode. Set it to local or remove it before switching.');
+    }
+    if (provider === 'gemini' && isLocalGeminiApiKey(keyOverride)) {
+        throw new Error('GEMINI_API_KEY=local in the launch environment forces MLX. Remove it before selecting Gemini.');
+    }
+    const providerOverride = process.env.GEMDEX_EMBEDDING_PROVIDER;
+    if (providerOverride && providerOverride !== provider) {
         throw new Error('GEMDEX_EMBEDDING_PROVIDER in the launch environment overrides saved settings. Remove it from your MCP/shell configuration before switching.');
     }
-    store.setEnv('GEMDEX_EMBEDDING_PROVIDER', provider);
+    if (provider === 'mlx') {
+        store.setEnvValues({
+            GEMDEX_EMBEDDING_PROVIDER: 'mlx',
+            GEMINI_API_KEY: LOCAL_GEMINI_API_KEY_SENTINEL,
+        });
+        return;
+    }
+    store.setEnv('GEMDEX_EMBEDDING_PROVIDER', 'gemini');
 }
 
 export async function installLocalModel(store: ClientConfigStore, onProgress: (message: string) => void): Promise<void> {
     if (process.env.GEMDEX_EMBEDDING_PROVIDER && process.env.GEMDEX_EMBEDDING_PROVIDER !== 'mlx') {
         throw new Error('Remove GEMDEX_EMBEDDING_PROVIDER from the launch environment before installing and activating MLX.');
+    }
+    if (process.env.GEMINI_API_KEY && !isLocalGeminiApiKey(process.env.GEMINI_API_KEY)) {
+        throw new Error('Remove GEMINI_API_KEY from the launch environment (or set it to local) before installing and activating MLX.');
     }
     await installMlxModel({ homeDir: store.rootDir, onProgress });
     chooseTextProvider(store, 'mlx');

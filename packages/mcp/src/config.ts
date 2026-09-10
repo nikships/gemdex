@@ -35,19 +35,29 @@ export function getEmbeddingModel(getEnv: EnvGetter = defaultEnvGetter): string 
     return getEnv('EMBEDDING_MODEL') || DEFAULT_EMBEDDING_MODEL;
 }
 
+/** Exact lowercase sentinel: MCP/local env GEMINI_API_KEY=local activates managed MLX text. */
+export const LOCAL_GEMINI_API_KEY_SENTINEL = 'local';
+
+export function isLocalGeminiApiKey(value: string | undefined | null): boolean {
+    return value === LOCAL_GEMINI_API_KEY_SENTINEL;
+}
+
 export function createConfig(getEnv: EnvGetter = defaultEnvGetter): GemdexConfig {
     const mode = resolveMode(getEnv);
-    const embeddingProvider = getEnv('GEMDEX_EMBEDDING_PROVIDER') ?? 'gemini';
-    if (mode === 'local' && embeddingProvider !== 'gemini' && embeddingProvider !== 'mlx') {
-        throw new Error('GEMDEX_EMBEDDING_PROVIDER must be gemini or mlx.');
-    }
+    const rawGeminiApiKey = getEnv('GEMINI_API_KEY');
+    // Local MLX text activates only when the Gemini key env is exactly "local".
+    // GEMDEX_EMBEDDING_PROVIDER alone must not select MLX; empty/missing key must
+    // not fall through to local (onboarding / missing-key errors still apply).
+    const useLocalLlm = isLocalGeminiApiKey(rawGeminiApiKey);
+    const embeddingProvider: 'gemini' | 'mlx' = useLocalLlm ? 'mlx' : 'gemini';
     const remoteConfig = mode === 'remote' ? loadRemoteConfig(getEnv) : null;
     return {
         name: getEnv('MCP_SERVER_NAME') || "Gemdex Memory MCP",
         version: getEnv('MCP_SERVER_VERSION') || PACKAGE_VERSION,
         embeddingModel: getEmbeddingModel(getEnv),
-        embeddingProvider: embeddingProvider === 'mlx' ? 'mlx' : 'gemini',
-        geminiApiKey: getEnv('GEMINI_API_KEY'),
+        embeddingProvider,
+        // Never pass the sentinel into Gemini clients.
+        geminiApiKey: useLocalLlm ? undefined : rawGeminiApiKey,
         geminiBaseUrl: getEnv('GEMINI_BASE_URL'),
         lancedbPath: getEnv('LANCEDB_PATH'),
         mode,
@@ -66,7 +76,7 @@ export function logConfigurationSummary(config: GemdexConfig): void {
         return;
     }
     console.log(`[MCP]   Text embedding: ${config.embeddingProvider ?? 'gemini'}; media: Gemini / ${config.embeddingModel}`);
-    console.log(`[MCP]   Gemini API Key: ${config.geminiApiKey ? '✅ Configured' : '❌ Missing'}`);
+    console.log(`[MCP]   Gemini API Key: ${config.embeddingProvider === 'mlx' ? '✅ local (MLX text)' : config.geminiApiKey ? '✅ Configured' : '❌ Missing'}`);
     if (config.geminiBaseUrl) console.log(`[MCP]   Gemini Base URL: ${config.geminiBaseUrl}`);
     console.log(`[MCP]   LanceDB Path: ${config.lancedbPath || '[default: ~/.gemdex/lance]'}`);
 }
@@ -77,11 +87,11 @@ Gemdex — memory layer for AI coding agents (Gemini embeddings + LanceDB)
 
 Usage:
   npx gemdex-mcp setup gemini     Validate and securely save a Gemini key.
-  npx gemdex-mcp install          Install managed BGE-M3 MLX and activate local text
+  npx gemdex-mcp install          Install managed BGE-M3 MLX and set GEMINI_API_KEY=local
                                    (Apple Silicon only; no migration).
   npx gemdex-mcp migrate-text     Re-embed existing text into MLX; preserve media.
   npx gemdex-mcp embedding mlx|gemini
-                                   Persist provider for future text writes.
+                                   mlx writes GEMINI_API_KEY=local; gemini needs a real key.
   npx gemdex-mcp status           Show setup/provider status without printing keys.
   npx gemdex-mcp@latest            Start the MCP server (stdio) exposing
                                    save_memory, recall, update_memory.
@@ -120,8 +130,11 @@ Usage:
 
 Optional:
   GEMDEX_MODE             local (default) or remote.
-  GEMINI_API_KEY          Required for Gemini text, media and history digestion.
-  GEMDEX_EMBEDDING_PROVIDER gemini (default) or mlx; prefer persistent CLI settings.
+  GEMINI_API_KEY          Real Google AI key for Gemini text/media/digestion, or
+                          the exact sentinel "local" to use managed MLX text
+                          (install first). Empty/missing still requires setup.
+  GEMDEX_EMBEDDING_PROVIDER Written by CLI/app for status; activation is gated
+                          only by GEMINI_API_KEY=local (exact lowercase).
   EMBEDDING_MODEL         Gemini model name (default: gemini-embedding-2).
                           Supported: gemini-embedding-2, gemini-embedding-001.
   EMBEDDING_DIMENSION     Override the embedding output dimension.

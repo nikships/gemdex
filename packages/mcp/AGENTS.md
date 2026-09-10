@@ -182,20 +182,30 @@ Invariants:
 ## Local text providers and first-run setup
 
 `local-model.ts` owns shared CLI/sidecar install, provider persistence and text
-migration orchestration. `install` explicitly downloads the managed BGE-M3 MLX
-runtime and activates text MLX without migrating. `migrate-text` is separate;
-`embedding mlx|gemini` changes future text writes. `setup gemini` validates a
-hidden-prompt key before writing `0600` settings. Authenticated
-`/settings/embedding*` routes expose the same operations with async job polling.
-The Swift app's MLX text gate is independent of Gemini readiness; history
-digestion and media still require Gemini.
+migration orchestration. **Gating rule:** managed local MLX text activates
+**only** when `GEMINI_API_KEY` is the exact lowercase sentinel `local`
+(`isLocalGeminiApiKey` / `LOCAL_GEMINI_API_KEY_SENTINEL` in `config.ts`).
+`createConfig` then sets `embeddingProvider: 'mlx'` and clears `geminiApiKey` so
+the sentinel never reaches Gemini clients. Any other non-empty key value is a
+real Gemini key (`embeddingProvider: 'gemini'`). Empty/missing keys keep
+onboarding / missing-key errors — they must not fall through to MLX.
+`GEMDEX_EMBEDDING_PROVIDER=mlx` alone does **not** select local LLM.
+
+`install` downloads the managed BGE-M3 MLX runtime and writes
+`GEMINI_API_KEY=local` (plus `GEMDEX_EMBEDDING_PROVIDER=mlx` for status) without
+migrating. `migrate-text` is separate; `embedding mlx|gemini` changes future
+writes (`mlx` → sentinel; `gemini` requires a real saved key). `setup gemini`
+rejects the literal `local` string and validates a hidden-prompt key before
+writing `0600` settings. Authenticated `/settings/embedding*` routes expose the
+same operations with async job polling. History digestion and media still require
+a real Gemini key.
 
 MCP startup no longer constructs the backend. All seven tools remain discoverable
 without configuration, return `onboarding.ts` setup choices before executing any
 handler, and re-read saved configuration on subsequent calls. The factory always
-knows both local banks so switch-back cannot hide historical MLX rows. A missing
-Gemini placeholder allows local MLX-only use but throws if cloud embeddings are
-actually needed; populated-bank recall failures are never silently omitted.
+knows both local banks so switch-back cannot hide historical MLX rows. With the
+`local` sentinel, UnconfiguredGeminiEmbedding covers media until a real key is
+configured; populated-bank recall failures are never silently omitted.
 
 ## Local vs remote is per-process
 
@@ -207,7 +217,7 @@ configuration per tool call, and sidecar mode changes replace its backend. The
 local and remote pools never merge.
 
 - **Remote mode needs no client `GEMINI_API_KEY`** — the server embeds. Local
-  MLX text also needs no key; local Gemini/media and digestion do.
+  MLX text uses `GEMINI_API_KEY=local`; local Gemini/media and digestion need a real key.
 - **Named remotes** live in `~/.gemdex/config.json` (`{url, tokenEnvVar}` per
   name). **Tokens never go in that file** — they live in `~/.gemdex/.env`
   (`0600`, dir `0700`) under `GEMDEX_REMOTE_TOKEN_<NAME>` and are never printed.

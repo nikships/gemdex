@@ -17,21 +17,31 @@ help choose, then run one command on your machine:
 
 - `npx gemdex-mcp setup gemini` — hidden key prompt, validated before persistence.
 - `npx gemdex-mcp install` — Apple Silicon only: installs managed Python/MLX and
-  pinned `mlx-community/bge-m3-mlx-8bit`, then activates local text embeddings.
+  pinned `mlx-community/bge-m3-mlx-8bit`, then sets `GEMINI_API_KEY=local`
+  (exact lowercase) so local text embeddings activate.
   Requires macOS 14+ and native arm64 Node (not Rosetta).
   No preinstalled Python, uv, Homebrew, Hugging Face tooling or compiler needed.
 - `npx gemdex-mcp init-remote home https://memory.example.com` — connect an
   existing server, with a hidden bearer-token prompt.
 
+**Local LLM gate:** the managed local model is used **only** when the Gemini API
+key env value is exactly `local` (e.g. MCP `"GEMINI_API_KEY": "local"` or
+`~/.gemdex/.env` after `install` / `embedding mlx`). Any other non-empty value is
+treated as a real Gemini API key. Empty/missing still requires setup — it does
+**not** fall through to local MLX. `GEMDEX_EMBEDDING_PROVIDER=mlx` alone is not
+enough.
+
 Install needs network access and **does not migrate existing memories**. Use
 `npx gemdex-mcp migrate-text` separately to move text into a new 1024-dimensional
 bank, with rerunnable progress. Media/attachment rows stay on Gemini. Recall
 searches both banks; it reports a Gemini failure rather than silently hiding
-legacy/media memories. New MLX-only text works offline without a Gemini key.
+legacy/media memories. With `GEMINI_API_KEY=local`, new MLX-only text works
+offline; media and history digestion still need a real Gemini key.
 
 Use `npx gemdex-mcp embedding gemini` or `embedding mlx` to switch future text
-writes, and `npx gemdex-mcp status` to inspect configuration. Settings are saved
-under `~/.gemdex` and shared with the Swift app's **Storage & Gemini** controls.
+writes (`mlx` writes `GEMINI_API_KEY=local`; `gemini` needs a real key), and
+`npx gemdex-mcp status` to inspect configuration. Settings are saved under
+`~/.gemdex` and shared with the Swift app's **Storage & Gemini** controls.
 Remove conflicting launch environment overrides before switching. Retry the tool
 after setup; reconnect via Claude Code `/mcp` if needed. History digestion and
 media still need Gemini; BYOI continues to embed server-side unchanged.
@@ -188,7 +198,7 @@ npx gemdex serve --port 0   # 127.0.0.1 only; --port 0 = OS picks a free port
 | Variable | Description |
 |----------|-------------|
 | `GEMDEX_MODE` | `local` (default) or `remote` |
-| `GEMINI_API_KEY` | Required in local mode; Google AI Studio API key |
+| `GEMINI_API_KEY` | Real Google AI Studio key, or exact `local` for managed MLX text |
 | `LANCEDB_PATH` | *(optional)* Custom directory for the embedded store (default `~/.gemdex/lance`) |
 | `GEMDEX_REMOTE_URL` | Required in remote mode; Gemdex Server root URL |
 | `GEMDEX_REMOTE_TOKEN` | Required in remote mode by default; server bearer token |

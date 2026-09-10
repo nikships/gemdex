@@ -31,7 +31,7 @@ import {
     sendJson,
 } from "gemdex-core";
 import { ClientConfigStore, StoredRemote, tokenEnvVarForRemote } from "./cli-config.js";
-import { createConfig, GemdexConfig } from "./config.js";
+import { createConfig, GemdexConfig, isLocalGeminiApiKey } from "./config.js";
 import { errorMessage } from "./errors.js";
 import { createEmbeddingInstance } from "./embedding.js";
 import { createMemoryBackend } from "./memory.js";
@@ -231,11 +231,15 @@ function geminiIsReady(ctx: ServeContext): boolean {
 
 /** Persist a validated key, expose it to this process, and rebuild the local store. */
 function configureApiKey(ctx: ServeContext, apiKey: string, readiness: GeminiReadiness): void {
-    clientConfigStore(ctx).setEnv('GEMINI_API_KEY', apiKey);
+    clientConfigStore(ctx).setEnvValues({
+        GEMINI_API_KEY: apiKey,
+        GEMDEX_EMBEDDING_PROVIDER: 'gemini',
+    });
     process.env['GEMINI_API_KEY'] = apiKey;
     ctx.config = {
         ...ctx.config,
         geminiApiKey: apiKey,
+        embeddingProvider: 'gemini',
     };
     // Drop any in-flight validation so a stale resolve cannot overwrite this result.
     ctx.geminiValidation = undefined;
@@ -728,10 +732,18 @@ export function createServer(ctx: ServeContext): http.Server {
 
             if (ctx.config.mode === 'local') {
                 const configStore = clientConfigStore(ctx);
-                const provider = configStore.getEnv('GEMDEX_EMBEDDING_PROVIDER') ?? ctx.config.embeddingProvider ?? 'gemini';
-                if ((provider === 'mlx' || provider === 'gemini') &&
-                    provider !== (ctx.config.embeddingProvider ?? 'gemini')) {
-                    const next: GemdexConfig = { ...ctx.config, embeddingProvider: provider, geminiApiKey: configStore.getEnv('GEMINI_API_KEY') ?? ctx.config.geminiApiKey };
+                const rawKey = configStore.getEnv('GEMINI_API_KEY');
+                // Prefer an explicit sentinel/real key from env/store; otherwise keep the
+                // in-memory provider (tests and mid-request config mutations).
+                const storedProvider: 'mlx' | 'gemini' | undefined = isLocalGeminiApiKey(rawKey)
+                    ? 'mlx'
+                    : (rawKey ? 'gemini' : undefined);
+                const provider = storedProvider ?? ctx.config.embeddingProvider ?? 'gemini';
+                if (provider !== (ctx.config.embeddingProvider ?? 'gemini')) {
+                    const geminiApiKey = isLocalGeminiApiKey(rawKey)
+                        ? undefined
+                        : (rawKey || ctx.config.geminiApiKey);
+                    const next: GemdexConfig = { ...ctx.config, embeddingProvider: provider, geminiApiKey };
                     const nextStore = buildStore(next, ctx.createBackend);
                     ctx.config = next;
                     ctx.store = nextStore;
@@ -753,6 +765,14 @@ export function createServer(ctx: ServeContext): http.Server {
                 const apiKey = trimmedString(body?.apiKey);
                 if (apiKey.length === 0) {
                     sendJson(res, 400, { error: "'apiKey' is required" }, corsHeaders);
+                    return;
+                }
+                if (isLocalGeminiApiKey(apiKey)) {
+                    sendJson(res, 400, {
+                        error: 'Use Storage & Gemini install/provider controls for local MLX (GEMINI_API_KEY=local). POST /config expects a real Gemini API key.',
+                        configured: false,
+                        needsKey: true,
+                    }, corsHeaders);
                     return;
                 }
                 const readiness = await validateGeminiKey(ctx, apiKey);
@@ -831,7 +851,13 @@ export function createServer(ctx: ServeContext): http.Server {
                             throw new Error('Validate your Gemini key in Storage & Gemini before switching text to Gemini.');
                         }
                         chooseTextProvider(configStore, trimmedString(body?.provider));
-                        ctx.config = { ...ctx.config, embeddingProvider: localModelStatus(configStore).provider };
+                        const status = localModelStatus(configStore);
+                        const rawKey = configStore.getEnv('GEMINI_API_KEY');
+                        ctx.config = {
+                            ...ctx.config,
+                            embeddingProvider: status.provider,
+                            geminiApiKey: isLocalGeminiApiKey(rawKey) ? undefined : rawKey,
+                        };
                         ctx.store = buildStore(ctx.config, ctx.createBackend);
                         ctx.localModelJob = undefined;
                         sendJson(res, 200, localModelStatus(configStore), corsHeaders);
@@ -851,9 +877,15 @@ export function createServer(ctx: ServeContext): http.Server {
                     ? installLocalModel(configStore, (message) => { job.message = message; })
                     : migrateLocalText(configStore, (completed, total) => { job.completed = completed; job.total = total; });
                 void operation.then(() => {
-                    ctx.config = { ...ctx.config, embeddingProvider: localModelStatus(configStore).provider };
+                    const status = localModelStatus(configStore);
+                    const rawKey = configStore.getEnv('GEMINI_API_KEY');
+                    ctx.config = {
+                        ...ctx.config,
+                        embeddingProvider: status.provider,
+                        geminiApiKey: isLocalGeminiApiKey(rawKey) ? undefined : rawKey,
+                    };
                     ctx.store = buildStore(ctx.config, ctx.createBackend);
-                    ctx.localModelJob = { ...localModelStatus(configStore), message: installing ? 'Installed. Existing memories were not migrated.' : 'Text migration complete. Media remains on Gemini.' };
+                    ctx.localModelJob = { ...status, message: installing ? 'Installed. Existing memories were not migrated.' : 'Text migration complete. Media remains on Gemini.' };
                 }).catch((error: unknown) => {
                     ctx.localModelJob = { ...job, status: 'error', message: errorMessage(error) };
                 });
