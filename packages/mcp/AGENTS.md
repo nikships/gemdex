@@ -17,7 +17,7 @@ build/test/lint/style rules are repo-wide — see the root `AGENTS.md`.
 |------|------|
 | `src/index.ts` | The single entry point + `bin`. Reroutes console→stderr, decides which of the three modes to run, defines the five MCP tool **schemas/descriptions**, constructs the `MemoryStatsStore`, runs the stdio server. |
 | `src/serve.ts` | `gemdex serve` localhost HTTP sidecar: bind/token/origin auth + sidecar-only `/config` & `/settings*` routes; delegates data routes to core. |
-| `src/handlers.ts` | MCP tool **logic** (`save_memory`/`recall`/`get_memory`/`update_memory`/`report_outcome`/`read_attachment`): arg validation, attachment resolution, title-index recall + full `get_memory`, stats bump on open, track-record rendering + opt-in trust re-ranking, save-time similar-memory advisory rendering, transcript/blob text fetch. Never throws to the protocol. |
+| `src/handlers.ts` | MCP tool **logic** (`save_memory`/`recall`/`get_memory`/`update_memory`/`report_outcome`/`read_attachment`/`delete_memory`): arg validation, attachment resolution, title-index recall + full `get_memory`, stats bump on open, track-record rendering + opt-in trust re-ranking, save-time similar-memory advisory rendering, transcript/blob text fetch, delete + `removeStats`. Never throws to the protocol. |
 | `src/cli.ts` | CLI verbs (`init-remote`, `remote …`, `mode …`, `status`, `import-local-to-remote`, `ingest-history`, `sync-history`). `runHistoryPipeline` is the shared scan→digest→upsert body behind the last two. |
 | `src/sync-target.ts` | `RemoteSyncTarget` — an `IngestTarget` that POSTs digests to a remote host's `/mcp/sync/records` in batches of 25, refreshing the token exactly once on a 401. Write-only: it cannot recall or delete. |
 | `src/sync-auth.ts` | The OAuth client for `sync-history`: `LoopbackReceiver` (RFC 8252 §7.3 loopback redirect) + `SyncOAuthClientProvider` + `authorizeSync()`, which drives the MCP SDK's `auth()` (DCR → PKCE → refresh) and only opens a browser when the SDK says `'REDIRECT'`. |
@@ -26,7 +26,7 @@ build/test/lint/style rules are repo-wide — see the root `AGENTS.md`.
 | `src/memory.ts` | `createMemoryBackend(config)` — the one place that picks `LocalMemoryBackend` vs `RemoteMemoryBackend`. |
 | `src/cli-config.ts` | `ClientConfigStore` — reads/writes `~/.gemdex/config.json` (named remotes) and `~/.gemdex/.env` (tokens, `0600`). |
 | `src/embedding.ts` | `createEmbeddingInstance` — **throws if no `GEMINI_API_KEY`** in local mode. |
-| `src/tool-names.ts` | The frozen tuple `['save_memory','recall','get_memory','update_memory','report_outcome','read_attachment']`; indices are referenced positionally in `index.ts`. |
+| `src/tool-names.ts` | The frozen tuple `['save_memory','recall','get_memory','update_memory','report_outcome','read_attachment','delete_memory']`; indices are referenced positionally in `index.ts`. |
 | `integration/byoi.mjs` | End-to-end BYOI harness (real server + built mcp dist + Postgres/pgvector). |
 
 ## One binary, three modes — how `main()` routes
@@ -118,7 +118,7 @@ JSON → `400`.
 
 ## MCP tool contract
 
-Schemas/descriptions live in `index.ts`; logic in `handlers.ts`. Six tools.
+Schemas/descriptions live in `index.ts`; logic in `handlers.ts`. Seven tools.
 **Handlers never throw to the protocol** — on failure they return
 `{ content:[…], isError:true }` with a human-readable message.
 
@@ -130,11 +130,13 @@ Schemas/descriptions live in `index.ts`; logic in `handlers.ts`. Six tools.
 | `update_memory` | `id` + ≥1 of `content`/`edits`/`title`/`attachments` | `content`, `edits`, `title`, `attachments` | `Updated memory.` + `id:` + `title:` |
 | `report_outcome` | `id`, `outcome` (`worked`\|`failed`\|`stale`) | `note` (≤500 chars) | `Recorded outcome for "<title>".` + `id:` + `track record: recalled N×, worked N×, failed N×, stale N×` |
 | `read_attachment` | `memory_id` | `attachment_id`, `max_chars` | Attachment bytes as UTF-8 or base64 |
+| `delete_memory` | `id` | — | `Deleted memory.` + `id:` + `title:` (clears client stats) |
 
 Invariants:
-- **No delete tool — by design.** Deletion is a deliberate human action in the
-  desktop app; the *sidecar/core* exposes `DELETE /memories/:id`, the MCP surface
-  deliberately does not.
+- **`delete_memory` is intentional.** Validates with `store.get` first (clear
+  not-found), then `store.delete`, then best-effort `statsStore.removeStats`.
+  Prefer `update_memory` for in-place corrections; delete when the memory should
+  be gone. Confirm with the user when unsure.
 - `recall` is a **title index only** (hybrid dense+BM25 fused in core). Fixed
   top 10; no `limit`/`detail`/media-query params. Agents open useful hits with
   `get_memory`. Core/BYOI `/v1/recall` still returns full content for web/desktop.
@@ -188,7 +190,7 @@ hidden-prompt key before writing `0600` settings. Authenticated
 The Swift app's MLX text gate is independent of Gemini readiness; history
 digestion and media still require Gemini.
 
-MCP startup no longer constructs the backend. All six tools remain discoverable
+MCP startup no longer constructs the backend. All seven tools remain discoverable
 without configuration, return `onboarding.ts` setup choices before executing any
 handler, and re-read saved configuration on subsequent calls. The factory always
 knows both local banks so switch-back cannot hide historical MLX rows. A missing
@@ -284,14 +286,14 @@ loopback redirect. Consequences worth knowing:
   "simplify" it by widening it to `MemoryBackend`.
 - **Missing configuration is repairable.** MCP returns setup guidance for every tool instead of exiting. The sidecar validates Gemini asynchronously and gates Gemini-mode work; active MLX text does not require that key. The low-level Gemini factory still requires a key, but the local dual-bank factory supplies a throwing placeholder when MLX is active without one.
 - **History ingestion is permanently new-sessions-only.** The core manager runs only ledger-new files. Changed previously ingested sessions may appear in scan diagnostics but are never passed to standard or batch digestion; the sidecar ignores legacy `newOnly` request fields and the CLI exposes no override.
-- **Tool routing is positional**: `index.ts` switches on `MCP_TOOL_NAMES[0..5]`.
+- **Tool routing is positional**: `index.ts` switches on `MCP_TOOL_NAMES[0..6]`.
   Reordering `tool-names.ts` silently rewires the handlers. Adding a tool means
   appending to the tuple, defining its schema in `index.ts`, adding a `case`,
   and a `handle*` method in `handlers.ts`.
 - **`runCli` returning `null` means "not mine, fall through to MCP."** A new verb
   that isn't added to `CLI_COMMANDS` will boot the stdio server instead of erroring.
-- **No MCP delete tool**, but `DELETE /memories/:id` exists in the
-  sidecar/core router — don't "add" delete to MCP to mirror it.
+- **`delete_memory` is on stdio MCP**; sidecar/core `DELETE /memories/:id` and
+  the web/desktop managers remain available. HTTP MCP still omits delete.
 - **`attachments:[]` clears media; omitting it preserves media** — the two are not
   the same. Same semantics in MCP `update_memory` and core `PUT/PATCH`.
 - The sidecar reuses the **core** router for data routes — fix a memory-API bug in

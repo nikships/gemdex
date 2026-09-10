@@ -5,4 +5,5 @@ export const MCP_TOOL_NAMES = [
     'update_memory',
     'report_outcome',
     'read_attachment',
+    'delete_memory',
 ] as const;

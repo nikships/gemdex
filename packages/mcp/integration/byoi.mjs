@@ -242,7 +242,7 @@ async function run() {
         }));
         const memoryId = memoryIdFrom(saveText);
 
-        log('verifying a deep chunk hit returns the full parent through MCP');
+        log('verifying a deep chunk hit surfaces in the title-index recall');
         const recallText = toolText(await mcpClient.callTool({
             name: 'recall',
             arguments: {
@@ -250,9 +250,20 @@ async function run() {
                 limit: 5,
             },
         }));
-        assert.match(recallText, /START-OF-PARENT/);
-        assert.match(recallText, /END-OF-PARENT/);
+        assert.match(recallText, /titles only/);
+        assert.match(recallText, /BYOI integration parent/);
         assert.match(recallText, new RegExp(memoryId));
+        assert.doesNotMatch(recallText, /START-OF-PARENT/);
+        assert.doesNotMatch(recallText, /END-OF-PARENT/);
+
+        log('opening the recalled memory with get_memory for full parent content');
+        const getText = toolText(await mcpClient.callTool({
+            name: 'get_memory',
+            arguments: { id: memoryId },
+        }));
+        assert.match(getText, /START-OF-PARENT/);
+        assert.match(getText, /END-OF-PARENT/);
+        assert.match(getText, new RegExp(memoryId));
 
         log('updating the remote memory through MCP');
         const updateText = toolText(await mcpClient.callTool({

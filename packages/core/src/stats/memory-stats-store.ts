@@ -93,7 +93,7 @@ export class MemoryStatsStore {
         return stats;
     }
 
-    /** Drop all stats for a memory id. Harmless (no-op) if none exist — for future delete integration. */
+    /** Drop all stats for a memory id. Harmless (no-op) if none exist — called from MCP `delete_memory`. */
     removeStats(id: string): void {
         const file = this.load();
         if (!(id in file.memories)) return;

@@ -8,7 +8,7 @@ Local-only MLX settings do not add a public BYOI embedding path. The sidecar's
 `/settings/embedding*` routes (`packages/mcp/src/serve.ts`) remain behind its
 per-launch token and Origin checks. Only explicit install downloads runtime/model
 artifacts; no tool performs installation or migration implicitly. The stdio
-first-run gate (`packages/mcp/src/index.ts`, `onboarding.ts`) keeps all six tools
+first-run gate (`packages/mcp/src/index.ts`, `onboarding.ts`) keeps all seven tools
 discoverable and returns setup instructions without memory writes. Local MLX
 text bypasses Gemini readiness, not sidecar authentication; Gemini-dependent
 media and ingestion still require a key. Provider/key persistence uses the
