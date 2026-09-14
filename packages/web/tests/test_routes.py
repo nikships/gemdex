@@ -8,6 +8,7 @@ server-side (above all the BYOI bearer) leaks into a response.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -46,6 +47,73 @@ def test_list_reports_attachment_count(client: TestClient, fake_byoi: FakeByoi) 
         memory(attachments=[{"id": "0", "kind": "file", "mimeType": "text/plain", "byteSize": 12}])
     )
     assert client.get("/api/memories").json()["memories"][0]["attachmentCount"] == 1
+
+
+def test_stale_filter_and_counts_use_outcome_ledger(tmp_path: object, fake_byoi: FakeByoi) -> None:
+    stats_path = Path(str(tmp_path)) / "stats.json"
+    stats_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "memories": {
+                    "a": {"staleCount": 2},
+                    "b": {"staleCount": 0},
+                    "missing": {"staleCount": 9},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    fake_byoi.memories.extend([memory("a"), memory("b"), memory("c")])
+
+    with TestClient(
+        create_app(make_dev_config(GEMDEX_STATS_PATH=str(stats_path)), byoi=fake_byoi)
+    ) as stale_client:
+        body = stale_client.get("/api/memories", params={"status": "stale"}).json()
+
+    assert [item["id"] for item in body["memories"]] == ["a"]
+    assert body["memories"][0]["staleCount"] == 2
+    assert body["total"] == 1
+    assert body["poolTotal"] == 3
+    assert body["staleTotal"] == 1
+
+
+def test_stale_filter_combines_with_literal_search(tmp_path: object, fake_byoi: FakeByoi) -> None:
+    stats_path = Path(str(tmp_path)) / "stats.json"
+    stats_path.write_text(
+        json.dumps({"version": 1, "memories": {"a": {"staleCount": 1}, "b": {"staleCount": 3}}}),
+        encoding="utf-8",
+    )
+    fake_byoi.memories.extend(
+        [
+            memory("a", title="Postgres tuning"),
+            memory("b", title="Swift concurrency"),
+            memory("c", title="Postgres backup"),
+        ]
+    )
+
+    with TestClient(
+        create_app(make_dev_config(GEMDEX_STATS_PATH=str(stats_path)), byoi=fake_byoi)
+    ) as stale_client:
+        body = stale_client.get("/api/memories", params={"status": "stale", "q": "postgres"}).json()
+
+    assert [item["id"] for item in body["memories"]] == ["a"]
+    assert body["total"] == 1
+    assert body["staleTotal"] == 2
+
+
+def test_corrupt_stats_do_not_break_memory_list(tmp_path: object, fake_byoi: FakeByoi) -> None:
+    stats_path = Path(str(tmp_path)) / "stats.json"
+    stats_path.write_text("{bad json", encoding="utf-8")
+    fake_byoi.memories.append(memory())
+
+    with TestClient(
+        create_app(make_dev_config(GEMDEX_STATS_PATH=str(stats_path)), byoi=fake_byoi)
+    ) as stale_client:
+        body = stale_client.get("/api/memories").json()
+
+    assert body["memories"][0]["staleCount"] == 0
+    assert body["staleTotal"] == 0
 
 
 def test_search_filters_on_title_and_preview(client: TestClient, fake_byoi: FakeByoi) -> None:

@@ -76,7 +76,7 @@ export function CreateMemory() {
           />
         </label>
 
-        <div className="flex items-center gap-2 pt-1">
+        <div className="flex flex-wrap items-center gap-2 pt-1">
           <button
             type="submit"
             disabled={!content.trim() || saving}

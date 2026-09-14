@@ -254,11 +254,17 @@ services:
       GEMDEX_WEB_SESSION_SECRET: ${GEMDEX_WEB_SESSION_SECRET:-}
       GEMDEX_WEB_SESSION_TTL_SECONDS: ${GEMDEX_WEB_SESSION_TTL_SECONDS:-43200}
 
+      # Read-only view of the report_outcome ledger owned by gemdex-mcp-http.
+      # This powers the web manager's stale-memory filter and report counts.
+      GEMDEX_STATS_PATH: /var/lib/gemdex-stats/stats.json
+
       # In a container `0.0.0.0` is the namespace's edge, not an exposure — the
       # published port above is loopback-only. dev mode refuses a non-loopback
       # bind unless this is set, so it is required for dev mode *here* and is
       # inert in google mode.
       GEMDEX_WEB_UNSAFE_DEV_BIND: ${GEMDEX_WEB_UNSAFE_DEV_BIND:-false}
+    volumes:
+      - gemdex-mcp-state:/var/lib/gemdex-stats:ro
     read_only: true
     tmpfs:
       - /tmp

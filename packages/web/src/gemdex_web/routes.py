@@ -24,6 +24,7 @@ from .byoi import ByoiClient, ByoiError
 from .config import Config
 from .hygiene import hygiene_status_payload
 from .ingest_history import IngestedSession, collect_sessions, summarize_repos, summarize_sources
+from .stats import MemoryStatsReader
 from .uploads import RejectedUpload, UploadError, collect_uploads
 
 router = APIRouter(prefix="/api", dependencies=[Depends(require_identity)])
@@ -67,6 +68,10 @@ def _config(request: Request) -> Config:
     return request.app.state.config
 
 
+def _stats(request: Request) -> MemoryStatsReader:
+    return request.app.state.stats
+
+
 def _byoi_http_error(error: ByoiError) -> HTTPException:
     """Translate a BYOI failure into a client-facing HTTPException.
 
@@ -104,10 +109,11 @@ def _matches(memory: dict[str, Any], needle: str) -> bool:
 async def list_memories(
     request: Request,
     q: Annotated[str | None, Query(max_length=MAX_QUERY_CHARS)] = None,
+    status: Annotated[str, Query(pattern="^(all|stale)$")] = "all",
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
 ) -> dict[str, Any]:
-    """Newest-first memory summaries, substring-filtered and paginated.
+    """Newest-first memory summaries, status-filtered, searched, and paginated.
 
     **Why the filtering is here and not in the browser or the BYOI:** the BYOI
     has no substring-search route at all (`GET /v1/memories` lists everything,
@@ -125,16 +131,19 @@ async def list_memories(
     except ByoiError as error:
         raise _byoi_http_error(error) from error
 
+    stale_counts = _stats(request).stale_counts()
+    status_matched = [m for m in memories if m.get("id") in stale_counts] if status == "stale" else memories
     needle = (q or "").strip().lower()
-    matched = [m for m in memories if _matches(m, needle)] if needle else memories
+    matched = [m for m in status_matched if _matches(m, needle)] if needle else status_matched
     page = matched[offset : offset + limit]
 
     return {
-        "memories": [_summary(m) for m in page],
+        "memories": [_summary(m, stale_counts.get(m.get("id"), 0)) for m in page],
         # `total` is the match count, not the pool size, so the UI can say
         # "12 of 340 match" without a second request.
         "total": len(matched),
         "poolTotal": len(memories),
+        "staleTotal": sum(1 for memory in memories if memory.get("id") in stale_counts),
         "offset": offset,
         "limit": limit,
     }
@@ -148,7 +157,8 @@ async def get_memory(request: Request, memory_id: str) -> dict[str, Any]:
         raise _byoi_http_error(error) from error
     if memory is None:
         raise HTTPException(status_code=404, detail="Memory not found.")
-    return {"memory": _detail(memory)}
+    stale_count = _stats(request).stale_counts().get(memory_id, 0)
+    return {"memory": _detail(memory, stale_count)}
 
 
 @router.post("/memories", status_code=201)
@@ -174,7 +184,7 @@ async def create_memory(
         memory = await _client(request).create(body)
     except ByoiError as error:
         raise _byoi_http_error(error) from error
-    return {"memory": _detail(memory)}
+    return {"memory": _detail(memory, 0)}
 
 
 @router.patch("/memories/{memory_id}")
@@ -204,7 +214,8 @@ async def update_memory(
         raise _byoi_http_error(error) from error
     if memory is None:
         raise HTTPException(status_code=404, detail="Memory not found.")
-    return {"memory": _detail(memory)}
+    stale_count = _stats(request).stale_counts().get(memory_id, 0)
+    return {"memory": _detail(memory, stale_count)}
 
 
 @router.delete("/memories/{memory_id}")
@@ -250,7 +261,8 @@ async def recall(
         results = await _client(request).recall({"query": query, "limit": limit})
     except ByoiError as error:
         raise _byoi_http_error(error) from error
-    return {"results": [_recall_result(r) for r in results]}
+    stale_counts = _stats(request).stale_counts()
+    return {"results": [_recall_result(r, stale_counts.get(r.get("id"), 0)) for r in results]}
 
 
 @router.get("/memories/{memory_id}/attachments/{attachment_id}")
@@ -479,7 +491,7 @@ async def status(request: Request) -> dict[str, Any]:
 # browser, and the frontend's types stay a contract with *this* service.
 
 
-def _summary(memory: dict[str, Any]) -> dict[str, Any]:
+def _summary(memory: dict[str, Any], stale_count: int = 0) -> dict[str, Any]:
     return {
         "id": memory.get("id"),
         "title": memory.get("title"),
@@ -487,10 +499,11 @@ def _summary(memory: dict[str, Any]) -> dict[str, Any]:
         "createdAt": memory.get("createdAt"),
         "updatedAt": memory.get("updatedAt"),
         "attachmentCount": len(memory.get("attachments") or []),
+        "staleCount": stale_count,
     }
 
 
-def _detail(memory: dict[str, Any]) -> dict[str, Any]:
+def _detail(memory: dict[str, Any], stale_count: int = 0) -> dict[str, Any]:
     return {
         "id": memory.get("id"),
         "title": memory.get("title"),
@@ -499,6 +512,7 @@ def _detail(memory: dict[str, Any]) -> dict[str, Any]:
         "createdAt": memory.get("createdAt"),
         "updatedAt": memory.get("updatedAt"),
         "attachments": [_attachment(a) for a in (memory.get("attachments") or [])],
+        "staleCount": stale_count,
     }
 
 
@@ -532,7 +546,7 @@ def _attachment(attachment: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _recall_result(result: dict[str, Any]) -> dict[str, Any]:
+def _recall_result(result: dict[str, Any], stale_count: int = 0) -> dict[str, Any]:
     """Normalize a `/v1/recall` hit into `{memory, score}`.
 
     The BYOI returns recall hits **flat** — the memory's own fields with a
@@ -543,7 +557,7 @@ def _recall_result(result: dict[str, Any]) -> dict[str, Any]:
     """
     score = result.get("score")
     return {
-        "memory": _summary(result),
+        "memory": _summary(result, stale_count),
         # Normalized to an object so a future multi-signal score (the TS
         # surfaces render `fused=… dense=… bm25=…`) is an added key rather than
         # a breaking type change in the SPA.

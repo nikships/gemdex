@@ -80,9 +80,9 @@ RUN groupadd --system --gid 10001 gemdex \
 WORKDIR /app
 COPY --from=build --chown=gemdex:gemdex /app/.venv /app/.venv
 
-# No VOLUME here, unlike mcp-http. This service is deliberately stateless: the
-# session lives in a signed cookie in the browser, so there is nothing on disk
-# to preserve and the container can run with a read-only rootfs.
+# No owned VOLUME here, unlike mcp-http. The service remains stateless; the
+# reference deployment may mount mcp-http's outcome ledger read-only so the UI
+# can show stale-report filters without gaining any writeable state.
 USER gemdex
 EXPOSE 8767
 

@@ -13,6 +13,7 @@ export interface MemorySummary {
     createdAt: number | null;
     updatedAt: number | null;
     attachmentCount: number;
+    staleCount: number;
 }
 
 export interface Attachment {
@@ -31,6 +32,7 @@ export interface MemoryDetail {
     createdAt: number | null;
     updatedAt: number | null;
     attachments: Attachment[];
+    staleCount: number;
 }
 
 export interface MemoryPage {
@@ -39,6 +41,8 @@ export interface MemoryPage {
     total: number;
     /** How many exist in total, so the UI can say "12 of 340". */
     poolTotal: number;
+    /** Memories with one or more stale outcome reports. */
+    staleTotal: number;
     offset: number;
     limit: number;
 }
@@ -242,9 +246,12 @@ async function errorDetail(response: Response): Promise<string> {
 export const api = {
     session: (): Promise<Session> => request<Session>('/api/session'),
 
-    listMemories: (params: { q?: string; offset?: number; limit?: number } = {}): Promise<MemoryPage> => {
+    listMemories: (
+        params: { q?: string; status?: 'all' | 'stale'; offset?: number; limit?: number } = {}
+    ): Promise<MemoryPage> => {
         const search = new URLSearchParams();
         if (params.q) search.set('q', params.q);
+        if (params.status && params.status !== 'all') search.set('status', params.status);
         if (params.offset !== undefined) search.set('offset', String(params.offset));
         if (params.limit !== undefined) search.set('limit', String(params.limit));
         const query = search.toString();

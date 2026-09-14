@@ -58,6 +58,7 @@ fallback.
 | `GEMDEX_WEB_PORT` | no | `8767` | Bind port. |
 | `GEMDEX_WEB_TIMEOUT_MS` | no | `30000` | BYOI request timeout. Session ingest gets its own, much larger budget — one Gemini call per uploaded session. |
 | `GEMDEX_WEB_STATIC_DIR` | no | bundled `static/` | Built SPA to serve. Unset and absent ⇒ API only. |
+| `GEMDEX_STATS_PATH` | no | `~/.gemdex/stats.json` | Read-only `report_outcome` ledger used for stale-memory filters and counts. |
 
 ### `google` mode also requires
 

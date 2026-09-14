@@ -64,12 +64,14 @@ export function summaryToMemory(s: MemorySummary | MemoryDetail, detail?: Memory
       mimeType: a.mimeType ?? 'application/octet-stream',
       byteSize: a.byteSize ?? 0,
     })),
+    staleCount: s.staleCount ?? 0,
   };
 }
 
 interface PoolContextValue {
   memories: Memory[];
   poolTotal: number;
+  staleTotal: number;
   scanner: ScannerState;
   scanFound: number;
   loading: boolean;
@@ -78,7 +80,7 @@ interface PoolContextValue {
   createMemory: (input: { title: string; content: string }) => Promise<Memory>;
   updateMemory: (id: string, input: { title: string; content: string }) => Promise<void>;
   deleteMemory: (id: string) => Promise<void>;
-  fetchMemories: (q?: string) => Promise<void>;
+  fetchMemories: (q?: string, status?: 'all' | 'stale') => Promise<void>;
   fetchRecall: (query: string) => Promise<void>;
   fetchDetail: (id: string) => Promise<void>;
 }
@@ -88,6 +90,7 @@ const PoolContext = createContext<PoolContextValue | null>(null);
 export function PoolProvider({ children }: { children: React.ReactNode }) {
   const [memories, setMemories] = useState<Memory[]>([]);
   const [poolTotal, setPoolTotal] = useState(0);
+  const [staleTotal, setStaleTotal] = useState(0);
   const [scanner, setScanner] = useState<ScannerState>('idle');
   const [scanFound, setScanFound] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -101,14 +104,15 @@ export function PoolProvider({ children }: { children: React.ReactNode }) {
     []
   );
 
-  const fetchMemories = useCallback(async (q?: string) => {
+  const fetchMemories = useCallback(async (q?: string, status: 'all' | 'stale' = 'all') => {
     setLoading(true);
     setError(null);
     try {
-      const res = await api.listMemories(q ? { q, limit: 100 } : { limit: 100 });
+      const res = await api.listMemories({ ...(q ? { q } : {}), status, limit: 100 });
       const mapped = res.memories.map((m) => summaryToMemory(m));
       setMemories(mapped);
       setPoolTotal(res.poolTotal);
+      setStaleTotal(res.staleTotal);
     } catch (err) {
       console.error('Failed to fetch memories:', err);
       setError(err instanceof Error ? err.message : 'Failed to fetch memories');
@@ -201,15 +205,20 @@ export function PoolProvider({ children }: { children: React.ReactNode }) {
   );
 
   const deleteMemory = useCallback(async (id: string) => {
+    const deletedMemory = memories.find((memory) => memory.id === id);
     await api.deleteMemory(id);
     setMemories((current) => current.filter((memory) => memory.id !== id));
     setPoolTotal((current) => Math.max(0, current - 1));
-  }, []);
+    if (deletedMemory && deletedMemory.staleCount > 0) {
+      setStaleTotal((current) => Math.max(0, current - 1));
+    }
+  }, [memories]);
 
   const value = useMemo<PoolContextValue>(
     () => ({
       memories,
       poolTotal,
+      staleTotal,
       scanner,
       scanFound,
       loading,
@@ -225,6 +234,7 @@ export function PoolProvider({ children }: { children: React.ReactNode }) {
     [
       memories,
       poolTotal,
+      staleTotal,
       scanner,
       scanFound,
       loading,

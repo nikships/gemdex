@@ -50,6 +50,7 @@ and it always uses the configured token.
 | `src/gemdex_web/uploads.py` | Session-upload **decoding** only: multipart entries → transcripts, zip expansion, size/type limits. Pure, no network. |
 | `src/gemdex_web/ingest_history.py` | Reconstructs ingested sessions **from the pool** (`chat:*` ids + the digest header in `preview`) — there is no host-side ledger to read. Pure, no network. |
 | `src/gemdex_web/hygiene.py` | Static answer to "can hygiene run here?" (no) and where it can. Deliberately runs nothing. Pure, no network. |
+| `src/gemdex_web/stats.py` | Read-only parser for the MCP service's `report_outcome` ledger. Powers stale-memory filters and counts; never writes. |
 | `src/gemdex_web/app.py` | `create_app()` — session middleware, auth routes, API, SPA serving. |
 | `src/gemdex_web/server.py` | `main()` entrypoint: resolve config, print posture, run uvicorn. |
 | `frontend/src/api.ts` | The SPA's only `fetch` call site, plus the types that mirror the BFF's projections. |
@@ -292,9 +293,10 @@ pool is down, same principle as `/api/status`.
 - **`pnpm build` writes into `src/gemdex_web/static/`**, which is gitignored and
   packaged into the wheel. The Dockerfile builds it in a Node stage; Node does
   not reach the runtime image.
-- **This service is stateless** — no volume, `read_only: true`. The session is a
-  signed cookie in the browser. Unlike mcp-http, there is no `FASTMCP_HOME`
-  equivalent to keep writable.
+- **This service owns no state** — `read_only: true`, with its session in a
+  signed cookie. The reference stack mounts mcp-http's state volume at a
+  different path read-only solely to read `stats.json`; the MCP service remains
+  the only writer.
 - **`pytest` mocks the BYOI entirely** and never touches the network. The auth
   tests were mutation-checked: neutering the email comparison, the
   `email_verified` guard, or the `aud` check each makes them fail.

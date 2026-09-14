@@ -1,8 +1,11 @@
 import React from 'react';
 import {
   FolderSearchIcon,
+  HistoryIcon,
   ListFilterIcon,
+  MenuIcon,
   PaperclipIcon,
+  PlusIcon,
   ScanSearchIcon,
 } from 'lucide-react';
 import { motion } from 'framer-motion';
@@ -10,6 +13,7 @@ import type { Memory } from '../data/memories';
 import { memoryTitle } from '../data/memories';
 import { SourceBadge } from './SourceBadge';
 import { formatCount, relativeTime } from '../lib/format';
+import { useMobileNav } from '../lib/MobileNavContext';
 
 export type SearchMode = 'filter' | 'recall';
 
@@ -18,11 +22,14 @@ interface MemoryListPanelProps {
   mode: SearchMode;
   query: string;
   poolTotal: number;
+  staleTotal: number;
+  status: 'all' | 'stale';
   loadedTotal: number;
   selectedId: string | null;
   isRecalling: boolean;
   scanning: boolean;
   onModeChange: (mode: SearchMode) => void;
+  onStatusChange: (status: 'all' | 'stale') => void;
   onQueryChange: (query: string) => void;
   onRecall: () => void;
   onSelect: (id: string) => void;
@@ -49,11 +56,14 @@ export function MemoryListPanel({
   mode,
   query,
   poolTotal,
+  staleTotal,
+  status,
   loadedTotal,
   selectedId,
   isRecalling,
   scanning,
   onModeChange,
+  onStatusChange,
   onQueryChange,
   onRecall,
   onSelect,
@@ -63,11 +73,21 @@ export function MemoryListPanel({
 }: MemoryListPanelProps) {
   const isRecall = mode === 'recall';
   const hasQuery = query.trim().length > 0;
-  const remaining = Math.max(0, poolTotal - loadedTotal);
+  const filteredTotal = status === 'stale' ? staleTotal : poolTotal;
+  const remaining = Math.max(0, filteredTotal - loadedTotal);
 
   const countLine = () => {
-    if (isRecall && memories.length && hasQuery) {
-      return `${memories.length} semantic ${memories.length === 1 ? 'match' : 'matches'}`;
+    if (isRecall) {
+      if (memories.length && hasQuery) {
+        return `${memories.length} semantic ${memories.length === 1 ? 'match' : 'matches'}`;
+      }
+      return `${formatCount(poolTotal)} memories`;
+    }
+    if (status === 'stale') {
+      if (hasQuery) {
+        return `${formatCount(memories.length)} of ${formatCount(staleTotal)} stale match`;
+      }
+      return `${formatCount(staleTotal)} stale ${staleTotal === 1 ? 'memory' : 'memories'}`;
     }
     if (hasQuery) {
       return `${formatCount(memories.length)} of ${formatCount(poolTotal)} match`;
@@ -75,32 +95,57 @@ export function MemoryListPanel({
     return `${formatCount(poolTotal)} memories`;
   };
 
+  const mobileNav = useMobileNav();
+
   return (
     <section
       aria-label="Memory pool"
-      className="flex h-full w-[384px] shrink-0 flex-col border-r border-edge"
+      className="flex h-full w-full lg:w-[384px] shrink-0 flex-col lg:border-r border-edge"
     >
-      <div className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-edge px-5">
-        <h1 className="display truncate text-[17px] leading-none text-ink">
-          Memory pool
-        </h1>
-        <button
-          type="button"
-          onClick={onScan}
-          disabled={scanning}
-          title="Look for new agent sessions on this machine to digest"
-          className="flex h-7 shrink-0 items-center gap-1.5 rounded-pill border border-edge bg-white/[0.03] px-2.5 text-[11.5px] leading-none text-ink-muted transition-colors hover:border-edge-accent hover:bg-accent/[0.08] hover:text-accent disabled:opacity-60"
-        >
-          <FolderSearchIcon
-            size={12}
-            aria-hidden="true"
-            className={scanning ? 'animate-pulse text-accent' : undefined}
-          />
-          {scanning ? 'Scanning…' : 'Scan'}
-        </button>
+      <div className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-edge px-4 sm:px-5">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <button
+            type="button"
+            onClick={mobileNav.open}
+            aria-label="Open navigation menu"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px] border border-edge bg-white/[0.03] text-ink-muted transition-colors hover:bg-white/[0.08] hover:text-ink lg:hidden"
+          >
+            <MenuIcon size={16} aria-hidden="true" />
+          </button>
+          <h1 className="display truncate text-[17px] leading-none text-ink">
+            Memory pool
+          </h1>
+        </div>
+
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={onScan}
+            disabled={scanning}
+            title="Look for new agent sessions on this machine to digest"
+            className="flex h-7 shrink-0 items-center gap-1.5 rounded-pill border border-edge bg-white/[0.03] px-2.5 text-[11.5px] leading-none text-ink-muted transition-colors hover:border-edge-accent hover:bg-accent/[0.08] hover:text-accent disabled:opacity-60"
+          >
+            <FolderSearchIcon
+              size={12}
+              aria-hidden="true"
+              className={scanning ? 'animate-pulse text-accent' : undefined}
+            />
+            {scanning ? 'Scanning…' : 'Scan'}
+          </button>
+          <button
+            type="button"
+            onClick={onCreate}
+            aria-label="New memory"
+            title="New memory"
+            className="flex h-7 shrink-0 items-center gap-1 rounded-pill bg-accent px-2.5 text-[11.5px] font-medium leading-none text-canvas shadow-glow-sm transition-colors hover:bg-accent-hover lg:hidden"
+          >
+            <PlusIcon size={12} strokeWidth={2.5} aria-hidden="true" />
+            <span>New</span>
+          </button>
+        </div>
       </div>
 
-      <div className="flex min-h-0 flex-1 flex-col gap-3 px-5 py-4">
+      <div className="flex min-h-0 flex-1 flex-col gap-3 px-4 sm:px-5 py-3 sm:py-4">
         <div
           role="radiogroup"
           aria-label="Search mode"
@@ -190,6 +235,37 @@ export function MemoryListPanel({
           )}
         </form>
 
+        {!isRecall && (
+          <div className="flex items-center gap-1.5" aria-label="Memory status filter">
+            {([
+              { value: 'all', label: 'All', count: poolTotal },
+              { value: 'stale', label: 'Stale', count: staleTotal },
+            ] as const).map((item) => {
+              const active = status === item.value;
+              return (
+                <button
+                  key={item.value}
+                  type="button"
+                  aria-pressed={active}
+                  onClick={() => onStatusChange(item.value)}
+                  className={[
+                    'flex h-7 items-center gap-1.5 rounded-pill border px-2.5 text-[11px] leading-none transition-colors',
+                    active
+                      ? 'border-edge-accent bg-accent/[0.12] text-accent'
+                      : 'border-edge bg-white/[0.02] text-ink-muted hover:bg-white/[0.06] hover:text-ink',
+                  ].join(' ')}
+                >
+                  {item.value === 'stale' && <HistoryIcon size={11} aria-hidden="true" />}
+                  {item.label}
+                  <span className="tabular font-mono text-[10px] opacity-75">
+                    {formatCount(item.count)}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+
         <div className="flex items-center justify-between gap-2">
           <p
             aria-live="polite"
@@ -210,7 +286,11 @@ export function MemoryListPanel({
         {memories.length === 0 ? (
           <div className="surface-soft flex flex-col items-center gap-3 rounded-card border border-dashed border-edge px-5 py-8 text-center">
             <p className="text-[13px] text-ink-dim">
-              {hasQuery ? 'Nothing matched.' : 'No memories yet.'}
+              {hasQuery
+                ? 'Nothing matched.'
+                : status === 'stale'
+                  ? 'No stale memories.'
+                  : 'No memories yet.'}
             </p>
             <button
               type="button"
@@ -281,6 +361,7 @@ export function MemoryListPanel({
                     </p>
 
                     {(memory.attachments.length > 0 ||
+                      memory.staleCount > 0 ||
                       typeof memory.score === 'number') && (
                       <div className="relative mt-2 flex items-center gap-1.5">
                         {typeof memory.score === 'number' && (
@@ -294,6 +375,15 @@ export function MemoryListPanel({
                             {memory.attachments.length}
                           </span>
                         )}
+                        {memory.staleCount > 0 && (
+                          <span
+                            title={`${memory.staleCount} stale ${memory.staleCount === 1 ? 'report' : 'reports'}`}
+                            className="tabular flex h-[18px] items-center gap-1 rounded-pill border border-amber-400/25 bg-amber-400/[0.08] px-1.5 font-mono text-[10px] leading-none text-amber-300"
+                          >
+                            <HistoryIcon size={9} aria-hidden="true" />
+                            {memory.staleCount}
+                          </span>
+                        )}
                       </div>
                     )}
                   </button>
@@ -303,12 +393,12 @@ export function MemoryListPanel({
           </ul>
         )}
 
-        {memories.length > 0 && remaining > 0 && !hasQuery && (
+        {memories.length > 0 && remaining > 0 && !hasQuery && !isRecall && (
           <div className="shrink-0">
             <div className="hairline mb-2" />
             <p className="tabular text-center font-mono text-[10px] uppercase leading-none tracking-[0.14em] text-ink-faint">
               <span className="text-accent">{formatCount(remaining)}</span> more in the
-              pool
+              {status === 'stale' ? 'stale memories' : 'pool'}
             </p>
           </div>
         )}

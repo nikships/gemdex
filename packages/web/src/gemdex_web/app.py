@@ -31,6 +31,7 @@ from .auth import (
 )
 from .byoi import ByoiClient
 from .config import Config
+from .stats import MemoryStatsReader
 from .routes import router as api_router
 
 #: Cookie name. The `__Host-` prefix would be stronger, but it mandates
@@ -66,6 +67,7 @@ def create_app(config: Config, byoi: ByoiClient | None = None) -> FastAPI:
     )
     app.state.config = config
     app.state.byoi = client
+    app.state.stats = MemoryStatsReader(config.stats_path)
 
     # In dev mode there is no session at all, so no signing key is needed — and
     # `SessionMiddleware` cannot be installed without one. `current_identity`

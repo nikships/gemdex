@@ -19,6 +19,7 @@ DEFAULT_BYOI_URL = "http://127.0.0.1:8765"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8767
 DEFAULT_TIMEOUT_MS = 30_000
+DEFAULT_STATS_PATH = Path.home() / ".gemdex" / "stats.json"
 
 #: How long a browser session stays valid before re-authentication. Short by
 #: design: the cookie is a bearer credential for the whole memory pool, and
@@ -109,6 +110,9 @@ class Config:
     #: Directory holding the built SPA. `None` runs API-only (Vite dev server
     #: serves the UI in development).
     static_dir: Path | None
+    #: Read-only outcome ledger written by the MCP service. Missing telemetry
+    #: is valid and simply means there are no stale reports to display.
+    stats_path: Path
 
     @property
     def redirect_uri(self) -> str | None:
@@ -349,4 +353,5 @@ def load_config(env: dict[str, str] | None = None, dotenv_path: Path | None = No
         public_base_url=google.base_url if google else None,
         allowed_email=google.allowed_email if google else None,
         static_dir=_load_static_dir(source),
+        stats_path=Path(source.get("GEMDEX_STATS_PATH") or DEFAULT_STATS_PATH),
     )

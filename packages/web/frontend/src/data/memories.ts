@@ -20,6 +20,8 @@ export interface Memory {
   branch: string | null;
   sessionId: string | null;
   attachments: Attachment[];
+  /** Number of agent reports marking this memory stale. */
+  staleCount: number;
   /** Only present on recall (semantic) results. */
   score?: number;
 }

@@ -25,7 +25,11 @@ SESSION_SECRET = "s" * 48
 
 
 def make_dev_config(**overrides: str) -> Config:
-    env = {"GEMDEX_SERVER_TOKEN": BYOI_TOKEN, **overrides}
+    env = {
+        "GEMDEX_SERVER_TOKEN": BYOI_TOKEN,
+        "GEMDEX_STATS_PATH": "/nonexistent/gemdex-web-stats.json",
+        **overrides,
+    }
     return load_config(env=env, dotenv_path=NO_DOTENV)
 
 
@@ -38,6 +42,7 @@ def make_google_config(**overrides: str) -> Config:
         "GEMDEX_WEB_BASE_URL": "https://gemdex.example",
         "GEMDEX_ALLOWED_EMAIL": ALLOWED_EMAIL,
         "GEMDEX_WEB_SESSION_SECRET": SESSION_SECRET,
+        "GEMDEX_STATS_PATH": "/nonexistent/gemdex-web-stats.json",
         **overrides,
     }
     return load_config(env=env, dotenv_path=NO_DOTENV)

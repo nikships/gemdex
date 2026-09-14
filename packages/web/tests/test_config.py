@@ -27,6 +27,7 @@ def test_defaults_are_loopback_and_dev() -> None:
     assert config.host == "127.0.0.1"
     assert config.port == 8767
     assert config.auth_mode == "dev"
+    assert config.stats_path.as_posix() == "/nonexistent/gemdex-web-stats.json"
 
 
 @pytest.mark.parametrize("value", ["ftp://x", "127.0.0.1:8765", ""])

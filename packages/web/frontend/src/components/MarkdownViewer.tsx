@@ -10,7 +10,7 @@ export function MarkdownViewer({ content, className }: MarkdownViewerProps) {
   return (
     <div
       className={[
-        'min-h-0 flex-1 overflow-y-auto px-5 py-4 font-sans text-[13px] leading-[1.7] text-ink-dim',
+        'min-h-0 lg:flex-1 lg:overflow-y-auto px-4 py-3.5 sm:px-5 sm:py-4 font-sans text-[13.5px] sm:text-[13px] leading-[1.7] text-ink-dim break-words',
         className ?? '',
       ].join(' ')}
     >
@@ -18,17 +18,17 @@ export function MarkdownViewer({ content, className }: MarkdownViewerProps) {
         remarkPlugins={[remarkGfm]}
         components={{
           h1: ({ children }) => (
-            <h1 className="display mb-3 mt-4 text-[20px] font-semibold text-ink border-b border-edge pb-1.5">
+            <h1 className="display mb-3 mt-4 text-[19px] sm:text-[20px] font-semibold text-ink border-b border-edge pb-1.5">
               {children}
             </h1>
           ),
           h2: ({ children }) => (
-            <h2 className="display mb-2.5 mt-4 text-[17px] font-semibold text-ink">
+            <h2 className="display mb-2.5 mt-4 text-[16px] sm:text-[17px] font-semibold text-ink">
               {children}
             </h2>
           ),
           h3: ({ children }) => (
-            <h3 className="display mb-2 mt-3 text-[14.5px] font-semibold text-ink">
+            <h3 className="display mb-2 mt-3 text-[14px] sm:text-[14.5px] font-semibold text-ink">
               {children}
             </h3>
           ),
@@ -51,13 +51,13 @@ export function MarkdownViewer({ content, className }: MarkdownViewerProps) {
             const isInline = !className && !String(children).includes('\n');
             if (isInline) {
               return (
-                <code className="rounded-[5px] border border-edge bg-white/[0.06] px-1.5 py-0.5 font-mono text-[11.5px] text-accent">
+                <code className="rounded-[5px] border border-edge bg-white/[0.06] px-1.5 py-0.5 font-mono text-[11px] sm:text-[11.5px] text-accent break-all">
                   {children}
                 </code>
               );
             }
             return (
-              <pre className="my-3 overflow-x-auto rounded-card border border-edge bg-black/60 p-3.5 font-mono text-[11.5px] text-ink shadow-card">
+              <pre className="my-3 max-w-full overflow-x-auto rounded-card border border-edge bg-black/60 p-3 sm:p-3.5 font-mono text-[11px] sm:text-[11.5px] text-ink shadow-card">
                 <code className={className} {...props}>
                   {children}
                 </code>
@@ -75,8 +75,8 @@ export function MarkdownViewer({ content, className }: MarkdownViewerProps) {
             </a>
           ),
           table: ({ children }) => (
-            <div className="my-3 overflow-x-auto rounded-card border border-edge">
-              <table className="w-full text-left font-mono text-[11.5px]">{children}</table>
+            <div className="my-3 max-w-full overflow-x-auto rounded-card border border-edge">
+              <table className="w-full text-left font-mono text-[11px] sm:text-[11.5px]">{children}</table>
             </div>
           ),
           thead: ({ children }) => (

@@ -7,11 +7,13 @@ import {
   LogOutIcon,
   PlusIcon,
   ScrollTextIcon,
+  XIcon,
 } from 'lucide-react';
-import { motion } from 'framer-motion';
+import { AnimatePresence, motion } from 'framer-motion';
 import { api, type Session } from '../api';
 import { formatCount } from '../lib/format';
 import { usePool } from '../lib/pool';
+import { useMobileNav } from '../lib/MobileNavContext';
 import { GemdexMark } from './GemdexMark';
 
 const NAV_ITEMS = [
@@ -64,7 +66,12 @@ function PoolSparkline() {
   );
 }
 
-export function Sidebar() {
+interface SidebarContentProps {
+  onNavClick?: (() => void) | undefined;
+  isDrawer?: boolean | undefined;
+}
+
+function SidebarContent({ onNavClick, isDrawer }: SidebarContentProps) {
   const { poolTotal, scanner } = usePool();
   const location = useLocation();
   const [session, setSession] = useState<Session | null>(null);
@@ -91,10 +98,7 @@ export function Sidebar() {
   };
 
   return (
-    <nav
-      aria-label="Primary"
-      className="glass flex h-full w-[248px] shrink-0 flex-col border-r border-edge"
-    >
+    <div className="flex h-full w-full flex-col">
       <div className="flex h-14 shrink-0 items-center gap-2.5 border-b border-edge px-3">
         <span
           aria-hidden="true"
@@ -123,11 +127,23 @@ export function Sidebar() {
             {session.email.split('@')[0]}
           </span>
         ) : null}
+
+        {isDrawer && (
+          <button
+            type="button"
+            onClick={onNavClick}
+            aria-label="Close navigation"
+            className="ml-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px] border border-edge bg-white/[0.03] text-ink-muted transition-colors hover:bg-white/[0.08] hover:text-ink"
+          >
+            <XIcon size={15} />
+          </button>
+        )}
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto px-3 py-4">
         <NavLink
           to="/new"
+          onClick={onNavClick}
           className="flex h-9 items-center justify-center gap-2 rounded-card bg-accent text-[13px] font-semibold leading-none text-canvas shadow-glow transition-colors hover:bg-accent-hover"
         >
           <PlusIcon size={14} aria-hidden="true" strokeWidth={2.5} />
@@ -145,11 +161,12 @@ export function Sidebar() {
               <NavLink
                 key={to}
                 to={to}
+                onClick={onNavClick}
                 className="relative flex h-9 items-center rounded-card px-3"
               >
                 {isActive && (
                   <motion.span
-                    layoutId="nav-active"
+                    layoutId={isDrawer ? 'nav-active-drawer' : 'nav-active'}
                     transition={{ type: 'spring', stiffness: 420, damping: 34 }}
                     className="surface absolute inset-0 rounded-card border border-edge shadow-card"
                   />
@@ -234,6 +251,58 @@ export function Sidebar() {
           </button>
         )}
       </div>
-    </nav>
+    </div>
+  );
+}
+
+export function Sidebar() {
+  const { isOpen, close } = useMobileNav();
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') close();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isOpen, close]);
+
+  return (
+    <>
+      {/* Desktop static sidebar */}
+      <nav
+        aria-label="Primary"
+        className="glass hidden h-full w-[248px] shrink-0 flex-col border-r border-edge lg:flex"
+      >
+        <SidebarContent />
+      </nav>
+
+      {/* Mobile slide-over drawer */}
+      <AnimatePresence>
+        {isOpen && (
+          <>
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.2 }}
+              onClick={close}
+              className="fixed inset-0 z-40 bg-black/70 backdrop-blur-sm lg:hidden"
+              aria-hidden="true"
+            />
+            <motion.aside
+              initial={{ x: '-100%' }}
+              animate={{ x: 0 }}
+              exit={{ x: '-100%' }}
+              transition={{ type: 'spring', stiffness: 420, damping: 36 }}
+              className="fixed inset-y-0 left-0 z-50 flex w-[280px] max-w-[85vw] flex-col glass border-r border-edge shadow-lift lg:hidden"
+              aria-label="Mobile navigation"
+            >
+              <SidebarContent onNavClick={close} isDrawer />
+            </motion.aside>
+          </>
+        )}
+      </AnimatePresence>
+    </>
   );
 }

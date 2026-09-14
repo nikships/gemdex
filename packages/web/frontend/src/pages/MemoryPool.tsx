@@ -6,13 +6,16 @@ import type { SearchMode } from '../components/MemoryListPanel';
 import { MemoryListPanel } from '../components/MemoryListPanel';
 import type { Memory } from '../data/memories';
 import { memoryTitle } from '../data/memories';
+import { useIsMobile } from '../lib/useIsMobile';
 import { usePool } from '../lib/pool';
 
 export function MemoryPool() {
   const navigate = useNavigate();
+  const isMobile = useIsMobile();
   const {
     memories,
     poolTotal,
+    staleTotal,
     scanner,
     startScan,
     updateMemory,
@@ -23,10 +26,12 @@ export function MemoryPool() {
   } = usePool();
 
   const [mode, setMode] = useState<SearchMode>('filter');
+  const [status, setStatus] = useState<'all' | 'stale'>('all');
   const [query, setQuery] = useState('');
   const [debouncedQuery, setDebouncedQuery] = useState('');
   const [isRecalling, setIsRecalling] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [mobileView, setMobileView] = useState<'list' | 'detail'>('list');
   const [pendingDelete, setPendingDelete] = useState<Memory | null>(null);
   const [deleting, setDeleting] = useState(false);
   const listRef = useRef<HTMLUListElement>(null);
@@ -38,9 +43,9 @@ export function MemoryPool() {
 
   useEffect(() => {
     if (mode === 'filter') {
-      fetchMemories(debouncedQuery.trim() || undefined);
+      fetchMemories(debouncedQuery.trim() || undefined, status);
     }
-  }, [mode, debouncedQuery, fetchMemories]);
+  }, [mode, status, debouncedQuery, fetchMemories]);
 
   useEffect(() => {
     if (!memories.length) {
@@ -61,6 +66,17 @@ export function MemoryPool() {
   }, [selectedId, fetchDetail]);
 
   const selected = memories.find((memory) => memory.id === selectedId) ?? null;
+
+  const handleSelect = (id: string) => {
+    setSelectedId(id);
+    if (isMobile) {
+      setMobileView('detail');
+    }
+  };
+
+  const handleBack = () => {
+    setMobileView('list');
+  };
 
   const moveSelection = (delta: number) => {
     if (!memories.length) return;
@@ -116,6 +132,9 @@ export function MemoryPool() {
     try {
       await deleteMemory(pendingDelete.id);
       setPendingDelete(null);
+      if (isMobile) {
+        setMobileView('list');
+      }
     } catch (err) {
       console.error('Failed to delete memory:', err);
     } finally {
@@ -123,37 +142,48 @@ export function MemoryPool() {
     }
   };
 
+  const showList = !isMobile || mobileView === 'list';
+  const showDetail = !isMobile || mobileView === 'detail';
+
   return (
     <div className="flex h-full min-w-0 flex-1">
-      <MemoryListPanel
-        memories={memories}
-        mode={mode}
-        query={query}
-        poolTotal={poolTotal}
-        loadedTotal={memories.length}
-        selectedId={selectedId}
-        isRecalling={isRecalling}
-        scanning={scanner === 'scanning'}
-        onModeChange={(next) => {
-          setMode(next);
-          if (next === 'filter') {
-            fetchMemories(query.trim() || undefined);
-          }
-        }}
-        onQueryChange={setQuery}
-        onRecall={runRecall}
-        onSelect={setSelectedId}
-        onScan={startScan}
-        onCreate={() => navigate('/new')}
-        listRef={listRef}
-      />
+      {showList && (
+        <MemoryListPanel
+          memories={memories}
+          mode={mode}
+          query={query}
+          poolTotal={poolTotal}
+          staleTotal={staleTotal}
+          status={status}
+          loadedTotal={memories.length}
+          selectedId={selectedId}
+          isRecalling={isRecalling}
+          scanning={scanner === 'scanning'}
+          onModeChange={(next) => {
+            setMode(next);
+            if (next === 'filter') {
+              fetchMemories(query.trim() || undefined, status);
+            }
+          }}
+          onStatusChange={setStatus}
+          onQueryChange={setQuery}
+          onRecall={runRecall}
+          onSelect={handleSelect}
+          onScan={startScan}
+          onCreate={() => navigate('/new')}
+          listRef={listRef}
+        />
+      )}
 
-      <MemoryDetailPanel
-        memory={selected}
-        poolTotal={poolTotal}
-        onRequestDelete={() => selected && setPendingDelete(selected)}
-        onSave={(input) => selected && updateMemory(selected.id, input)}
-      />
+      {showDetail && (
+        <MemoryDetailPanel
+          memory={selected}
+          poolTotal={poolTotal}
+          onRequestDelete={() => selected && setPendingDelete(selected)}
+          onSave={(input) => selected && updateMemory(selected.id, input)}
+          onBack={isMobile ? handleBack : undefined}
+        />
+      )}
 
       <DeleteMemoryDialog
         open={Boolean(pendingDelete)}

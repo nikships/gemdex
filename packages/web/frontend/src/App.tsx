@@ -4,6 +4,7 @@ import { api, type Session } from './api';
 import { AmbientBackdrop } from './components/AmbientBackdrop';
 import { GemdexMark } from './components/GemdexMark';
 import { Sidebar } from './components/Sidebar';
+import { MobileNavProvider } from './lib/MobileNavContext';
 import { PoolProvider } from './lib/pool';
 import { CreateMemory } from './pages/CreateMemory';
 import { IngestHistory } from './pages/IngestHistory';
@@ -88,20 +89,22 @@ export function App() {
   return (
     <PoolProvider>
       <BrowserRouter>
-        <div className="relative flex h-full min-h-full w-full overflow-hidden bg-canvas font-sans text-ink antialiased">
-          <AmbientBackdrop />
-          <div className="relative z-10 flex h-full w-full min-w-0">
-            <Sidebar />
-            <Routes>
-              <Route path="/" element={<MemoryPool />} />
-              <Route path="/new" element={<CreateMemory />} />
-              <Route path="/upload" element={<UploadSessions />} />
-              <Route path="/history" element={<IngestHistory />} />
-              <Route path="/status" element={<StatusPage />} />
-              <Route path="*" element={<Navigate to="/" replace />} />
-            </Routes>
+        <MobileNavProvider>
+          <div className="relative flex h-full min-h-full w-full overflow-hidden bg-canvas font-sans text-ink antialiased">
+            <AmbientBackdrop />
+            <div className="relative z-10 flex h-full w-full min-w-0">
+              <Sidebar />
+              <Routes>
+                <Route path="/" element={<MemoryPool />} />
+                <Route path="/new" element={<CreateMemory />} />
+                <Route path="/upload" element={<UploadSessions />} />
+                <Route path="/history" element={<IngestHistory />} />
+                <Route path="/status" element={<StatusPage />} />
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </Routes>
+            </div>
           </div>
-        </div>
+        </MobileNavProvider>
       </BrowserRouter>
     </PoolProvider>
   );
