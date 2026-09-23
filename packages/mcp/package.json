@@ -41,6 +41,7 @@
     },
     "license": "MIT",
     "author": "Nikhil Anand",
+    "mcpName": "io.github.nikships/gemdex",
     "publishConfig": {
         "access": "public"
     }

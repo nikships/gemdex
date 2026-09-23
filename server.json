@@ -9,12 +9,12 @@
     "id": "1249655672"
   },
   "websiteUrl": "https://github.com/nikships/gemdex",
-  "version": "1.0.46",
+  "version": "1.0.47",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "gemdex-mcp",
-      "version": "1.0.46",
+      "version": "1.0.47",
       "runtimeHint": "npx",
       "runtimeArguments": [
         {
@@ -24,7 +24,7 @@
         },
         {
           "type": "positional",
-          "value": "gemdex-mcp@1.0.46",
+          "value": "gemdex-mcp@1.0.47",
           "valueHint": "package spec"
         }
       ],
