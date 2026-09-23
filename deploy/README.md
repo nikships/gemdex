@@ -8,7 +8,7 @@ exposed publicly over HTTPS.
 everything below — secrets, build, health, and a printed MCP client config:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/anand-92/gemdex/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/nikships/gemdex/main/scripts/install.sh | bash
 # add --lan to reach it from other devices on your network
 ```
 

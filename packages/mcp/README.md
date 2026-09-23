@@ -4,7 +4,7 @@ MCP memory layer for AI coding agents — `save_memory` / `recall` /
 `get_memory` / `update_memory` / `delete_memory` (plus outcome + attachment
 tools) backed by Gemini embeddings + embedded LanceDB.
 
-Part of [Gemdex](https://github.com/anand-92/gemdex).
+Part of [Gemdex](https://github.com/nikships/gemdex).
 
 ## Install for Claude Code
 
@@ -206,7 +206,7 @@ npx gemdex serve --port 0   # 127.0.0.1 only; --port 0 = OS picks a free port
 | `GEMDEX_SYNC_URL` | *(optional)* Default host `/mcp` endpoint for `sync-history` |
 | `GEMDEX_REMOTE_NAME` | Optional human-readable remote name |
 
-See the [main repo](https://github.com/anand-92/gemdex) for all environment
+See the [main repo](https://github.com/nikships/gemdex) for all environment
 variables and configuration options.
 
 ## MCP Registry

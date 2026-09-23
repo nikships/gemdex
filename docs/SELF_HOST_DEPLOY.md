@@ -84,7 +84,7 @@ This guide is the **public-internet** deployment: a domain, TLS, Google OAuth.
 If all you want is Gemdex reachable from your own machines, one command does it:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/anand-92/gemdex/main/scripts/install.sh | bash -s -- --lan
+curl -fsSL https://raw.githubusercontent.com/nikships/gemdex/main/scripts/install.sh | bash -s -- --lan
 ```
 
 [`scripts/install.sh`](../scripts/install.sh) checks Docker, generates every

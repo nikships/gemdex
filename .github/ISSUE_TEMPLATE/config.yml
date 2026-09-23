@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: 💬 Discussions
-    url: https://github.com/anand-92/gemdex/discussions
+    url: https://github.com/nikships/gemdex/discussions
     about: Ask questions, share setups, or propose ideas before they become issues.
   - name: 📚 Documentation
-    url: https://github.com/anand-92/gemdex#readme
+    url: https://github.com/nikships/gemdex#readme
     about: Quickstart, configuration reference, and architecture overview.

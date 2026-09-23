@@ -1,6 +1,6 @@
 # gemdex-core
 
-Memory-layer engine for [Gemdex](https://github.com/anand-92/gemdex) — a global,
+Memory-layer engine for [Gemdex](https://github.com/nikships/gemdex) — a global,
 persistent memory store for AI coding agents, powered by Gemini embeddings and
 embedded LanceDB hybrid retrieval.
 
@@ -44,7 +44,7 @@ const hits = await memory.recall('stored by my server');
 `RemoteMemoryBackend` accepts inline base64 attachments only. Resolve local file
 paths in the calling integration before invoking it.
 
-See the [main repo](https://github.com/anand-92/gemdex) for full documentation.
+See the [main repo](https://github.com/nikships/gemdex) for full documentation.
 
 ## License
 

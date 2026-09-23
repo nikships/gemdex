@@ -31,7 +31,7 @@ each, so you can see exactly what the helpers do.
 ### 1. Start the Server
 
 ```sh
-git clone https://github.com/anand-92/gemdex.git
+git clone https://github.com/nikships/gemdex.git
 cd gemdex/packages/server
 npm run init
 ```

@@ -4,10 +4,10 @@ Thanks for considering a contribution. Gemdex is built and maintained by people 
 
 ## Quick links
 
-- 🐛 [Report a bug](https://github.com/anand-92/gemdex/issues/new?template=bug_report.yml)
-- ✨ [Request a feature](https://github.com/anand-92/gemdex/issues/new?template=feature_request.yml)
-- 💬 [Open a discussion](https://github.com/anand-92/gemdex/discussions)
-- 🟢 [`good first issue` label](https://github.com/anand-92/gemdex/labels/good%20first%20issue)
+- 🐛 [Report a bug](https://github.com/nikships/gemdex/issues/new?template=bug_report.yml)
+- ✨ [Request a feature](https://github.com/nikships/gemdex/issues/new?template=feature_request.yml)
+- 💬 [Open a discussion](https://github.com/nikships/gemdex/discussions)
+- 🟢 [`good first issue` label](https://github.com/nikships/gemdex/labels/good%20first%20issue)
 
 ## Before you start
 
@@ -22,7 +22,7 @@ You need:
 - A Google AI Studio API key (free tier is fine for development)
 
 ```bash
-git clone https://github.com/anand-92/gemdex.git
+git clone https://github.com/nikships/gemdex.git
 cd gemdex
 pnpm install
 pnpm build
@@ -88,4 +88,4 @@ See [`docs/RELEASE_CHECKLIST.md`](docs/RELEASE_CHECKLIST.md) for the full releas
 
 ## Questions?
 
-Open a [discussion](https://github.com/anand-92/gemdex/discussions) — friendly, fast, and the right venue for "is this the right approach?" before you write a lot of code.
+Open a [discussion](https://github.com/nikships/gemdex/discussions) — friendly, fast, and the right venue for "is this the right approach?" before you write a lot of code.

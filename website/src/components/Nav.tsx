@@ -40,7 +40,7 @@ export function Nav() {
                     >
                         {dark ? <MoonIcon /> : <SunIcon />}
                     </button>
-                    <a className="btn btn-primary" href="https://github.com/anand-92/gemdex" target="_blank" rel="noopener">
+                    <a className="btn btn-primary" href="https://github.com/nikships/gemdex" target="_blank" rel="noopener">
                         <GithubIcon />
                         Star
                     </a>

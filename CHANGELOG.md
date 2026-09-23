@@ -77,6 +77,6 @@ Gemdex is a global, persistent memory layer for AI coding agents: deliberately s
 - **`packages/app`** — a [zero-native](https://www.npmjs.com/package/zero-native) desktop app to manage the memory layer (browse / create / edit / delete / export / import). The Zig shell spawns the sidecar on launch and kills it on exit; no user command required.
 - **Claude Code plugin** — registers the `gemdex` MCP server and ships a `memory` skill that nudges the agent to save/recall/update **only when the user explicitly points at memory**.
 
-[Unreleased]: https://github.com/anand-92/gemdex/compare/v0.3.2...HEAD
-[0.3.2]: https://github.com/anand-92/gemdex/compare/v0.3.0...v0.3.2
-[0.3.0]: https://github.com/anand-92/gemdex/releases/tag/v0.3.0
+[Unreleased]: https://github.com/nikships/gemdex/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/nikships/gemdex/compare/v0.3.0...v0.3.2
+[0.3.0]: https://github.com/nikships/gemdex/releases/tag/v0.3.0

@@ -6,14 +6,14 @@
 
 [![npm version](https://img.shields.io/npm/v/gemdex-mcp?color=cf6a4c&label=gemdex-mcp&logo=npm)](https://www.npmjs.com/package/gemdex-mcp)
 [![npm downloads](https://img.shields.io/npm/dm/gemdex-mcp?color=cf6a4c&label=downloads&logo=npm)](https://www.npmjs.com/package/gemdex-mcp)
-[![GitHub stars](https://img.shields.io/github/stars/anand-92/gemdex?style=flat&color=e9b949&logo=github)](https://github.com/anand-92/gemdex/stargazers)
+[![GitHub stars](https://img.shields.io/github/stars/nikships/gemdex?style=flat&color=e9b949&logo=github)](https://github.com/nikships/gemdex/stargazers)
 [![License: MIT](https://img.shields.io/badge/License-MIT-7a9e7e.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A524-7a9e7e.svg?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![MCP](https://img.shields.io/badge/MCP-compatible-cf6a4c)](https://modelcontextprotocol.io)
 [![Powered by Gemini](https://img.shields.io/badge/embeddings-Gemini-4285F4?logo=google)](https://ai.google.dev/)
 [![Powered by LanceDB](https://img.shields.io/badge/vector_db-LanceDB-9933ff)](https://lancedb.com/)
 
-**[⭐ Star on GitHub](https://github.com/anand-92/gemdex)** · **[📦 npm](https://www.npmjs.com/package/gemdex-mcp)** · **[💬 Discussions](https://github.com/anand-92/gemdex/discussions)** · **[🐛 Issues](https://github.com/anand-92/gemdex/issues)**
+**[⭐ Star on GitHub](https://github.com/nikships/gemdex)** · **[📦 npm](https://www.npmjs.com/package/gemdex-mcp)** · **[💬 Discussions](https://github.com/nikships/gemdex/discussions)** · **[🐛 Issues](https://github.com/nikships/gemdex/issues)**
 
 </div>
 
@@ -342,7 +342,7 @@ open "build/Gemdex Memory.app"          # launch it
 ```
 
 Download a signed, notarized DMG from the
-[latest release](https://github.com/anand-92/gemdex/releases/latest) — it bundles
+[latest release](https://github.com/nikships/gemdex/releases/latest) — it bundles
 its own Node runtime, so it runs with zero manual dependency installation.
 
 The sidecar is the same package as the MCP server:
@@ -372,7 +372,7 @@ pool. Embedding runs on the server, so remote clients do not need a Gemini key.
 ### Self-host the whole stack (one command)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/anand-92/gemdex/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/nikships/gemdex/main/scripts/install.sh | bash
 ```
 
 Brings up Postgres, the memory API, the [Streamable HTTP MCP
@@ -385,7 +385,7 @@ then prints a ready-to-paste MCP client config. It asks for one thing — a free
 Loopback-only by default. Add `--lan` to reach it from your other devices:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/anand-92/gemdex/main/scripts/install.sh | bash -s -- --lan
+curl -fsSL https://raw.githubusercontent.com/nikships/gemdex/main/scripts/install.sh | bash -s -- --lan
 ```
 
 Re-running is safe and is the upgrade path: existing secrets are never
@@ -407,7 +407,7 @@ If you only want the BYOI backend — no MCP endpoint, no web manager — it's t
 commands. On the server host:
 
 ```bash
-git clone https://github.com/anand-92/gemdex.git
+git clone https://github.com/nikships/gemdex.git
 cd gemdex/packages/server && npm run init   # generates secrets, starts Docker, prints the token
 ```
 
@@ -501,7 +501,7 @@ and — if you plan to expose a deployment publicly —
 ## Build from source
 
 ```bash
-git clone https://github.com/anand-92/gemdex.git
+git clone https://github.com/nikships/gemdex.git
 cd gemdex
 pnpm install
 pnpm build
@@ -518,7 +518,7 @@ at `node /absolute/path/to/packages/mcp/dist/index.js` to run a local build.
 - [ ] Memory linking / references
 - [ ] CLI (`gemdex recall "..."`) for non-MCP workflows
 
-Have an idea? [Open a discussion](https://github.com/anand-92/gemdex/discussions/new).
+Have an idea? [Open a discussion](https://github.com/nikships/gemdex/discussions/new).
 
 ## Contributing
 
@@ -527,7 +527,7 @@ the dev loop, then check the `good-first-issue` label.
 
 ## Star history
 
-[![Star History Chart](https://api.star-history.com/svg?repos=anand-92/gemdex&type=Date)](https://star-history.com/#anand-92/gemdex&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=nikships/gemdex&type=Date)](https://star-history.com/#nikships/gemdex&Date)
 
 ---
 
@@ -537,7 +537,7 @@ the dev loop, then check the `good-first-issue` label.
 
 <div align="center">
 
-If Gemdex makes your agent remember, **[give it a ⭐](https://github.com/anand-92/gemdex)** — it's the single biggest thing that helps the project grow.
+If Gemdex makes your agent remember, **[give it a ⭐](https://github.com/nikships/gemdex)** — it's the single biggest thing that helps the project grow.
 
 </div>
 

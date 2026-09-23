@@ -18,7 +18,7 @@ export function FinalCta() {
                     </h2>
                     <p>give it a star. It's the single biggest thing that helps the project grow.</p>
                     <div className="hero-cta">
-                        <a className="btn btn-primary" href="https://github.com/anand-92/gemdex" target="_blank" rel="noopener">
+                        <a className="btn btn-primary" href="https://github.com/nikships/gemdex" target="_blank" rel="noopener">
                             <GithubIcon />
                             Star on GitHub
                         </a>

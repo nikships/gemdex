@@ -28,7 +28,7 @@ PKG_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SPARKLE_DIR="${SPARKLE_DIR:-$PKG_ROOT/third_party/sparkle}"
 SPARKLE_FRAMEWORK="$SPARKLE_DIR/Sparkle.framework"
 
-SU_FEED_URL="${SU_FEED_URL:-https://github.com/anand-92/gemdex/releases/latest/download/appcast.xml}"
+SU_FEED_URL="${SU_FEED_URL:-https://github.com/nikships/gemdex/releases/latest/download/appcast.xml}"
 SU_PUBLIC_ED_KEY="${SU_PUBLIC_ED_KEY:-sB98dHKSN9fEe3vmVAufZoI4TbRWE6hHvAGSbzKweYM=}"
 SU_CHECK_INTERVAL_SECONDS="${SU_CHECK_INTERVAL_SECONDS:-86400}"
 

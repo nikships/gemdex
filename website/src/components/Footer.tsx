@@ -17,16 +17,16 @@ export function Footer() {
                     <div className="foot-links">
                         <div className="foot-col">
                             <h6>Project</h6>
-                            <a href="https://github.com/anand-92/gemdex" target="_blank" rel="noopener">
+                            <a href="https://github.com/nikships/gemdex" target="_blank" rel="noopener">
                                 GitHub
                             </a>
                             <a href="https://www.npmjs.com/package/gemdex-mcp" target="_blank" rel="noopener">
                                 npm · gemdex-mcp
                             </a>
-                            <a href="https://github.com/anand-92/gemdex/discussions" target="_blank" rel="noopener">
+                            <a href="https://github.com/nikships/gemdex/discussions" target="_blank" rel="noopener">
                                 Discussions
                             </a>
-                            <a href="https://github.com/anand-92/gemdex/issues" target="_blank" rel="noopener">
+                            <a href="https://github.com/nikships/gemdex/issues" target="_blank" rel="noopener">
                                 Issues
                             </a>
                         </div>

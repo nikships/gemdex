@@ -7,7 +7,7 @@
 > works and still ships; expect bug fixes, not new features. It is not going
 > away, and nothing here has been removed.
 
-A native, **manage-only** desktop app for the [Gemdex](https://github.com/anand-92/gemdex)
+A native, **manage-only** desktop app for the [Gemdex](https://github.com/nikships/gemdex)
 memory layer, built in **SwiftUI** for macOS (Apple Silicon). It opens straight
 into your memory layer to browse, create, edit, delete, export, and import
 memories.

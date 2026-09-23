@@ -2,7 +2,7 @@
 #
 # Gemdex one-line self-host installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/anand-92/gemdex/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/nikships/gemdex/main/scripts/install.sh | bash
 #
 # Takes a machine from zero to a working single-user Gemdex stack: Postgres +
 # the BYOI memory server + the Streamable HTTP MCP endpoint + the web manager,
@@ -41,7 +41,7 @@
 #
 set -euo pipefail
 
-readonly REPO="anand-92/gemdex"
+readonly REPO="nikships/gemdex"
 
 # The ref the curl path downloads. Pinned rather than a moving branch so a
 # bootstrap is reproducible and a broken main cannot break every new install.
@@ -103,7 +103,7 @@ usage() {
     cat <<'USAGE'
 Gemdex self-host installer.
 
-  curl -fsSL https://raw.githubusercontent.com/anand-92/gemdex/main/scripts/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/nikships/gemdex/main/scripts/install.sh | bash
 
 Options:
   --lan                 Publish the MCP endpoint and web manager on 0.0.0.0 so
