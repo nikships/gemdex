@@ -1,0 +1,94 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.nikships/gemdex",
+  "title": "Gemdex",
+  "description": "Persistent memory layer for AI coding agents: save, recall, update via Gemini plus LanceDB",
+  "repository": {
+    "url": "https://github.com/nikships/gemdex",
+    "source": "github",
+    "id": "1249655672"
+  },
+  "websiteUrl": "https://github.com/nikships/gemdex",
+  "version": "1.0.46",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "gemdex-mcp",
+      "version": "1.0.46",
+      "runtimeHint": "npx",
+      "runtimeArguments": [
+        {
+          "type": "positional",
+          "value": "-y",
+          "valueHint": "auto-confirm install"
+        },
+        {
+          "type": "positional",
+          "value": "gemdex-mcp@1.0.46",
+          "valueHint": "package spec"
+        }
+      ],
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "description": "Google AI Studio key for local mode, or the exact value 'local' for on-device MLX text embeddings. Not needed in remote mode.",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": true,
+          "name": "GEMINI_API_KEY"
+        },
+        {
+          "description": "Memory backend: embedded local LanceDB or a self-hosted Gemdex Server",
+          "isRequired": false,
+          "format": "string",
+          "choices": ["local", "remote"],
+          "default": "local",
+          "name": "GEMDEX_MODE"
+        },
+        {
+          "description": "Directory for the embedded LanceDB store",
+          "isRequired": false,
+          "format": "filepath",
+          "default": "~/.gemdex/lance",
+          "name": "LANCEDB_PATH"
+        },
+        {
+          "description": "Gemini text embedding model",
+          "isRequired": false,
+          "format": "string",
+          "choices": ["gemini-embedding-2", "gemini-embedding-001"],
+          "default": "gemini-embedding-2",
+          "name": "EMBEDDING_MODEL"
+        },
+        {
+          "description": "Gemdex Server root URL (required in remote mode)",
+          "isRequired": false,
+          "format": "string",
+          "name": "GEMDEX_REMOTE_URL"
+        },
+        {
+          "description": "Gemdex Server bearer token (required in remote mode)",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true,
+          "name": "GEMDEX_REMOTE_TOKEN"
+        },
+        {
+          "description": "Human-readable name for the remote server",
+          "isRequired": false,
+          "format": "string",
+          "name": "GEMDEX_REMOTE_NAME"
+        },
+        {
+          "description": "Re-rank recall results by recorded worked/failed/stale outcomes",
+          "isRequired": false,
+          "format": "boolean",
+          "default": "false",
+          "name": "GEMDEX_TRUST_RANKING"
+        }
+      ]
+    }
+  ]
+}

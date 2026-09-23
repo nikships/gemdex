@@ -544,3 +544,7 @@ If Gemdex makes your agent remember, **[give it a ⭐](https://github.com/anand-
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+## MCP Registry
+
+`mcp-name: io.github.nikships/gemdex`

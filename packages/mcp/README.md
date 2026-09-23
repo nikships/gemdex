@@ -209,6 +209,10 @@ npx gemdex serve --port 0   # 127.0.0.1 only; --port 0 = OS picks a free port
 See the [main repo](https://github.com/anand-92/gemdex) for all environment
 variables and configuration options.
 
+## MCP Registry
+
+`mcp-name: io.github.nikships/gemdex`
+
 ## License
 
 MIT
