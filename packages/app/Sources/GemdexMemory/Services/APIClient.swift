@@ -1,11 +1,11 @@
 import Foundation
 
 /// Error surfaced by the sidecar (carries the server's `error` message and any
-/// `needsKey` flag from the 503 not-configured response).
+/// `needsInstall` flag from the 503 local-model-not-installed response).
 struct APIError: LocalizedError {
     let status: Int
     let message: String
-    let needsKey: Bool
+    var needsInstall: Bool = false
     var errorDescription: String? { message }
 }
 
@@ -59,16 +59,16 @@ actor APIClient {
     private func send(_ req: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let (data, response) = try await session.data(for: req)
         guard let http = response as? HTTPURLResponse else {
-            throw APIError(status: -1, message: "No HTTP response", needsKey: false)
+            throw APIError(status: -1, message: "No HTTP response")
         }
         if !(200...299).contains(http.statusCode) {
             var message = "HTTP \(http.statusCode)"
-            var needsKey = false
+            var needsInstall = false
             if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 if let e = obj["error"] as? String { message = e }
-                if let nk = obj["needsKey"] as? Bool { needsKey = nk }
+                if let ni = obj["needsInstall"] as? Bool { needsInstall = ni }
             }
-            throw APIError(status: http.statusCode, message: message, needsKey: needsKey)
+            throw APIError(status: http.statusCode, message: message, needsInstall: needsInstall)
         }
         return (data, http)
     }
@@ -77,7 +77,7 @@ actor APIClient {
         do {
             return try JSONDecoder().decode(T.self, from: data)
         } catch {
-            throw APIError(status: -1, message: "Malformed response: \(error.localizedDescription)", needsKey: false)
+            throw APIError(status: -1, message: "Malformed response: \(error.localizedDescription)")
         }
     }
 
@@ -94,35 +94,14 @@ actor APIClient {
         return try decode(ConfigSummary.self, from: data)
     }
 
-    @discardableResult
-    func setApiKey(_ key: String) async throws -> ConfigSummary {
-        let body = try JSONSerialization.data(withJSONObject: ["apiKey": key])
-        let (data, _) = try await send(makeRequest("POST", "/config", body: body))
+    /// Re-probe the Claude Code CLI. The sidecar waits for the probe before
+    /// answering, so the returned summary has a settled `claudeCode` status.
+    func checkClaudeCode() async throws -> ConfigSummary {
+        let (data, _) = try await send(makeRequest("POST", "/config/check", body: Data("{}".utf8)))
         return try decode(ConfigSummary.self, from: data)
     }
 
-    @discardableResult
-    func validateConfiguredApiKey() async throws -> ConfigSummary {
-        // 200 = valid; 503 = still locked. Both include a ConfigSummary so the
-        // UI can refresh readiness without a follow-up GET /config.
-        let req = makeRequest("POST", "/config/validate")
-        let (data, response) = try await session.data(for: req)
-        guard let http = response as? HTTPURLResponse else {
-            throw APIError(status: -1, message: "No HTTP response", needsKey: false)
-        }
-        if http.statusCode == 200 || http.statusCode == 503 {
-            return try decode(ConfigSummary.self, from: data)
-        }
-        var message = "HTTP \(http.statusCode)"
-        var needsKey = false
-        if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            if let e = obj["error"] as? String { message = e }
-            if let nk = obj["needsKey"] as? Bool { needsKey = nk }
-        }
-        throw APIError(status: http.statusCode, message: message, needsKey: needsKey)
-    }
-
-    // MARK: - Local embedding settings
+    // MARK: - Local embedding model
 
     func embeddingStatus() async throws -> EmbeddingStatus {
         let (data, _) = try await send(makeRequest("GET", "/settings/embedding"))
@@ -134,14 +113,10 @@ actor APIClient {
         return try decode(EmbeddingStatus.self, from: data)
     }
 
+    /// Starts re-embedding memories left in the legacy Gemini index; answers
+    /// `202` with a `migrating` status to poll, like install.
     func migrateEmbedding() async throws -> EmbeddingStatus {
         let (data, _) = try await send(makeRequest("POST", "/settings/embedding/migrate", body: Data("{}".utf8)))
-        return try decode(EmbeddingStatus.self, from: data)
-    }
-
-    func setEmbeddingProvider(_ provider: String) async throws -> EmbeddingStatus {
-        let body = try JSONSerialization.data(withJSONObject: ["provider": provider])
-        let (data, _) = try await send(makeRequest("POST", "/settings/embedding/provider", body: body))
         return try decode(EmbeddingStatus.self, from: data)
     }
 
@@ -160,42 +135,24 @@ actor APIClient {
     }
 
     @discardableResult
-    func createMemory(content: String, title: String?, attachments: [AttachmentInput]?) async throws -> Memory {
+    func createMemory(content: String, title: String?) async throws -> Memory {
         var payload: [String: Any] = ["content": content]
         if let title, !title.isEmpty { payload["title"] = title }
-        if let attachments { payload["attachments"] = attachments.map(encodeAttachment) }
         let body = try JSONSerialization.data(withJSONObject: payload)
         let (data, _) = try await send(makeRequest("POST", "/memories", body: body))
         struct Wrapper: Decodable { let memory: Memory }
         return try decode(Wrapper.self, from: data).memory
     }
 
+    /// Updates content/title only. Omitting `attachments` keeps the memory's
+    /// existing (read-only) attachments untouched.
     @discardableResult
-    func updateMemory(_ id: String, content: String, title: String?, attachments: [AttachmentInput]?) async throws -> Memory {
-        var payload: [String: Any] = ["content": content, "title": titleValue(title)]
-        if let attachments { payload["attachments"] = attachments.map(encodeAttachment) }
+    func updateMemory(_ id: String, content: String, title: String?) async throws -> Memory {
+        let payload: [String: Any] = ["content": content, "title": titleValue(title)]
         let body = try JSONSerialization.data(withJSONObject: payload)
         let (data, _) = try await send(request("PUT", path: "/memories/\(id)", body: body))
         struct Wrapper: Decodable { let memory: Memory }
         return try decode(Wrapper.self, from: data).memory
-    }
-
-    /// Caption-only edit: PUT content/title (no attachments) then PATCH captions
-    /// so existing media isn't re-fetched and re-embedded.
-    func updateContentOnly(_ id: String, content: String, title: String?) async throws {
-        let payload: [String: Any] = ["content": content, "title": titleValue(title)]
-        let body = try JSONSerialization.data(withJSONObject: payload)
-        _ = try await send(request("PUT", path: "/memories/\(id)", body: body))
-    }
-
-    func updateCaptions(_ id: String, captions: [(id: String, caption: String?)]) async throws {
-        let captionPayload: [[String: Any]] = captions.map { entry in
-            var item: [String: Any] = ["id": entry.id]
-            item["caption"] = entry.caption ?? ""
-            return item
-        }
-        let body = try JSONSerialization.data(withJSONObject: ["captions": captionPayload])
-        _ = try await send(request("PATCH", path: "/memories/\(id)/attachments", body: body))
     }
 
     func deleteMemory(_ id: String) async throws {
@@ -237,49 +194,6 @@ actor APIClient {
         return try decode(ImportResult.self, from: data)
     }
 
-    // MARK: - Settings
-
-    func settings() async throws -> SettingsSummary {
-        let (data, _) = try await send(makeRequest("GET", "/settings"))
-        return try decode(SettingsSummary.self, from: data)
-    }
-
-    @discardableResult
-    func setMode(_ mode: String, name: String? = nil) async throws -> SettingsSummary {
-        var payload: [String: Any] = ["mode": mode]
-        if let name { payload["name"] = name }
-        let body = try JSONSerialization.data(withJSONObject: payload)
-        let (data, _) = try await send(makeRequest("POST", "/settings/mode", body: body))
-        return try decode(SettingsSummary.self, from: data)
-    }
-
-    @discardableResult
-    func saveRemote(name: String, url: String, token: String?) async throws -> SettingsSummary {
-        var payload: [String: Any] = ["name": name, "url": url]
-        if let token, !token.isEmpty { payload["token"] = token }
-        let body = try JSONSerialization.data(withJSONObject: payload)
-        let (data, _) = try await send(makeRequest("POST", "/settings/remotes", body: body))
-        return try decode(SettingsSummary.self, from: data)
-    }
-
-    @discardableResult
-    func removeRemote(_ name: String) async throws -> SettingsSummary {
-        let (data, _) = try await send(request("DELETE", path: "/settings/remotes/\(name)"))
-        return try decode(SettingsSummary.self, from: data)
-    }
-
-    func testRemote(_ name: String) async throws -> RemoteTestResult {
-        let body = try JSONSerialization.data(withJSONObject: ["name": name])
-        let (data, _) = try await send(makeRequest("POST", "/settings/test", body: body))
-        return try decode(RemoteTestResult.self, from: data)
-    }
-
-    func importLocalToRemote(_ name: String) async throws -> MigrationResult {
-        let body = try JSONSerialization.data(withJSONObject: ["name": name])
-        let (data, _) = try await send(makeRequest("POST", "/settings/import-local", body: body))
-        return try decode(MigrationResult.self, from: data)
-    }
-
     // MARK: - Chat-history ingestion
 
     func ingestSources() async throws -> IngestSources {
@@ -308,8 +222,9 @@ actor APIClient {
         return try decode(IngestScanSummary.self, from: data)
     }
 
-    func ingestStart(sources: [[String: Any]], model: String, mode: String) async throws {
-        let payload: [String: Any] = ["sources": sources, "model": model, "mode": mode]
+    func ingestStart(sources: [[String: Any]], model: String?) async throws {
+        var payload: [String: Any] = ["sources": sources]
+        if let model, !model.isEmpty { payload["model"] = model }
         let body = try JSONSerialization.data(withJSONObject: payload)
         _ = try await send(makeRequest("POST", "/ingest/start", body: body))
     }
@@ -317,11 +232,6 @@ actor APIClient {
     func ingestStatus() async throws -> IngestStatus {
         let (data, _) = try await send(makeRequest("GET", "/ingest/status"))
         return try decode(IngestStatus.self, from: data)
-    }
-
-    func ingestCollect() async throws -> IngestCollectResult {
-        let (data, _) = try await send(makeRequest("POST", "/ingest/collect"))
-        return try decode(IngestCollectResult.self, from: data)
     }
 
     func ingestCancel() async throws {
@@ -343,8 +253,9 @@ actor APIClient {
         return try decode(HygieneScanSummary.self, from: data)
     }
 
-    func hygieneStart(model: String, threshold: Double? = nil) async throws {
-        var payload: [String: Any] = ["model": model]
+    func hygieneStart(model: String?, threshold: Double? = nil) async throws {
+        var payload: [String: Any] = [:]
+        if let model, !model.isEmpty { payload["model"] = model }
         if let threshold { payload["threshold"] = threshold }
         let body = try JSONSerialization.data(withJSONObject: payload)
         _ = try await send(makeRequest("POST", "/hygiene/start", body: body))
@@ -373,12 +284,6 @@ actor APIClient {
     }
 
     // MARK: - Helpers
-
-    private func encodeAttachment(_ a: AttachmentInput) -> [String: Any] {
-        var item: [String: Any] = ["mimeType": a.mimeType, "data": a.data]
-        if let caption = a.caption, !caption.isEmpty { item["caption"] = caption }
-        return item
-    }
 
     /// A non-empty title encodes as a string; an empty/nil title clears it.
     private func titleValue(_ title: String?) -> Any {

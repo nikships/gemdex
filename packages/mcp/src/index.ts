@@ -41,15 +41,17 @@ without waiting for permission. Explicit user requests ("remember that…", "sav
 this") are just one trigger among many. Keep memories to durable, reusable facts
 — skip one-off trivia and anything easily re-derived from the current context.
 
-Behavior: the content is chunked, embedded via the selected text provider
-(Gemini or local MLX), and stored globally
-(searchable from every repo and session). Returns the new memory id.
+Behavior: the content is chunked, embedded on-device (BGE-M3 via MLX), and
+stored globally (searchable from every repo and session). Returns the new
+memory id.
 
-Multimodal: optionally pass \`attachments\` (image/audio/video/PDF) to embed
-media alongside the text. Each attachment is either a local file \`path\`
-(preferred — the server reads + encodes the bytes, so you don't emit base64) or
-inline base64 \`data\`. Requires the gemini-embedding-2 model. Either \`content\`
-or at least one attachment is required.
+Optionally pass \`attachments\`: text files (.txt, .json, .jsonl) stored
+alongside the memory and readable later with \`read_attachment\`. They are
+not searched — put anything that should be findable in \`content\`. Each
+attachment is either a local file \`path\` (preferred — the server reads the
+bytes, so you don't emit base64) or inline base64 \`data\`. Images, audio,
+video and PDFs are not supported. Either \`content\` or at least one attachment
+is required.
 
 If the response includes a "⚠ similar existing memories already stored" block,
 the store found near-duplicate/conflicting memories already there — read it and
@@ -113,8 +115,8 @@ Two ways to change the text:
 
 Behavior: re-chunks and re-embeds the resulting content under the same id.
 Omitted fields are preserved — leave out \`content\`/\`edits\` to keep the prior
-text, leave out \`attachments\` to keep the prior media (pass \`attachments: []\`
-to clear it). Each attachment is either a local file \`path\` (preferred) or
+text, leave out \`attachments\` to keep the prior attachments (pass
+\`attachments: []\` to clear them). Each attachment is either a local file \`path\` (preferred) or
 inline base64 \`data\`. To remove a memory entirely, use \`delete_memory\`.
 `;
 
@@ -141,9 +143,8 @@ Read the bytes of an attachment on a stored memory as text (UTF-8) or base64.
 
 🎯 **When to use**: after \`get_memory\` shows a memory with attachments —
 especially chat digests that include a \`file\` attachment captioned
-"Full transcript (source file)". Prefer this over opening a local path when
-running in remote mode (BYOI): the bytes live in the server blob store and are
-fetched over HTTP. No GEMINI_API_KEY required.
+"Full transcript (source file)". Prefer this over opening the transcript's
+original path, which may have moved or been deleted since it was ingested.
 
 Args: \`memory_id\` (required), optional \`attachment_id\` (omit when there is
 exactly one attachment, or a single transcript/\`file\` attachment), optional
@@ -159,32 +160,31 @@ after consolidation, or the user explicitly asks to forget something. Prefer
 \`update_memory\` when the facts can be corrected in place. Get the id from a
 prior save_memory, recall, or get_memory result.
 
-Behavior: removes the memory from the backend (local LanceDB or remote BYOI
-\`DELETE /v1/memories/:id\`). Also clears this client's per-memory outcome
+Behavior: removes the memory and its attachment files from the local store.
+Also clears this client's per-memory outcome
 stats for that id. Irreversible via MCP — confirm with the user when unsure.
 `;
 
-// JSON-schema fragment for the optional media array shared by save_memory /
-// update_memory. Each item is EITHER a local file `path` (preferred for
-// agents — the server reads + base64-encodes it, so no megabytes of base64
-// land in tool-call args) OR inline base64 `data`.
+// JSON-schema fragment for the optional attachments array shared by
+// save_memory / update_memory. Each item is EITHER a local file `path`
+// (preferred for agents — the server reads + base64-encodes it, so no
+// megabytes of base64 land in tool-call args) OR inline base64 `data`.
 const ATTACHMENTS_SCHEMA = {
     type: "array",
     description:
-        "Optional media to embed. Each item is either a local file 'path' (preferred — the " +
-        "server reads the bytes off disk; mimeType is inferred from the extension) or inline " +
-        "base64 'data' with a 'mimeType'. Requires the gemini-embedding-2 model. " +
-        "Limits: ≤6 images, ≤1 PDF, ≤1 audio, ≤1 video per memory.",
+        "Optional text files stored with the memory (not searched). Each item is either a local " +
+        "file 'path' (preferred — the server reads the bytes off disk; mimeType is inferred from " +
+        "the extension) or inline base64 'data' with a 'mimeType'. Limit: 4 files, 20 MiB each.",
     items: {
         type: "object",
         properties: {
             path: {
                 type: "string",
-                description: "Absolute (or ~/cwd-relative) path to a local media file. Preferred over 'data'. Mutually exclusive with 'data'.",
+                description: "Absolute (or ~/cwd-relative) path to a local .txt, .json, .jsonl or .ndjson file. Preferred over 'data'. Mutually exclusive with 'data'.",
             },
             mimeType: {
                 type: "string",
-                description: "image/png, image/jpeg, audio/mp3, audio/wav, video/mp4, video/quicktime, or application/pdf. Required with 'data'; optional with 'path' (inferred from the extension).",
+                description: "text/plain, application/json, or application/x-ndjson. Required with 'data'; optional with 'path' (inferred from the extension).",
             },
             data: {
                 type: "string",
@@ -192,7 +192,7 @@ const ATTACHMENTS_SCHEMA = {
             },
             caption: {
                 type: "string",
-                description: "Optional text describing this attachment; backs the BM25 (keyword) branch for it.",
+                description: "Optional short description of this attachment.",
             },
         },
         anyOf: [
@@ -377,8 +377,8 @@ class GemdexMemoryServer {
         this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             const { name, arguments: args } = request.params;
             if (!MCP_TOOL_NAMES.some((tool) => tool === name)) throw new Error(`Unknown tool: ${name}`);
-            // Configuration is repairable while Claude Code remains connected.
-            // Resolve before every tool, including metadata/feedback tools.
+            // Setup is repairable while the MCP client stays connected: an
+            // install run in a terminal takes effect on the next tool call.
             try {
                 const configStore = new ClientConfigStore();
                 const config = createConfig((key) => configStore.getEnv(key));
@@ -441,14 +441,8 @@ async function main() {
         return;
     }
 
-    let config: GemdexConfig;
-    try {
-        config = createConfig();
-        logConfigurationSummary(config);
-    } catch {
-        // Keep discovery and setup guidance available for incomplete remotes too.
-        config = createConfig(() => undefined);
-    }
+    const config: GemdexConfig = createConfig();
+    logConfigurationSummary(config);
 
     const server = new GemdexMemoryServer(config);
     await server.start();

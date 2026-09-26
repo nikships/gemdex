@@ -17,40 +17,10 @@ struct MainView: View {
         }
         .navigationTitle("Gemdex Memory")
         .navigationSubtitle(model.statusText)
-        .safeAreaInset(edge: .top, spacing: 0) {
-            VStack(spacing: 0) {
-                if model.backendIsRemote && (model.ingestionNeedsAttention || model.ingestionIsChecking) {
-                    ingestionReadinessBanner
-                }
-                // Unified Activity Center — ingest, hygiene, import, migration.
-                // Survives panel navigation so progress/cancel never vanish.
-                ActivityRail()
-            }
-        }
         .toolbar { toolbarContent }
         .alert(item: $model.importAlert) { alert in
             Alert(title: Text(alert.title), message: Text(alert.message), dismissButton: .default(Text("OK")))
         }
-    }
-
-    private var ingestionReadinessBanner: some View {
-        let checking = model.ingestionIsChecking
-        return HStack(alignment: .center, spacing: 12) {
-            GeminiReadinessAlert(readiness: model.geminiReadiness, compact: true)
-            if !checking {
-                Button("Fix Gemini key") {
-                    model.showSettings = true
-                    model.showIngest = false
-                    model.showHygiene = false
-                }
-                .brandPrimary()
-                .fixedSize()
-            }
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background((checking ? Brand.gold : Color.red).opacity(0.08))
-        .overlay(alignment: .bottom) { Divider() }
     }
 
     @ToolbarContentBuilder
@@ -61,20 +31,20 @@ struct MainView: View {
         }
         ToolbarItemGroup(placement: .primaryAction) {
             Button { model.showSettings = true; model.showIngest = false; model.showHygiene = false } label: {
-                Label("Storage", systemImage: model.activities[.migration]?.isActive == true
+                Label("Storage", systemImage: model.activities[.embedding]?.isActive == true
                       ? "externaldrive.badge.timemachine"
                       : "externaldrive")
             }
-            .help(model.activities[.migration]?.isActive == true
-                  ? "Local → remote import in progress"
-                  : "Storage & Gemini settings")
+            .help(model.activities[.embedding]?.isActive == true
+                  ? "Local embedding job in progress"
+                  : "Storage & Models settings")
             Button {
                 model.showIngest = true
                 model.showSettings = false
                 model.showHygiene = false
             } label: {
                 Label(
-                    model.ingestIsActive || model.pendingIngestBatch != nil
+                    model.ingestIsActive
                         ? "Ingest (active)"
                         : "Ingest Chat History",
                     systemImage: ingestToolbarIcon
@@ -113,7 +83,6 @@ struct MainView: View {
 
     private var ingestToolbarIcon: String {
         if model.ingestIsActive { return "tray.and.arrow.down.fill" }
-        if model.pendingIngestBatch != nil { return "clock.arrow.circlepath" }
         return model.ingestionIsReady ? "tray.and.arrow.down" : "exclamationmark.triangle.fill"
     }
 
@@ -121,12 +90,9 @@ struct MainView: View {
         if model.ingestIsActive {
             return "Ingestion running — open for details, or cancel from the activity bar"
         }
-        if model.pendingIngestBatch != nil {
-            return "A batch ingestion job is waiting to be collected"
-        }
         return model.ingestionIsReady
             ? "Ingest new coding-agent sessions as memories"
-            : "Gemini key validation required before ingestion"
+            : "Claude Code must be installed and signed in before ingestion"
     }
 
     private var hygieneToolbarIcon: String {
@@ -140,7 +106,7 @@ struct MainView: View {
         }
         return model.hygieneIsReady
             ? "Find stale, duplicate, or contradicted memories"
-            : "Gemini key validation required before hygiene analysis"
+            : "Claude Code must be installed and signed in before hygiene analysis"
     }
 
     /// The backend badge carries its own glass pill, so opt it out of the
@@ -196,8 +162,8 @@ struct MainView: View {
     }
 }
 
-/// A compact glass pill showing the active backend (local / remote / needs key)
-/// with a live status dot.
+/// A compact glass pill showing the local embedding model status with a live
+/// status dot.
 struct BackendBadge: View {
     @EnvironmentObject var model: AppModel
 
@@ -218,7 +184,6 @@ struct BackendBadge: View {
     }
 
     private var color: Color {
-        if model.backendNeedsAttention { return Brand.terracotta }
-        return model.backendIsRemote ? Brand.sage : Brand.gold
+        model.backendNeedsAttention ? Brand.terracotta : Brand.gold
     }
 }

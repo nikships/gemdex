@@ -7,7 +7,8 @@ backup/restore, upgrades, and troubleshooting, see the
 [BYOI operations guide](../../docs/BYOI_OPERATIONS.md).
 
 This package provides the `gemdex-server` CLI and the HTTP service that backs
-remote Gemdex clients (MCP, desktop app, CLI). It exposes the Gemdex v1 HTTP API
+HTTP MCP, the web manager BFF and direct HTTP integrations. The npx package
+and desktop sidecar manage only a separate local pool. This service exposes the v1 API
 under `/v1/*`.
 
 Postgres recall combines pgvector cosine search with PostgreSQL full-text ranking
@@ -20,7 +21,7 @@ parent memory and deduplicate before results are returned.
 ### Docker Compose (recommended)
 
 One command generates the secrets, prompts for your Gemini key, brings up the
-stack, waits for health, and prints the bearer token plus the client command:
+stack, waits for health, and prints connection details including the bearer token:
 
 ```sh
 cd packages/server
@@ -357,9 +358,23 @@ server.
 This package is part of the gemdex monorepo:
 
 - `gemdex-core` — shared types, memory API handler, embeddings, and vector DB.
-- `gemdex-mcp` — MCP stdio server for AI coding agents.
+- `gemdex-mcp-http`: Streamable HTTP agent service calling this server.
+- `gemdex-web`: Browser manager BFF calling this server.
+- `gemdex-mcp`: Separate local MLX stdio server and desktop sidecar.
 - `gemdex-server` — self-hostable HTTP backend (this package).
 
 The `/v1/*` memory routes reuse the `handleMemoryApiRequest` handler from
 `gemdex-core`, ensuring identical request/response semantics between local and
 remote deployments.
+
+Uploaded sessions use `POST /v1/sessions/ingest`, with the server's
+`GEMINI_API_KEY` and core's `SessionDigester`. Local Claude Code inference is
+not a server dependency. See [chat-history ingestion](../../docs/CHAT_HISTORY.md).
+
+## Integration tests
+
+From the repository root, after building packages, run `pnpm test:byoi` with
+`BYOI_TEST_DATABASE_URL` pointing to a dedicated disposable Postgres/pgvector
+database. The harness is `packages/server/integration/byoi.mjs`; it exercises
+`/v1` HTTP directly with deterministic embeddings. CI runs it in
+**BYOI integration (Postgres + server)**.

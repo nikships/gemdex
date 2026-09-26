@@ -167,8 +167,8 @@ function trustMultiplier(stats: MemoryStats | undefined): number {
 
 /**
  * Per-hit attachment line for full-memory output (`get_memory`). Surfaces
- * each attachment's kind, stable id, and caption so the agent knows media
- * exists and can fetch bytes via `read_attachment`. Returns null when none.
+ * each attachment's kind, stable id, and caption so the agent knows files
+ * exist and can fetch bytes via `read_attachment`. Returns null when none.
  */
 function formatAttachmentsLine(
     attachments: { id: string; kind: string; caption?: string }[] | undefined,
@@ -194,7 +194,7 @@ function formatMemoryResult(verb: string, memory: { id: string; title: string; a
  * the backend's save-time detection (`MemoryStore.findSimilarParents`)
  * returned candidates. Purely additive — absent entirely when `similar` is
  * empty/undefined (e.g. detection disabled, first save into an empty store,
- * or a remote/BYOI backend that doesn't run detection yet). The id is shown
+ * or a backend that doesn't run detection). The id is shown
  * in full (not truncated) since the advisory text asks the agent to pass it
  * straight into `update_memory`.
  */
@@ -406,7 +406,7 @@ export class MemoryToolHandlers {
     }
 
     /**
-     * Read attachment bytes for a memory (local blob store or remote HTTP).
+     * Read attachment bytes for a memory from the blob store.
      * Used for chat digests that store the full transcript as a non-embedded
      * `file` attachment, and for any other attachment agents need as text/base64.
      *
@@ -514,8 +514,7 @@ export class MemoryToolHandlers {
 
     /**
      * Record how acting on a recalled memory actually went. Validates the id
-     * against the backend first (`store.get`, works identically on local and
-     * remote) so junk ids never pollute the stats ledger, then delegates the
+     * against the backend first (`store.get`) so junk ids never pollute the stats ledger, then delegates the
      * tally to `MemoryStatsStore.recordOutcome`.
      */
     async handleReportOutcome(args: any): Promise<ToolResult> {
@@ -550,7 +549,7 @@ export class MemoryToolHandlers {
     }
 
     /**
-     * Permanently delete a memory by id (chunks, blobs, remote row). Validates
+     * Permanently delete a memory by id (rows and blobs). Validates
      * the id against the backend first so a missing id returns a clear error
      * instead of a silent no-op (local `MemoryStore.delete` is otherwise a
      * no-op when absent). On success, best-effort clears the per-client stats

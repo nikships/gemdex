@@ -100,26 +100,37 @@ describe('bucketSessionFiles', () => {
 });
 
 describe('IngestLedgerStore', () => {
-    it('round-trips entries and pending batch jobs', () => {
+    it('round-trips entries', () => {
         ledger.recordIngested('/a.jsonl', {
             mtimeMs: 1,
             size: 2,
             memoryId: 'chat:claude:a',
-            model: 'gemini-3.5-flash-lite',
+            model: 'haiku',
             ingestedAt: 3,
         });
         expect(ledger.getEntry('/a.jsonl')?.memoryId).toBe('chat:claude:a');
-
-        ledger.setPendingBatch({
-            jobName: 'batches/123',
-            model: 'gemini-3.5-flash-lite',
-            submittedAt: 4,
-            requests: {},
+        expect(ledger.load()).toEqual({
+            version: 1,
+            files: { '/a.jsonl': { mtimeMs: 1, size: 2, memoryId: 'chat:claude:a', model: 'haiku', ingestedAt: 3 } },
         });
-        expect(ledger.getPendingBatch()?.jobName).toBe('batches/123');
-        ledger.setPendingBatch(undefined);
-        expect(ledger.getPendingBatch()).toBeUndefined();
-        // Entries survive the pending-batch churn.
-        expect(ledger.getEntry('/a.jsonl')).toBeDefined();
+    });
+
+    it('drops a legacy pendingBatch key on load and on the next write', () => {
+        const entry = { mtimeMs: 1, size: 2, memoryId: 'chat:claude:a', model: 'gemini-3.5-flash-lite', ingestedAt: 3 };
+        fs.mkdirSync(path.dirname(ledger.ledgerPath), { recursive: true });
+        fs.writeFileSync(ledger.ledgerPath, JSON.stringify({
+            version: 1,
+            files: { '/a.jsonl': entry },
+            pendingBatch: { jobName: 'batches/123', model: 'gemini-3.5-flash-lite', submittedAt: 4, requests: {} },
+        }), 'utf8');
+
+        const loaded = ledger.load();
+        expect(loaded).toEqual({ version: 1, files: { '/a.jsonl': entry } });
+        expect(Object.keys(loaded)).not.toContain('pendingBatch');
+
+        ledger.recordIngested('/b.jsonl', { ...entry, memoryId: 'chat:claude:b' });
+        const onDisk = JSON.parse(fs.readFileSync(ledger.ledgerPath, 'utf8'));
+        expect(onDisk.pendingBatch).toBeUndefined();
+        expect(Object.keys(onDisk.files)).toEqual(['/a.jsonl', '/b.jsonl']);
     });
 });

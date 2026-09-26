@@ -61,7 +61,7 @@ struct GemdexMemoryApp: App {
                 }
                 .keyboardShortcut("r", modifiers: .command)
                 .disabled(model.screen != .ready)
-                Button(model.ingestIsActive || model.pendingIngestBatch != nil
+                Button(model.ingestIsActive
                        ? "Ingest Chat History (active)…"
                        : "Ingest Chat History…") {
                     model.openActivity(.ingest)

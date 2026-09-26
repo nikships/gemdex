@@ -9,7 +9,9 @@ a URL instead of a local stdio pipe.
 This package owns **no memory logic**. Every tool is a thin wrapper that
 delegates to the colocated BYOI server's `/v1` HTTP API (`gemdex-server`), which
 is the single source of memory behavior — the same relationship the TS stdio
-`gemdex-mcp` package has to `gemdex-core`. One memory pool backs both surfaces.
+`gemdex-mcp` package has to `gemdex-core`. HTTP MCP and the web manager share
+the self-hosted pool; stdio MCP and the desktop sidecar share a separate
+local MLX/LanceDB pool.
 
 ```
    remote agent  ──Streamable HTTP──▶  gemdex-mcp-http  ──/v1 bearer──▶  gemdex-server
@@ -38,6 +40,13 @@ async with Client("http://127.0.0.1:8766/mcp", auth=BearerAuth(token)) as client
 ```
 
 ## Configuration
+
+Prepared chat digests can be imported through `POST /mcp/sync/records` by an
+authorized OAuth client, or a static bearer client in static mode. The route
+accepts `{"records":[...]}`, requires `chat:` ids, limits requests to 50
+records and 100 MiB, and explicitly checks auth before forwarding to
+`/v1/import`. It is not an MCP tool or an npx command. For raw transcripts,
+use web upload. See [chat-history paths](../../docs/CHAT_HISTORY.md).
 
 Required config **fails fast at startup** (repo convention) — the process exits
 non-zero rather than booting into a broken state.

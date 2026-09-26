@@ -5,15 +5,28 @@ the code, and what it deliberately does **not** do. Read this before you point a
 DNS record at your stack.
 
 Local-only MLX settings do not add a public BYOI embedding path. The sidecar's
-`/settings/embedding*` routes (`packages/mcp/src/serve.ts`) remain behind its
+`/settings/embedding*` routes (`packages/mcp/src/serve.ts`) are behind its
 per-launch token and Origin checks. Only explicit install downloads runtime/model
 artifacts; no tool performs installation or migration implicitly. The stdio
 first-run gate (`packages/mcp/src/index.ts`, `onboarding.ts`) keeps all seven tools
-discoverable and returns setup instructions without memory writes. Local MLX
-text bypasses Gemini readiness, not sidecar authentication; Gemini-dependent
-media and ingestion still require a key. Provider/key persistence uses the
-`0600` client configuration writer (`cli-config.ts`). The MLX worker uses private
-child-process pipes, not a listening HTTP service.
+discoverable and returns setup instructions without memory writes.
+Data routes return `503 {needsInstall:true}` until MLX is installed.
+The local package has no model API-key or remote-backend setting.
+The MLX worker uses private child-process pipes, not a listening HTTP service.
+
+Local ingestion/hygiene uses Claude Code Haiku through
+`packages/core/src/inference/claude-code.ts`, retaining the user's existing
+login. Calls disable tools, settings sources, skills, MCP, hooks, CLAUDE.md,
+auto-memory and session persistence, and use a temporary cwd.
+These controls isolate inference from the user's agent setup; they do not
+make inference offline. Selected transcripts/candidates go to Claude Code.
+`checkClaudeCode` probes version/login without inference; sidecar start routes
+reject unready Claude Code with 400.
+
+`POST /mcp/sync/records` accepts prepared chat records from authorized clients,
+not raw transcripts. `packages/mcp-http/src/gemdex_mcp_http/sync.py` explicitly
+verifies the token because custom routes bypass FastMCP endpoint auth. Preserve
+its `chat:` id restriction, 50-record limit and 100 MiB body cap.
 
 The threat model is narrow and worth stating plainly: **a single-user memory
 store on the public internet.** The memory pool holds whatever you told your
@@ -139,11 +152,12 @@ Be honest with yourself about these:
   plaintext in your database and blob store. Use encrypted disks/volumes and
   provider access controls per your threat model.
 - **No secret redaction.** Gemdex stores what you tell it to store.
-- **Embedding leaves your infrastructure.** Memory text and media go to the
+- **Self-hosted embedding leaves your infrastructure.** Memory text and media go to the
   Gemini API when an operation needs an embedding.
 - **One user, no roles.** No accounts, tenants, ACLs, or audit log. The
   allowlist is the entire authorization model.
-- **`report_outcome` stats are per-client**, not host-side.
+- **`report_outcome` stats are a separate MCP ledger**, local for stdio and
+  service-side for HTTP MCP, not Postgres memory rows.
 
 Fuller custody discussion: [BYOI security model](BYOI_OPERATIONS.md#security-and-custody).
 

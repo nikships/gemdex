@@ -1,8 +1,7 @@
 import SwiftUI
 
 /// Onboarding / recovery surface for the non-ready sidecar phases. Mirrors the
-/// web app's recovery panel: install-and-start, retry, switch-to-local, or open
-/// settings, depending on the phase.
+/// web app's recovery panel: install-and-start or retry, depending on the phase.
 struct RecoveryView: View {
     @EnvironmentObject var model: AppModel
 
@@ -11,7 +10,6 @@ struct RecoveryView: View {
         case needsBootstrap(previouslyInstalled: Bool, detail: String)
         case installing(detail: String)
         case failed(detail: String)
-        case remoteUnavailable(detail: String)
     }
 
     let kind: Kind
@@ -65,7 +63,6 @@ struct RecoveryView: View {
         case .needsBootstrap: "arrow.down.circle"
         case .installing: "gearshape.2"
         case .failed: "exclamationmark.triangle"
-        case .remoteUnavailable: "wifi.exclamationmark"
         }
     }
 
@@ -75,7 +72,6 @@ struct RecoveryView: View {
         case let .needsBootstrap(installed, _): installed ? "Reconnect the memory store" : "Finish setting up Gemdex"
         case .installing: "Setting up Gemdex"
         case .failed: "Setup didn’t finish"
-        case .remoteUnavailable: "Remote storage is unreachable"
         }
     }
 
@@ -89,8 +85,6 @@ struct RecoveryView: View {
             ""
         case let .failed(detail):
             detail
-        case let .remoteUnavailable(detail):
-            "\(detail) Open Storage settings to test or edit the remote, or switch to local storage if it is configured."
         }
     }
 
@@ -103,7 +97,7 @@ struct RecoveryView: View {
         case .needsBootstrap:
             [
                 Action(label: "Install & start", prominent: true) { model.sidecar.bootstrap(install: true) },
-                Action(label: "Open Storage settings", prominent: false) { model.showSettings = true },
+                Action(label: "Retry connection", prominent: false) { model.sidecar.retry() },
             ]
         case .installing:
             []
@@ -111,11 +105,6 @@ struct RecoveryView: View {
             [
                 Action(label: "Try again", prominent: true) { model.sidecar.bootstrap(install: true) },
                 Action(label: "Retry connection", prominent: false) { model.sidecar.retry() },
-            ]
-        case .remoteUnavailable:
-            [
-                Action(label: "Open Storage settings", prominent: true) { model.showSettings = true },
-                Action(label: "Use local storage", prominent: false) { Task { try? await model.applyMode("local") } },
             ]
         }
     }

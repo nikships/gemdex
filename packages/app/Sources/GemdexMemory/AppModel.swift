@@ -3,16 +3,15 @@ import Combine
 import SwiftUI
 
 /// Top-level screen the window should show, derived from the sidecar phase and
-/// the active backend config. Mirrors the web app's gate/recovery states.
+/// the local store config.
 enum AppScreen: Equatable {
     case launching
-    case setup                         // sidecar ready, no API key configured
+    case setup                         // sidecar ready, local embedding model not installed
     case ready                         // memories loaded
     case needsNode
     case needsBootstrap(previouslyInstalled: Bool, detail: String)
     case installing(detail: String)
     case sidecarFailed(detail: String)
-    case remoteUnavailable(detail: String)
 }
 
 /// Sidebar search state. `.idle` shows the local title filter / full list;
@@ -52,23 +51,19 @@ final class AppModel: ObservableObject {
     @Published var filterText: String = ""
     @Published var selectedID: String?
 
-    @Published var config: ConfigSummary?
-    @Published var settings: SettingsSummary?
+    @Published private(set) var config: ConfigSummary?
     @Published private(set) var embeddingStatus: EmbeddingStatus?
     @Published private(set) var embeddingError: String?
     @Published private(set) var embeddingRequestPending = false
 
-    /// Shown on the setup screen when we send the user back to re-enter a key
-    /// (e.g. the configured Gemini key was rejected by Google at embed time).
-    @Published var setupNotice: String?
+    /// True while a `POST /config/check` Claude Code re-probe is in flight.
+    @Published private(set) var claudeCodeCheckPending = false
+    @Published private(set) var claudeCodeError: String?
 
     @Published var isEditorOpen = false
     @Published var showSettings = false
     @Published var showIngest = false
     @Published var showHygiene = false
-    /// Set when a Gemini Batch ingestion job is awaiting collection, so the
-    /// UI can re-surface a "Collect" affordance across launches.
-    @Published var pendingIngestBatch: IngestStatus.PendingBatch?
 
     /// Semantic free-text search state (`.idle` = local title filter).
     @Published var searchState: SearchState = .idle
@@ -79,7 +74,7 @@ final class AppModel: ObservableObject {
     @Published var importAlert: ImportAlert?
 
     // MARK: Activity Center
-    // Long-running jobs (ingest / hygiene / import / migration) are owned here
+    // Long-running jobs (ingest / hygiene / import / local model) are owned here
     // so closing a panel never loses progress. The Activity rail on MainView
     // renders these; panels re-hydrate from them on reopen.
 
@@ -92,12 +87,13 @@ final class AppModel: ObservableObject {
 
     let editor = EditorModel()
     let sidecar = SidecarManager()
-    let thumbnails = ThumbnailLoader()
     private(set) var api: APIClient?
     private var cancellables = Set<AnyCancellable>()
 
     /// Background poll of sidecar job status. Fast while active, slow when idle.
     private var activityPollTask: Task<Void, Never>?
+    /// Polls `GET /config` while the sidecar's Claude Code probe is `checking`.
+    private var claudeCodePollTask: Task<Void, Never>?
     /// Cooperative cancel for client-side import batches.
     private var importCancelRequested = false
     /// Prevent double-complete UI when a panel and the poller both see "done".
@@ -123,7 +119,6 @@ final class AppModel: ObservableObject {
 
     init() {
         editor.appModel = self
-        thumbnails.appModel = self
         sidecar.$phase
             .receive(on: RunLoop.main)
             .sink { [weak self] phase in
@@ -174,39 +169,20 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Gemini readiness gates Gemini storage, not working local MLX text storage.
+    /// The memory UI is gated only on `configured` (local embedding model
+    /// installed). Claude Code readiness gates ingest + hygiene, never the store.
     @discardableResult
     func syncConfigGate() async -> Bool {
         guard let api else { return false }
         do {
-            var cfg = try await api.config()
-            self.config = cfg
-
-            if cfg.mode == "local" && !cfg.usesLocalMLX && cfg.gemini.status == "checking" {
-                screen = .launching
-                statusText = "Validating Gemini API key…"
-                statusIsError = false
-                cfg = await pollGeminiReadiness(from: cfg, api: api)
-            }
-
-            if cfg.mode == "local" && !cfg.usesLocalMLX && !cfg.gemini.isReady {
-                setupNotice = cfg.gemini.message
-                screen = .setup
-                statusText = readinessTitle(cfg.gemini)
-                statusIsError = true
-                return false
-            }
+            let cfg = try await api.config()
+            apply(config: cfg)
 
             if cfg.configured {
                 await loadMemories()
-                if (cfg.mode == "remote" || cfg.usesLocalMLX) && cfg.gemini.status == "checking" {
-                    Task { await refreshGeminiReadinessUntilSettled() }
-                }
                 return true
             }
-            screen = .setup
-            statusText = readinessTitle(cfg.gemini)
-            statusIsError = true
+            showSetup()
             return false
         } catch {
             setStatus("Error: \(error.localizedDescription)", isError: true)
@@ -214,30 +190,30 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Poll GET /config while readiness is `checking` (≈15s max at 250ms).
-    private func pollGeminiReadiness(from initial: ConfigSummary, api: APIClient) async -> ConfigSummary {
-        var cfg = initial
-        for _ in 0..<60 {
-            guard cfg.gemini.status == "checking" else { break }
-            try? await Task.sleep(nanoseconds: 250_000_000)
-            guard let latest = try? await api.config() else { continue }
-            cfg = latest
-            self.config = latest
+    private func apply(config cfg: ConfigSummary) {
+        config = cfg
+        let wasRunning = embeddingStatus?.isRunning == true || activities[.embedding]?.isActive == true
+        if !embeddingRequestPending && (cfg.embedding.isRunning || !wasRunning) {
+            embeddingStatus = cfg.embedding
+            if cfg.embedding.isRunning {
+                trackRunningEmbedding(cfg.embedding)
+            }
         }
-        return cfg
+        if cfg.claudeCode.isChecking {
+            startClaudeCodePolling()
+        }
     }
 
-    private func refreshGeminiReadinessUntilSettled() async {
-        guard let api, let cfg = config else { return }
-        _ = await pollGeminiReadiness(from: cfg, api: api)
-    }
-
-    private func readinessTitle(_ readiness: GeminiReadiness) -> String {
-        switch readiness.status {
-        case "invalid": return "Gemini API key rejected"
-        case "unavailable": return "Gemini validation unavailable"
-        case "checking": return "Validating Gemini API key…"
-        default: return "Gemini API key required"
+    private func showSetup() {
+        isEditorOpen = false
+        showIngest = false
+        showHygiene = false
+        showSettings = false
+        screen = .setup
+        if embeddingStatus?.isRunning == true {
+            setStatus("Installing the local embedding model…")
+        } else {
+            setStatus("Local embedding model not installed", isError: true)
         }
     }
 
@@ -248,21 +224,28 @@ final class AppModel: ObservableObject {
             self.memories = list
             screen = .ready
             setStatus(Self.countLabel(list.count))
-            await refreshPendingIngestBatch()
-            // Pick up any in-flight sidecar job (or pending batch) and keep the
-            // Activity Center polling for the rest of the session.
+            // Pick up any in-flight sidecar job and keep the Activity Center
+            // polling for the rest of the session.
             await refreshActivityStatus()
             startActivityMonitoring()
-        } catch let err as APIError {
-            if config?.mode == "remote" {
-                screen = .remoteUnavailable(detail: err.message)
-                setStatus("Remote unavailable: \(err.message)", isError: true)
-            } else {
-                setStatus("Error: \(err.message)", isError: true)
-            }
+        } catch let err as APIError where err.needsInstall {
+            await refreshConfig()
+            showSetup()
         } catch {
             setStatus("Error: \(error.localizedDescription)", isError: true)
         }
+    }
+
+    /// Route back to the install screen when a memory route reports the local
+    /// model is missing (`503 {needsInstall: true}`). Returns `true` if handled.
+    @discardableResult
+    func handleNeedsInstall(_ error: Error) -> Bool {
+        guard let err = error as? APIError, err.needsInstall else { return false }
+        Task {
+            await refreshConfig()
+            showSetup()
+        }
+        return true
     }
 
     func refreshList() async {
@@ -331,7 +314,7 @@ final class AppModel: ObservableObject {
             guard filterText.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
             searchState = .results(results)
         } catch let err as APIError {
-            if handlePossibleInvalidKey(err.message) {
+            if handleNeedsInstall(err) {
                 searchState = .idle
                 return
             }
@@ -542,23 +525,11 @@ final class AppModel: ObservableObject {
         }
     }
 
-    // MARK: - Chat-history ingestion
-
-    /// Check for a previously submitted Batch API job awaiting collection.
-    /// Local mode only — ingestion always digests with a local Gemini key, and
-    /// the status route reports idle when no key/manager is available.
-    func refreshPendingIngestBatch() async {
-        guard let api else { return }
-        let status = try? await api.ingestStatus()
-        pendingIngestBatch = status?.pendingBatch
-        if let status { ingestStatus = status }
-    }
-
     // MARK: - Activity Center
 
     /// Active + terminal activities ordered for the rail (active first, newest last).
     var activityList: [JobActivity] {
-        let order: [JobKind] = [.ingest, .hygiene, .importFile, .migration, .embedding]
+        let order: [JobKind] = [.ingest, .hygiene, .importFile, .embedding]
         return order.compactMap { activities[$0] }
     }
 
@@ -589,7 +560,8 @@ final class AppModel: ObservableObject {
         case .importFile:
             // Import has no dedicated panel; keep the user on the main list.
             break
-        case .migration, .embedding:
+        case .embedding:
+            guard screen == .ready else { return }
             showIngest = false
             showHygiene = false
             isEditorOpen = false
@@ -613,8 +585,8 @@ final class AppModel: ObservableObject {
             Task { await cancelIngest() }
         case .hygiene:
             Task { await cancelHygiene() }
-        case .migration, .embedding:
-            // Single blocking HTTP call — no cooperative cancel surface.
+        case .embedding:
+            // The sidecar exposes no cancel for install/migrate jobs.
             break
         }
     }
@@ -656,52 +628,21 @@ final class AppModel: ObservableObject {
         startActivityMonitoring()
     }
 
-    /// Show an indeterminate migration activity while local→remote import runs.
-    func noteMigrationStarted(remoteName: String) {
-        upsertActivity(.indeterminate(
-            kind: .migration,
-            title: "Importing local → \(remoteName)",
-            detail: "Copying memories to the remote store",
-            canCancel: false,
-            canOpen: true
-        ))
-    }
-
-    func noteMigrationFinished(created: Int, updated: Int, skipped: Int, error: String? = nil) {
-        if let error {
-            finishActivity(
-                kind: .migration,
-                phase: .failed,
-                title: "Local → remote failed",
-                detail: error,
-                completed: 0,
-                total: 0,
-                error: error
-            )
-        } else {
-            finishActivity(
-                kind: .migration,
-                phase: .completed,
-                title: "Local → remote complete",
-                detail: "\(created) new · \(updated) updated · \(skipped) skipped",
-                completed: created + updated + skipped,
-                total: created + updated + skipped
-            )
-        }
-    }
-
-    /// One-shot refresh of ingest + hygiene status into the Activity Center.
+    /// One-shot refresh of ingest + hygiene + local model status into the
+    /// Activity Center. Ingest/hygiene are skipped until the store is mounted.
     func refreshActivityStatus() async {
         guard let api else { return }
-        async let ingest = try? api.ingestStatus()
-        async let hygiene = try? api.hygieneStatus()
-        let ingestLatest = await ingest
-        let hygieneLatest = await hygiene
-        if let ingestLatest {
-            applyIngestStatus(ingestLatest)
-        }
-        if let hygieneLatest {
-            applyHygieneStatus(hygieneLatest)
+        if config?.configured == true {
+            async let ingest = try? api.ingestStatus()
+            async let hygiene = try? api.hygieneStatus()
+            let ingestLatest = await ingest
+            let hygieneLatest = await hygiene
+            if let ingestLatest {
+                applyIngestStatus(ingestLatest)
+            }
+            if let hygieneLatest {
+                applyHygieneStatus(hygieneLatest)
+            }
         }
         if !embeddingRequestPending && (embeddingStatus?.isRunning == true || activities[.embedding]?.isActive == true) {
             await refreshEmbeddingStatus()
@@ -715,15 +656,14 @@ final class AppModel: ObservableObject {
                 guard let self else { return }
                 await self.refreshActivityStatus()
                 self.pruneStaleTerminalActivities()
-                // Poll fast while something is running; slow when only batch-
-                // pending or idle so we don't hammer the sidecar forever.
-                let active = self.activities.values.contains { $0.phase == .running || $0.phase == .cancelling }
-                let hasBatch = self.activities[.ingest]?.phase == .batchPending
+                // Poll fast while something is running; slow while only
+                // terminal chips remain so auto-dismiss still runs.
+                let active = self.activities.values.contains(where: \.isActive)
                 let hasTerminal = self.activities.values.contains(where: \.isTerminal)
                 let nanos: UInt64
                 if active {
                     nanos = 1_000_000_000
-                } else if hasBatch || hasTerminal {
+                } else if hasTerminal {
                     nanos = 3_000_000_000
                 } else {
                     // Nothing to track — stop the loop; note*Started restarts it.
@@ -746,8 +686,7 @@ final class AppModel: ObservableObject {
         }
         do {
             try await api.ingestCancel()
-            // Standard-mode cancel is cooperative; re-poll until terminal.
-            // Batch-mode cancel clears the pending job immediately.
+            // Cancel is cooperative; the poller picks up the terminal state.
             await refreshActivityStatus()
         } catch {
             setStatus("Cancel failed: \(error.localizedDescription)", isError: true)
@@ -773,7 +712,6 @@ final class AppModel: ObservableObject {
 
     private func applyIngestStatus(_ status: IngestStatus) {
         ingestStatus = status
-        pendingIngestBatch = status.pendingBatch
 
         switch status.state {
         case "running":
@@ -790,24 +728,6 @@ final class AppModel: ObservableObject {
                 completed: done,
                 total: status.total,
                 detail: detail,
-                canCancel: true,
-                canOpen: true
-            ))
-
-        case "batchPending":
-            lastIngestTerminalSignature = nil
-            let pending = status.pendingBatch
-            let detail: String
-            if let pending {
-                detail = "\(pending.requestCount) sessions · \(pending.model) · collect when ready"
-            } else {
-                detail = "Batch job submitted — collect when ready"
-            }
-            upsertActivity(.indeterminate(
-                kind: .ingest,
-                title: "Batch job pending",
-                detail: detail,
-                phase: .batchPending,
                 canCancel: true,
                 canOpen: true
             ))
@@ -937,7 +857,7 @@ final class AppModel: ObservableObject {
             total: total,
             fraction: fraction,
             canCancel: false,
-            canOpen: kind == .ingest || kind == .hygiene || kind == .migration || kind == .embedding,
+            canOpen: kind == .ingest || kind == .hygiene || kind == .embedding,
             error: error,
             updatedAt: Date()
         )
@@ -952,182 +872,123 @@ final class AppModel: ObservableObject {
         }
     }
 
-    // MARK: - Setup
-
-    func submitApiKey(_ key: String) async throws {
-        guard let api else { throw APIError(status: -1, message: "Sidecar not ready", needsKey: false) }
-        statusText = "Validating Gemini API key…"
-        statusIsError = false
-        let cfg = try await api.setApiKey(key)
-        guard cfg.gemini.isReady else {
-            throw APIError(status: -1, message: cfg.gemini.message ?? "Key was not validated.", needsKey: true)
-        }
-        config = cfg
-        setupNotice = nil
-        await syncConfigGate()
-        await refreshSettings()
-    }
-
-    func retryApiKeyValidation() async throws {
-        guard let api else { throw APIError(status: -1, message: "Sidecar not ready", needsKey: false) }
-        statusText = "Validating Gemini API key…"
-        statusIsError = false
-        let cfg: ConfigSummary
-        do {
-            cfg = try await api.validateConfiguredApiKey()
-        } catch {
-            await refreshConfig()
-            setupNotice = config?.gemini.message ?? error.localizedDescription
-            throw error
-        }
-        config = cfg
-        setupNotice = cfg.gemini.message
-        guard cfg.gemini.isReady else {
-            statusText = readinessTitle(cfg.gemini)
-            statusIsError = true
-            throw APIError(
-                status: -1,
-                message: cfg.gemini.message ?? "Gemini API key validation failed.",
-                needsKey: true
-            )
-        }
-        await syncConfigGate()
-        await refreshSettings()
-    }
-
-    /// Detect Gemini's "API key not valid" failure (the key is configured but
-    /// rejected by Google at embed time) so callers can route the user back to
-    /// key entry instead of surfacing raw Google JSON.
-    static func isInvalidKeyError(_ message: String) -> Bool {
-        let m = message.lowercased()
-        return m.contains("api_key_invalid")
-            || m.contains("api key not valid")
-            || m.contains("invalid_argument") && m.contains("api key")
-    }
-
-    /// If `message` indicates an invalid Gemini key, send the user back to the
-    /// setup screen with a clear prompt and return `true`. Local mode only —
-    /// remote backends own their own key.
-    @discardableResult
-    func handlePossibleInvalidKey(_ message: String) -> Bool {
-        guard config?.mode != "remote", Self.isInvalidKeyError(message) else { return false }
-        markGeminiKeyInvalid()
-        if config?.usesLocalMLX == true {
-            showSettings = true
-            setStatus("Gemini key rejected; media and legacy Gemini operations need a valid key.", isError: true)
-            return true
-        }
-        showSettings = false
-        showIngest = false
-        showHygiene = false
-        isEditorOpen = false
-        screen = .setup
-        statusText = "API key required"
-        statusIsError = true
-        return true
-    }
-
-    /// Ingestion always uses the local Gemini key, even with remote storage.
-    /// If that key is revoked after startup, close the ingestion flow and route
-    /// remote users directly to the repair controls without disabling storage.
-    @discardableResult
-    func handlePossibleInvalidIngestionKey(_ message: String) -> Bool {
-        guard Self.isInvalidKeyError(message) else { return false }
-        markGeminiKeyInvalid()
-        showIngest = false
-        showHygiene = false
-        if backendIsRemote || config?.usesLocalMLX == true {
-            showSettings = true
-            setStatus("Gemini key rejected; ingestion is blocked.", isError: true)
-        } else {
-            isEditorOpen = false
-            screen = .setup
-            statusText = "Gemini API key required"
-            statusIsError = true
-        }
-        return true
-    }
-
-    private func markGeminiKeyInvalid() {
-        let notice = "Your Gemini API key was rejected. Please enter a valid key."
-        setupNotice = notice
-        if let config {
-            self.config = ConfigSummary(
-                configured: config.mode == "remote" || config.usesLocalMLX ? config.configured : false,
-                mode: config.mode,
-                needsKey: config.mode == "local" && !config.usesLocalMLX,
-                gemini: GeminiReadiness(status: "invalid", message: notice, validatedAt: nil),
-                activeRemote: config.activeRemote,
-                embeddingProvider: config.embeddingProvider
-            )
-        }
-    }
-
-    // MARK: - Config / settings helpers
+    // MARK: - Config
 
     func refreshConfig() async {
         guard let api else { return }
-        self.config = try? await api.config()
+        if let cfg = try? await api.config() {
+            apply(config: cfg)
+        }
     }
 
-    func refreshSettings() async {
-        guard let api else { return }
-        self.settings = try? await api.settings()
+    // MARK: - Claude Code readiness
+
+    var claudeCode: ClaudeCodeReadiness? { config?.claudeCode }
+    /// Ingestion digests with the local Claude Code CLI.
+    var ingestionIsReady: Bool { config?.claudeCode.isReady ?? false }
+    /// Hygiene judging uses the same Claude Code CLI as ingestion.
+    var hygieneIsReady: Bool { ingestionIsReady }
+    var claudeCodeIsChecking: Bool { claudeCodeCheckPending || (config?.claudeCode.isChecking ?? false) }
+
+    /// Explicit re-probe (`POST /config/check`). The sidecar waits for the
+    /// probe, so the response carries a settled status.
+    func checkClaudeCode() async {
+        guard let api, !claudeCodeCheckPending else { return }
+        claudeCodeCheckPending = true
+        claudeCodeError = nil
+        defer { claudeCodeCheckPending = false }
+        do {
+            let cfg = try await api.checkClaudeCode()
+            apply(config: cfg)
+        } catch {
+            claudeCodeError = error.localizedDescription
+        }
     }
+
+    /// Adopt a fresher readiness snapshot carried by another route
+    /// (`GET /ingest/sources` includes `claudeCode`).
+    func noteClaudeCode(_ readiness: ClaudeCodeReadiness) {
+        guard var cfg = config, cfg.claudeCode != readiness else { return }
+        cfg.claudeCode = readiness
+        config = cfg
+        if readiness.isChecking { startClaudeCodePolling() }
+    }
+
+    /// Poll `GET /config` while the sidecar reports `checking` (500 ms, ≈30 s max).
+    private func startClaudeCodePolling() {
+        guard claudeCodePollTask == nil else { return }
+        claudeCodePollTask = Task { [weak self] in
+            for _ in 0..<60 {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                guard let self, !Task.isCancelled else { return }
+                guard let api = self.api, let cfg = try? await api.config() else { continue }
+                self.config = cfg
+                if !cfg.claudeCode.isChecking { break }
+            }
+            self?.claudeCodePollTask = nil
+        }
+    }
+
+    // MARK: - Backend badge
 
     var backendLabel: String {
-        guard let config else { return "Backend: loading…" }
-        if config.mode == "remote" {
-            return "Remote: \(config.activeRemote?.name ?? "remote")"
-        }
-        if config.usesLocalMLX { return "Local: MLX (text only)" }
-        switch config.gemini.status {
-        case "valid": return "Local: Gemini verified"
-        case "checking": return "Local: validating Gemini"
-        case "invalid": return "Local: key rejected"
-        case "unavailable": return "Local: validation unavailable"
-        default: return "Local: API key required"
+        guard let config else { return "Local: loading…" }
+        switch embeddingStatus?.status ?? config.embedding.status {
+        case "installing": return "Local: installing model"
+        case "migrating": return "Local: migrating memories"
+        case "error": return "Local: model error"
+        case "not-installed": return "Local: model not installed"
+        default: return config.configured ? "Local: BGE-M3 (MLX)" : "Local: model not installed"
         }
     }
 
-    var backendIsRemote: Bool { config?.mode == "remote" }
     var backendNeedsAttention: Bool {
         guard let config else { return true }
-        return config.mode == "local" && (!config.configured || (!config.usesLocalMLX && !config.gemini.isReady))
+        return !config.configured || (embeddingStatus?.status ?? config.embedding.status) == "error"
     }
-    var geminiReadiness: GeminiReadiness? { config?.gemini }
-    var ingestionIsReady: Bool { config?.gemini.isReady ?? false }
-    /// Hygiene analysis judges with the local Gemini key — same gate as ingestion.
-    var hygieneIsReady: Bool { ingestionIsReady }
-    /// True when ingestion is blocked for a user-actionable reason (not mid-check).
-    var ingestionNeedsAttention: Bool { config?.gemini.needsAttention ?? true }
-    var ingestionIsChecking: Bool { config?.gemini.status == "checking" }
 
-    // MARK: - Settings actions
+    // MARK: - Local embedding model
 
     var embeddingIsBusy: Bool {
         embeddingRequestPending || embeddingStatus?.isRunning == true || activities[.embedding]?.isActive == true
     }
 
+    private func trackRunningEmbedding(_ state: EmbeddingStatus) {
+        upsertActivity(.running(
+            kind: .embedding,
+            title: state.status == "installing" ? "Installing local embedding model" : "Migrating memories to the local model",
+            completed: state.completed ?? 0,
+            total: state.total ?? 0,
+            detail: state.message,
+            canCancel: false,
+            // Settings is reachable only once the store is mounted; the setup
+            // screen shows install progress inline.
+            canOpen: screen == .ready
+        ))
+        startActivityMonitoring()
+    }
+
     func refreshEmbeddingStatus() async {
-        guard let api, config?.mode == "local" else { return }
+        guard let api else { return }
         do {
-            let wasRunning = embeddingStatus?.isRunning == true || activities[.embedding]?.isActive == true
+            let previous = embeddingStatus
+            let wasRunning = previous?.isRunning == true || activities[.embedding]?.isActive == true
+            let wasMigrating = previous?.status == "migrating"
             let latest = try await api.embeddingStatus()
             embeddingStatus = latest
             embeddingError = nil
             if latest.isRunning {
-                upsertActivity(.running(kind: .embedding,
-                                        title: latest.status == "installing" ? "Installing local MLX" : "Migrating text to MLX",
-                                        completed: latest.completed ?? 0, total: latest.total ?? 0,
-                                        detail: latest.message, canCancel: false))
-                startActivityMonitoring()
+                trackRunningEmbedding(latest)
             } else if wasRunning {
-                finishActivity(kind: .embedding, phase: latest.status == "error" ? .failed : .completed,
-                               title: latest.status == "error" ? "Local embedding job failed" : "Local embedding job complete",
-                               detail: latest.message, completed: latest.completed ?? 0, total: latest.total ?? 0,
-                               error: latest.status == "error" ? latest.message : nil)
-                await refreshSettings()
+                let failed = latest.status == "error"
+                let job = wasMigrating ? "Migration" : "Local model install"
+                // The finished status may omit counters; keep the last polled ones.
+                let total = latest.total ?? previous?.total ?? 0
+                let completed = latest.completed ?? (failed ? previous?.completed ?? 0 : total)
+                finishActivity(kind: .embedding, phase: failed ? .failed : .completed,
+                               title: failed ? "\(job) failed" : "\(job) complete",
+                               detail: latest.message, completed: completed, total: total,
+                               error: failed ? latest.message : nil)
                 await syncConfigGate()
             }
         } catch {
@@ -1136,79 +997,46 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Explicit UI actions only. The sidecar owns downloads and migration logic.
-    func changeEmbedding(install: Bool = false, migrate: Bool = false, provider: String? = nil) async {
-        guard let api, config?.mode == "local", !embeddingIsBusy else { return }
+    enum EmbeddingJob { case install, migrate }
+
+    /// Explicit, user-confirmed install or legacy-memory migration. Both
+    /// answer `202` with a running `EmbeddingStatus` and are polled through
+    /// `GET /settings/embedding`; `409` means a job is already running.
+    func startEmbeddingJob(_ job: EmbeddingJob) async {
+        guard let api, !embeddingIsBusy else { return }
+        if job == .migrate && legacyMemoryCount == 0 { return }
         embeddingRequestPending = true
         embeddingError = nil
         defer { embeddingRequestPending = false }
         do {
             let latest: EmbeddingStatus
-            if install {
-                latest = try await api.installEmbedding()
-            } else if migrate {
-                latest = try await api.migrateEmbedding()
-            } else if let provider {
-                latest = try await api.setEmbeddingProvider(provider)
-            } else { return }
+            switch job {
+            case .install: latest = try await api.installEmbedding()
+            case .migrate: latest = try await api.migrateEmbedding()
+            }
             embeddingStatus = latest
             if latest.isRunning {
-                upsertActivity(.indeterminate(kind: .embedding, title: "Local embedding job", detail: latest.message))
-                startActivityMonitoring()
+                trackRunningEmbedding(latest)
+            } else {
+                await syncConfigGate()
             }
-            await refreshSettings()
-            await syncConfigGate()
         } catch {
             embeddingError = error.localizedDescription
-            // An HTTP error is definitive; transport/decode errors can follow
-            // acceptance, so reconcile status without resubmitting the action.
-            if !(error is APIError) || (error as? APIError)?.status == -1 {
+            // An HTTP status is definitive (409 included: poll the running job);
+            // transport/decode errors can follow acceptance, so reconcile
+            // status without resubmitting the action.
+            let status = (error as? APIError)?.status ?? -1
+            if status == -1 || status == 409 {
                 upsertActivity(.indeterminate(kind: .embedding, title: "Checking local embedding job", detail: embeddingError))
                 startActivityMonitoring()
             }
         }
     }
 
-    func applyMode(_ mode: String, name: String? = nil) async throws {
-        guard let api else { return }
-        guard !embeddingIsBusy else {
-            throw APIError(status: 409, message: "Wait for the local embedding job to finish before switching storage.", needsKey: false)
-        }
-        self.settings = try await api.setMode(mode, name: name)
-        await syncConfigGate()
-    }
-
-    func saveRemote(name: String, url: String, token: String?) async throws {
-        guard let api else { return }
-        self.settings = try await api.saveRemote(name: name, url: url, token: token)
-        await refreshConfig()
-    }
-
-    func removeRemote(_ name: String) async throws {
-        guard let api else { return }
-        self.settings = try await api.removeRemote(name)
-        await syncConfigGate()
-    }
-
-    func testRemote(_ name: String) async throws -> RemoteTestResult {
-        guard let api else { throw APIError(status: -1, message: "Sidecar not ready", needsKey: false) }
-        return try await api.testRemote(name)
-    }
-
-    func importLocalToRemote(_ name: String) async throws -> MigrationResult {
-        guard let api else { throw APIError(status: -1, message: "Sidecar not ready", needsKey: false) }
-        noteMigrationStarted(remoteName: name)
-        do {
-            let result = try await api.importLocalToRemote(name)
-            noteMigrationFinished(created: result.created, updated: result.updated, skipped: result.skipped)
-            if backendIsRemote, config?.activeRemote?.name == name {
-                await loadMemories()
-            }
-            return result
-        } catch {
-            noteMigrationFinished(created: 0, updated: 0, skipped: 0, error: error.localizedDescription)
-            throw error
-        }
+    /// Memories still in the legacy Gemini index (0 when none or unknown).
+    var legacyMemoryCount: Int {
+        guard let state = embeddingStatus, state.installed else { return 0 }
+        return state.legacyMemories ?? 0
     }
 
     func setStatus(_ text: String, isError: Bool = false) {

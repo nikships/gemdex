@@ -37,7 +37,6 @@ struct RootView: View {
         case .needsBootstrap: "needsBootstrap"
         case .installing: "installing"
         case .sidecarFailed: "sidecarFailed"
-        case .remoteUnavailable: "remoteUnavailable"
         }
     }
 
@@ -58,8 +57,6 @@ struct RootView: View {
             RecoveryView(kind: .installing(detail: detail))
         case let .sidecarFailed(detail):
             RecoveryView(kind: .failed(detail: detail))
-        case let .remoteUnavailable(detail):
-            RecoveryView(kind: .remoteUnavailable(detail: detail))
         }
     }
 }

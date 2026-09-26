@@ -3,57 +3,57 @@ import * as crypto from "crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
-    attachTranscriptToRecord,
+    checkClaudeCode,
+    ClaudeCodeReadiness,
+    DEFAULT_CLAUDE_MODEL,
     HygieneManager,
     HygieneReport,
-    HygieneReportStore,
+    INFERENCE_MODELS,
+    INFERENCE_PRICING_AS_OF,
     IngestManager,
     IngestSourceFolder,
     LocalMemoryBackend,
     MemoryBackend,
     MemoryStore,
-    RemoteMemoryBackend,
-    envManager,
-    getMlxStatus,
-} from "gemdex-core";
-import {
-    DIGEST_MODELS,
-    DEFAULT_DIGEST_MODEL,
-    DIGEST_PRICING_AS_OF,
     antigravityPresetFolder,
     buildCorsHeaders,
     claudePresetFolder,
     codexPresetFolder,
     discoverSessionFiles,
     factoryPresetFolder,
+    getMlxStatus,
     handleMemoryApiRequest,
     readBody,
     sendJson,
 } from "gemdex-core";
-import { ClientConfigStore, StoredRemote, tokenEnvVarForRemote } from "./cli-config.js";
-import { createConfig, GemdexConfig, isLocalGeminiApiKey } from "./config.js";
+import { ClientConfigStore } from "./cli-config.js";
+import { createConfig, GemdexConfig } from "./config.js";
 import { errorMessage } from "./errors.js";
-import { createEmbeddingInstance } from "./embedding.js";
-import { createMemoryBackend } from "./memory.js";
-import { chooseTextProvider, installLocalModel, localModelStatus, LocalModelStatus, migrateLocalText } from './local-model.js';
+import { createMemoryBackend, INSTALL_HINT } from "./memory.js";
+import { installLocalModel, localModelStatus, localModelStatusWithLegacy, LocalModelStatus, migrateLegacyMemories } from './local-model.js';
 
 /** Read a string field from a parsed JSON body, trimmed; '' when absent or non-string. */
 function trimmedString(value: unknown): string {
     return typeof value === 'string' ? value.trim() : '';
 }
 
+export type ClaudeCodeState = Omit<ClaudeCodeReadiness, 'status' | 'checkedAt'> & {
+    status: ClaudeCodeReadiness['status'] | 'checking';
+    checkedAt?: number;
+};
+
 /**
- * Mutable server context. The sidecar boots even when no GEMINI_API_KEY is
- * configured yet (a .app launched from Finder doesn't inherit the user's
- * interactive shell env), so the desktop app can prompt for the key and POST
- * it to /config. Until then `store` is null and the data routes answer 503.
+ * Mutable server context. The sidecar boots even before the local model is
+ * installed (the desktop app offers the explicit install), so `store` may be
+ * null; memory routes answer 503 until it exists.
  */
 export interface ServeContext {
     config: GemdexConfig;
     store: MemoryBackend | null;
     clientConfigStore?: ClientConfigStore;
     createBackend?: (config: GemdexConfig) => MemoryBackend;
-    fetch?: typeof fetch;
+    /** True when the local embedding model is installed. Injectable for tests. */
+    isModelInstalled?: () => boolean;
     /**
      * When set, the server enforces two security controls:
      *  1. `Origin` header on every non-OPTIONS request must match this value
@@ -61,219 +61,33 @@ export interface ServeContext {
      *  2. Every data route (all routes except /health, /config*, and
      *     OPTIONS pre-flight) must carry `X-Gemdex-Token: <token>`.
      *
-     * Both values are minted per-launch by `runServe` and handed to the
-     * WebView via the Zig shell's `gemdex.getApiBase` bridge command. The
-     * desktop app embeds them in every fetch call; external pages cannot
-     * obtain them through normal browser APIs, so cross-origin requests are
-     * effectively blocked even without relying on the browser's CORS
-     * enforcement (which is the attacker-controlled layer).
+     * Both values are minted per-launch by `runServe` and handed to the app
+     * through the stdout handshake. External pages cannot obtain them through
+     * normal browser APIs, so cross-origin requests are blocked even without
+     * relying on the browser's CORS enforcement.
      */
     allowedOrigin?: string;
     token?: string;
     /** Lazily created chat-history ingestion orchestrator. */
     ingestManager?: IngestManager;
-    /** The Gemini key the current ingest manager was built with. */
-    ingestManagerKey?: string;
     /** Lazily created memory-hygiene orchestrator. */
     hygieneManager?: HygieneManager;
-    /** The Gemini key the current hygiene manager was built with. */
-    hygieneManagerKey?: string;
-    /** Per-launch proof that the configured Gemini key can perform embedding work. */
-    geminiReadiness?: GeminiReadiness;
-    /** In-flight validation for the currently configured key. */
-    geminiValidation?: Promise<void>;
-    /** Injectable validation probe for tests. */
-    validateGeminiKey?: (config: GemdexConfig) => Promise<void>;
+    /** Latest Claude Code probe (ingestion + hygiene readiness). */
+    claudeCode?: ClaudeCodeState;
+    /** In-flight Claude Code probe. */
+    claudeCheck?: Promise<void>;
+    /** Injectable probe for tests. */
+    checkClaudeCode?: () => Promise<ClaudeCodeReadiness>;
     localModelJob?: LocalModelStatus;
 }
 
-function buildStore(
-    config: GemdexConfig,
-    createBackend: (config: GemdexConfig) => MemoryBackend = createMemoryBackend,
-): MemoryBackend | null {
-    if (config.mode === 'local' && !config.geminiApiKey && config.embeddingProvider !== 'mlx') return null;
-    if (config.mode === 'local' && config.embeddingProvider === 'mlx' && !getMlxStatus().installed) return null;
-    return createBackend(config);
+function modelInstalled(ctx: ServeContext): boolean {
+    return (ctx.isModelInstalled ?? (() => getMlxStatus(clientConfigStore(ctx).rootDir).installed))();
 }
 
-export type GeminiReadinessStatus = 'missing' | 'checking' | 'valid' | 'invalid' | 'unavailable';
-
-export interface GeminiReadiness {
-    status: GeminiReadinessStatus;
-    message?: string;
-    validatedAt?: number;
-    keyFingerprint?: string;
-}
-
-const GEMINI_VALIDATION_TIMEOUT_MS = 12_000;
-const GEMINI_VALIDATION_TEXT = 'Gemdex API key readiness check';
-
-function configuredGeminiKey(ctx: ServeContext): string | undefined {
-    const trimmed = ctx.config.geminiApiKey?.trim();
-    return trimmed && trimmed.length > 0 ? trimmed : undefined;
-}
-
-function keyFingerprint(apiKey: string): string {
-    return crypto.createHash('sha256').update(apiKey).digest('hex');
-}
-
-function publicGeminiReadiness(ctx: ServeContext): Omit<GeminiReadiness, 'keyFingerprint'> {
-    const key = configuredGeminiKey(ctx);
-    if (!key) return { status: 'missing', message: 'Add a Gemini API key to continue.' };
-    const readiness = ctx.geminiReadiness;
-    if (!readiness || readiness.keyFingerprint !== keyFingerprint(key)) {
-        return { status: 'checking', message: 'Gemini API key validation has not completed.' };
-    }
-    return {
-        status: readiness.status,
-        ...(readiness.message && { message: readiness.message }),
-        ...(readiness.validatedAt !== undefined && { validatedAt: readiness.validatedAt }),
-    };
-}
-
-function classifyGeminiValidationError(error: unknown): GeminiReadiness {
-    const raw = errorMessage(error);
-    const normalized = raw.toLowerCase();
-    const unavailable = normalized.includes('timed out')
-        || normalized.includes('timeout')
-        || normalized.includes('network')
-        || normalized.includes('fetch failed')
-        || normalized.includes('econn')
-        || normalized.includes('enotfound')
-        || normalized.includes('temporarily unavailable')
-        || normalized.includes('service unavailable')
-        || normalized.includes('429')
-        || normalized.includes('resource_exhausted');
-    if (unavailable) {
-        return {
-            status: 'unavailable',
-            message: `Gemini could not be reached to validate this key. ${raw}`,
-        };
-    }
-    return {
-        status: 'invalid',
-        message: `Gemini rejected this API key. ${raw}`,
-    };
-}
-
-async function defaultValidateGeminiKey(config: GemdexConfig): Promise<void> {
-    const embedding = createEmbeddingInstance(config);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-        await Promise.race([
-            embedding.embed(GEMINI_VALIDATION_TEXT),
-            new Promise<never>((_resolve, reject) => {
-                timer = setTimeout(
-                    () => reject(new Error(`Gemini validation timed out after ${GEMINI_VALIDATION_TIMEOUT_MS / 1000} seconds.`)),
-                    GEMINI_VALIDATION_TIMEOUT_MS,
-                );
-            }),
-        ]);
-    } finally {
-        if (timer) clearTimeout(timer);
-    }
-}
-
-async function validateGeminiKey(ctx: ServeContext, apiKey: string): Promise<GeminiReadiness> {
-    const fingerprint = keyFingerprint(apiKey);
-    const candidateConfig = { ...ctx.config, geminiApiKey: apiKey };
-    try {
-        await (ctx.validateGeminiKey ?? defaultValidateGeminiKey)(candidateConfig);
-        return { status: 'valid', validatedAt: Date.now(), keyFingerprint: fingerprint };
-    } catch (error) {
-        return { ...classifyGeminiValidationError(error), keyFingerprint: fingerprint };
-    }
-}
-
-function startConfiguredKeyValidation(ctx: ServeContext): void {
-    const apiKey = configuredGeminiKey(ctx);
-    if (!apiKey) {
-        ctx.geminiReadiness = { status: 'missing' };
-        ctx.geminiValidation = undefined;
-        return;
-    }
-    const fingerprint = keyFingerprint(apiKey);
-    // Reuse an in-flight validation for the same key so concurrent retries
-    // cannot resolve out of order and clobber a newer result.
-    if (ctx.geminiValidation && ctx.geminiReadiness?.keyFingerprint === fingerprint) {
-        return;
-    }
-    ctx.geminiReadiness = {
-        status: 'checking',
-        message: 'Validating the saved Gemini API key…',
-        keyFingerprint: fingerprint,
-    };
-    // Reserve the slot synchronously before any async work so two concurrent
-    // first-starts cannot both pass the in-flight check above.
-    let settle!: () => void;
-    const validation = new Promise<void>((resolve) => { settle = resolve; });
-    ctx.geminiValidation = validation;
-    void validateGeminiKey(ctx, apiKey)
-        .then((readiness) => {
-            if (configuredGeminiKey(ctx) === apiKey && ctx.geminiValidation === validation) {
-                ctx.geminiReadiness = readiness;
-            }
-        })
-        .finally(() => {
-            if (ctx.geminiValidation === validation) ctx.geminiValidation = undefined;
-            settle();
-        });
-}
-
-async function waitForConfiguredKeyValidation(ctx: ServeContext): Promise<void> {
-    if (!ctx.geminiValidation) startConfiguredKeyValidation(ctx);
-    await ctx.geminiValidation;
-}
-
-function geminiIsReady(ctx: ServeContext): boolean {
-    return publicGeminiReadiness(ctx).status === 'valid';
-}
-
-/** Persist a validated key, expose it to this process, and rebuild the local store. */
-function configureApiKey(ctx: ServeContext, apiKey: string, readiness: GeminiReadiness): void {
-    clientConfigStore(ctx).setEnvValues({
-        GEMINI_API_KEY: apiKey,
-        GEMDEX_EMBEDDING_PROVIDER: 'gemini',
-    });
-    process.env['GEMINI_API_KEY'] = apiKey;
-    ctx.config = {
-        ...ctx.config,
-        geminiApiKey: apiKey,
-        embeddingProvider: 'gemini',
-    };
-    // Drop any in-flight validation so a stale resolve cannot overwrite this result.
-    ctx.geminiValidation = undefined;
-    ctx.geminiReadiness = readiness;
-    // The ingest manager is rebuilt lazily when its recorded key goes stale
-    // (see ingestManager()), so an in-flight run keeps its manager while any
-    // later run picks up the new key.
-    if (ctx.config.mode === 'local') {
-        ctx.store = buildStore(ctx.config, ctx.createBackend);
-    }
-}
-
-interface DesktopRemoteSummary extends StoredRemote {
-    name: string;
-    hasToken: boolean;
-}
-
-interface DesktopSettingsSummary {
-    mode: 'local' | 'remote';
-    embeddingProvider: 'mlx' | 'gemini';
-    activeRemote?: string;
-    configured: boolean;
-    localConfigured: boolean;
-    gemini: Omit<GeminiReadiness, 'keyFingerprint'>;
-    remotes: DesktopRemoteSummary[];
-}
-
-interface DesktopConfigSummary {
-    configured: boolean;
-    mode: 'local' | 'remote';
-    embeddingProvider: 'mlx' | 'gemini';
-    needsKey: boolean;
-    gemini: Omit<GeminiReadiness, 'keyFingerprint'>;
-    activeRemote?: Pick<DesktopRemoteSummary, 'name' | 'url' | 'hasToken'>;
+function buildStore(ctx: ServeContext): MemoryBackend | null {
+    if (!modelInstalled(ctx)) return null;
+    return (ctx.createBackend ?? ((config) => createMemoryBackend(config, clientConfigStore(ctx).rootDir)))(ctx.config);
 }
 
 function clientConfigStore(ctx: ServeContext): ClientConfigStore {
@@ -281,268 +95,90 @@ function clientConfigStore(ctx: ServeContext): ClientConfigStore {
     return ctx.clientConfigStore;
 }
 
-function createBackend(ctx: ServeContext, config: GemdexConfig): MemoryBackend {
-    return (ctx.createBackend ?? createMemoryBackend)(config);
+function startClaudeCheck(ctx: ServeContext): Promise<void> {
+    if (ctx.claudeCheck) return ctx.claudeCheck;
+    ctx.claudeCode = { ...(ctx.claudeCode ?? {}), status: 'checking' };
+    const probe = (ctx.checkClaudeCode ?? (() => checkClaudeCode()))();
+    const check = probe
+        .then((readiness) => { ctx.claudeCode = readiness; })
+        .catch((error: unknown) => {
+            ctx.claudeCode = { status: 'error', message: errorMessage(error), checkedAt: Date.now() };
+        })
+        .finally(() => {
+            if (ctx.claudeCheck === check) ctx.claudeCheck = undefined;
+        });
+    ctx.claudeCheck = check;
+    return check;
 }
 
-function localConfig(ctx: ServeContext): GemdexConfig {
-    return {
-        ...ctx.config,
-        mode: 'local',
-        geminiApiKey: ctx.config.geminiApiKey ?? envManager.get('GEMINI_API_KEY'),
-        remoteName: undefined,
-        remote: undefined,
-    };
+function claudeState(ctx: ServeContext): ClaudeCodeState {
+    return ctx.claudeCode ?? { status: 'checking' };
 }
 
-function resolveStoredRemote(
-    ctx: ServeContext,
-    name: string,
-): { remote: StoredRemote; token: string } {
-    const configStore = clientConfigStore(ctx);
-    const remote = configStore.get(name);
-    if (!remote) throw new Error(`Remote "${name}" is not configured.`);
-    const token = configStore.getEnv(remote.tokenEnvVar)?.trim();
-    if (!token) throw new Error(`Remote "${name}" does not have a configured bearer token.`);
-    return { remote, token };
+function claudeReady(ctx: ServeContext): boolean {
+    return claudeState(ctx).status === 'ready';
 }
 
-function remoteConfig(ctx: ServeContext, name: string): GemdexConfig {
-    const { remote, token } = resolveStoredRemote(ctx, name);
-    return {
-        ...ctx.config,
-        mode: 'remote',
-        remoteName: name,
-        remote: { url: remote.url, token },
-    };
+function requireClaudeReady(ctx: ServeContext, feature: string): void {
+    const state = claudeState(ctx);
+    if (state.status === 'ready') return;
+    if (state.status === 'checking') {
+        throw new Error(`${feature} is waiting for the Claude Code check to finish. Try again in a moment.`);
+    }
+    throw new Error(`${feature} needs Claude Code. ${state.message ?? `Claude Code status: ${state.status}.`}`);
 }
 
-function settingsSummary(ctx: ServeContext): DesktopSettingsSummary {
-    const configStore = clientConfigStore(ctx);
-    const gemini = publicGeminiReadiness(ctx);
-    const configured = ctx.config.mode === 'local'
-        ? ctx.store !== null && (ctx.config.embeddingProvider === 'mlx' || gemini.status === 'valid')
-        : ctx.store !== null;
-    return {
-        mode: ctx.config.mode,
-        embeddingProvider: ctx.config.embeddingProvider ?? 'gemini',
-        ...(ctx.config.mode === 'remote' && ctx.config.remoteName && { activeRemote: ctx.config.remoteName }),
-        configured,
-        localConfigured: ctx.config.embeddingProvider === 'mlx' || gemini.status === 'valid',
-        gemini,
-        remotes: configStore.list().map((remote) => ({
-            ...remote,
-            hasToken: Boolean(configStore.getEnv(remote.tokenEnvVar)?.trim()),
-        })),
-    };
+function embeddingStatus(ctx: ServeContext): LocalModelStatus {
+    return ctx.localModelJob ?? localModelStatus(clientConfigStore(ctx));
 }
 
-function activeRemoteSummary(ctx: ServeContext): Pick<DesktopRemoteSummary, 'name' | 'url' | 'hasToken'> | undefined {
-    if (ctx.config.mode !== 'remote' || !ctx.config.remoteName) return undefined;
-    const configStore = clientConfigStore(ctx);
-    const remote = configStore.get(ctx.config.remoteName);
-    const url = remote?.url ?? ctx.config.remote?.url;
-    if (!url) return undefined;
-    return {
-        name: ctx.config.remoteName,
-        url,
-        hasToken: Boolean(remote
-            ? configStore.getEnv(remote.tokenEnvVar)?.trim()
-            : ctx.config.remote?.token.trim()),
-    };
+interface DesktopConfigSummary {
+    configured: boolean;
+    embedding: LocalModelStatus;
+    claudeCode: ClaudeCodeState;
 }
 
 function configSummary(ctx: ServeContext): DesktopConfigSummary {
-    const activeRemote = activeRemoteSummary(ctx);
-    const gemini = publicGeminiReadiness(ctx);
-    const configured = ctx.config.mode === 'local'
-        ? ctx.store !== null && (ctx.config.embeddingProvider === 'mlx' || gemini.status === 'valid')
-        : ctx.store !== null;
     return {
-        configured,
-        mode: ctx.config.mode,
-        embeddingProvider: ctx.config.embeddingProvider ?? 'gemini',
-        needsKey: ctx.config.mode === 'local' && ctx.config.embeddingProvider !== 'mlx' && gemini.status !== 'valid',
-        gemini,
-        ...(activeRemote && { activeRemote }),
+        configured: ctx.store !== null,
+        embedding: embeddingStatus(ctx),
+        claudeCode: claudeState(ctx),
     };
 }
 
-async function testRemoteConnection(
-    ctx: ServeContext,
-    name: string,
-): Promise<{ reachable: boolean; authenticated: boolean; detail?: string }> {
-    const { remote, token } = resolveStoredRemote(ctx, name);
-    try {
-        const response = await (ctx.fetch ?? fetch)(`${remote.url}/v1/health`, {
-            signal: AbortSignal.timeout(5_000),
-        });
-        if (!response.ok) {
-            return {
-                reachable: false,
-                authenticated: false,
-                detail: `Health check returned HTTP ${response.status}.`,
-            };
-        }
-    } catch (error) {
-        return {
-            reachable: false,
-            authenticated: false,
-            detail: errorMessage(error),
-        };
-    }
-
-    try {
-        await new RemoteMemoryBackend({ url: remote.url, token, fetch: ctx.fetch }).list();
-        return { reachable: true, authenticated: true };
-    } catch (error) {
-        return {
-            reachable: true,
-            authenticated: false,
-            detail: errorMessage(error),
-        };
-    }
-}
-
-async function migrateLocalToRemote(
-    ctx: ServeContext,
-    name: string,
-): Promise<{ created: number; updated: number; skipped: number }> {
-    const sourceConfig = localConfig(ctx);
-    if (!sourceConfig.geminiApiKey && sourceConfig.embeddingProvider !== 'mlx') {
-        throw new Error('Configure GEMINI_API_KEY before importing local memories.');
-    }
-    const local = ctx.config.mode === 'local' && ctx.store
-        ? ctx.store
-        : createBackend(ctx, sourceConfig);
-    const targetConfig = remoteConfig(ctx, name);
-    const remote = ctx.config.mode === 'remote' && ctx.config.remoteName === name && ctx.store
-        ? ctx.store
-        : createBackend(ctx, targetConfig);
-    const records = await local.exportAll();
-    let created = 0;
-    let updated = 0;
-    let skipped = 0;
-    for (const record of records) {
-        try {
-            // Prefer attaching full transcripts when digests only have a path footer
-            // so remote clients can fetch bytes via read_attachment / HTTP.
-            const prepared = attachTranscriptToRecord(record).record;
-            const existed = await remote.get(prepared.id) !== null;
-            const result = await remote.importRecords([prepared]);
-            if (result.imported !== 1) {
-                skipped += 1;
-            } else if (existed) {
-                updated += 1;
-            } else {
-                created += 1;
-            }
-        } catch {
-            skipped += 1;
-        }
-    }
-    return { created, updated, skipped };
-}
-
-/**
- * The Gemini key used for digesting transcripts. Digestion always runs
- * client-side (the BYOI server only embeds), so ingestion needs a local key
- * even when the memory backend is remote.
- */
-function ingestApiKey(ctx: ServeContext): string {
-    const key = configuredGeminiKey(ctx);
-    if (!key) {
-        throw new Error('Chat-history ingestion needs a local GEMINI_API_KEY (digests are generated client-side).');
-    }
-    if (!geminiIsReady(ctx)) {
-        throw new Error('Chat-history ingestion is blocked until the Gemini API key is validated.');
-    }
-    return key;
-}
-
 function ingestManager(ctx: ServeContext): IngestManager {
-    const key = ingestApiKey(ctx);
-    // Rebuild on key change, but never yank the manager out from under a
-    // live run — that run already holds its digester.
-    if (ctx.ingestManager && ctx.ingestManagerKey !== key && !ctx.ingestManager.isRunning()) {
-        ctx.ingestManager = undefined;
-    }
-    if (!ctx.ingestManager) {
-        ctx.ingestManager = new IngestManager({
-            apiKey: key,
-            geminiBaseUrl: ctx.config.geminiBaseUrl,
-        });
-        ctx.ingestManagerKey = key;
-    }
+    ctx.ingestManager ??= new IngestManager();
     return ctx.ingestManager;
 }
 
-/**
- * The Gemini key used for hygiene cluster judging. Judging always runs
- * client-side (the BYOI server only embeds), so hygiene needs a local key
- * even when the memory backend is remote.
- */
-function hygieneApiKey(ctx: ServeContext): string {
-    const key = configuredGeminiKey(ctx);
-    if (!key) {
-        throw new Error('Memory hygiene needs a local GEMINI_API_KEY (cluster judging runs client-side).');
-    }
-    if (!geminiIsReady(ctx)) {
-        throw new Error('Memory hygiene is blocked until the Gemini API key is validated.');
-    }
-    return key;
-}
-
 function hygieneManager(ctx: ServeContext): HygieneManager {
-    const key = hygieneApiKey(ctx);
-    // Rebuild on key change, but never yank the manager out from under a
-    // live run — that run already holds its judge.
-    if (ctx.hygieneManager && ctx.hygieneManagerKey !== key && !ctx.hygieneManager.isRunning()) {
-        ctx.hygieneManager = undefined;
-    }
-    if (!ctx.hygieneManager) {
-        ctx.hygieneManager = new HygieneManager({
-            apiKey: key,
-            geminiBaseUrl: ctx.config.geminiBaseUrl,
-        });
-        ctx.hygieneManagerKey = key;
-    }
+    ctx.hygieneManager ??= new HygieneManager();
     return ctx.hygieneManager;
 }
 
-/** Hygiene is local-only in v1: clustering reads vectors straight out of LanceDB. */
 function localStore(ctx: ServeContext): MemoryStore {
     if (!(ctx.store instanceof LocalMemoryBackend)) {
-        throw new Error('Memory hygiene requires local storage mode (remote hygiene is not supported yet).');
+        throw new Error('Memory hygiene needs the local memory store.');
     }
     return ctx.store.getStore();
 }
 
-/**
- * The persisted hygiene report, readable without a validated Gemini key —
- * browsing past results is read-only. Falls back to reading the report file
- * directly when the manager cannot be built (missing/unvalidated key).
- */
-function hygieneReport(ctx: ServeContext): HygieneReport | null {
-    try {
-        return hygieneManager(ctx).getReport();
-    } catch {
-        return new HygieneReportStore().getReport() ?? null;
-    }
+function inferenceModels(): unknown[] {
+    return Object.entries(INFERENCE_MODELS).map(([model, info]) => ({
+        model,
+        description: info.description,
+        inputUsdPerMTok: info.inputUsdPerMTok,
+        outputUsdPerMTok: info.outputUsdPerMTok,
+        isDefault: model === DEFAULT_CLAUDE_MODEL,
+    }));
 }
 
-function hygieneReportSummary(ctx: ServeContext): unknown {
+function hygieneReportSummary(ctx: ServeContext): { report: HygieneReport | null; models: unknown[]; pricingAsOf: string; hygieneReady: boolean } {
     return {
-        report: hygieneReport(ctx),
-        models: Object.entries(DIGEST_MODELS).map(([model, info]) => ({
-            model,
-            description: info.description,
-            inputUsdPerMTok: info.inputUsdPerMTok,
-            outputUsdPerMTok: info.outputUsdPerMTok,
-            isDefault: model === DEFAULT_DIGEST_MODEL,
-        })),
-        pricingAsOf: DIGEST_PRICING_AS_OF,
-        hygieneReady: geminiIsReady(ctx),
+        report: hygieneManager(ctx).getReport(),
+        models: inferenceModels(),
+        pricingAsOf: INFERENCE_PRICING_AS_OF,
+        hygieneReady: claudeReady(ctx),
     };
 }
 
@@ -605,27 +241,17 @@ function ingestSourcesSummary(ctx: ServeContext): unknown {
             .map(folderSummary),
         customFolders: configStore.listIngestFolders()
             .map((folderPath) => folderSummary({ source: 'custom', path: folderPath })),
-        models: Object.entries(DIGEST_MODELS).map(([model, info]) => ({
-            model,
-            description: info.description,
-            inputUsdPerMTok: info.inputUsdPerMTok,
-            outputUsdPerMTok: info.outputUsdPerMTok,
-            isDefault: model === DEFAULT_DIGEST_MODEL,
-        })),
-        pricingAsOf: DIGEST_PRICING_AS_OF,
-        ingestReady: geminiIsReady(ctx),
-        gemini: publicGeminiReadiness(ctx),
+        models: inferenceModels(),
+        pricingAsOf: INFERENCE_PRICING_AS_OF,
+        ingestReady: claudeReady(ctx),
+        claudeCode: claudeState(ctx),
     };
 }
 
 /**
  * `gemdex serve` — the localhost HTTP/JSON sidecar that backs the desktop
  * manager app. It wraps the same gemdex-core MemoryBackend + LanceDB store the
- * MCP server uses, binds 127.0.0.1 only, and exposes the management surface
- * (no semantic search — that is MCP-only).
- *
- * Using localhost HTTP (not the Zig bridge) sidesteps the bridge's 16 KiB
- * request/response cap so a 300-line memory is never truncated.
+ * MCP server uses, binds 127.0.0.1 only, and exposes the management surface.
  */
 
 interface ServeOptions {
@@ -693,15 +319,7 @@ function isTokenValid(req: http.IncomingMessage, token: string | undefined): boo
 }
 
 export function createServer(ctx: ServeContext): http.Server {
-    // Never mark a configured key valid without a real embedding proof. Tests that
-    // need an unlocked local backend must pass an explicit validated readiness.
-    if (!ctx.geminiReadiness) {
-        if (configuredGeminiKey(ctx)) {
-            startConfiguredKeyValidation(ctx);
-        } else {
-            ctx.geminiReadiness = { status: 'missing' };
-        }
-    }
+    if (!ctx.claudeCode) void startClaudeCheck(ctx);
     return http.createServer(async (req, res) => {
         const method = req.method ?? 'GET';
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -723,102 +341,30 @@ export function createServer(ctx: ServeContext): http.Server {
 
         try {
             // GET /health — unauthenticated; the desktop app polls this before
-            // it has a token to send (the token arrives via the bridge after
-            // health resolves).
+            // it has a token to send.
             if (method === 'GET' && pathname === '/health') {
                 sendJson(res, 200, { ok: true }, corsHeaders);
                 return;
             }
 
-            if (ctx.config.mode === 'local') {
-                const configStore = clientConfigStore(ctx);
-                const rawKey = configStore.getEnv('GEMINI_API_KEY');
-                // Prefer an explicit sentinel/real key from env/store; otherwise keep the
-                // in-memory provider (tests and mid-request config mutations).
-                const storedProvider: 'mlx' | 'gemini' | undefined = isLocalGeminiApiKey(rawKey)
-                    ? 'mlx'
-                    : (rawKey ? 'gemini' : undefined);
-                const provider = storedProvider ?? ctx.config.embeddingProvider ?? 'gemini';
-                if (provider !== (ctx.config.embeddingProvider ?? 'gemini')) {
-                    const geminiApiKey = isLocalGeminiApiKey(rawKey)
-                        ? undefined
-                        : (rawKey || ctx.config.geminiApiKey);
-                    const next: GemdexConfig = { ...ctx.config, embeddingProvider: provider, geminiApiKey };
-                    const nextStore = buildStore(next, ctx.createBackend);
-                    ctx.config = next;
-                    ctx.store = nextStore;
-                    ctx.localModelJob = undefined;
-                    startConfiguredKeyValidation(ctx);
-                }
+            // A model installed by the CLI while the sidecar runs mounts the
+            // store on the next request, without a sidecar restart.
+            const jobRunning = ctx.localModelJob?.status === 'installing' || ctx.localModelJob?.status === 'migrating';
+            if (ctx.store === null && !jobRunning && modelInstalled(ctx)) {
+                ctx.store = buildStore(ctx);
+                ctx.localModelJob = undefined;
             }
 
-            // Configuration routes are intentionally excluded from the token
-            // requirement: the desktop app must be able to repair a missing or
-            // rejected key before data-route authentication is established.
+            // Configuration status is readable without the token so the app can
+            // show setup state before data-route authentication is established.
             if (method === 'GET' && pathname === '/config') {
                 sendJson(res, 200, configSummary(ctx), corsHeaders);
                 return;
             }
 
-            if (method === 'POST' && pathname === '/config') {
-                const body = await readBody(req);
-                const apiKey = trimmedString(body?.apiKey);
-                if (apiKey.length === 0) {
-                    sendJson(res, 400, { error: "'apiKey' is required" }, corsHeaders);
-                    return;
-                }
-                if (isLocalGeminiApiKey(apiKey)) {
-                    sendJson(res, 400, {
-                        error: 'Use Storage & Gemini install/provider controls for local MLX (GEMINI_API_KEY=local). POST /config expects a real Gemini API key.',
-                        configured: false,
-                        needsKey: true,
-                    }, corsHeaders);
-                    return;
-                }
-                const readiness = await validateGeminiKey(ctx, apiKey);
-                if (readiness.status !== 'valid') {
-                    const status = readiness.status === 'unavailable' ? 503 : 401;
-                    sendJson(res, status, {
-                        error: readiness.message ?? 'Gemini API key validation failed.',
-                        configured: false,
-                        needsKey: true,
-                        gemini: {
-                            status: readiness.status,
-                            ...(readiness.message && { message: readiness.message }),
-                        },
-                    }, corsHeaders);
-                    return;
-                }
-                try {
-                    configureApiKey(ctx, apiKey, readiness);
-                    sendJson(res, 200, configSummary(ctx), corsHeaders);
-                } catch (error) {
-                    sendJson(res, 500, { error: errorMessage(error) }, corsHeaders);
-                }
-                return;
-            }
-
-            if (method === 'POST' && pathname === '/config/validate') {
-                if (!configuredGeminiKey(ctx)) {
-                    sendJson(res, 400, {
-                        error: 'No Gemini API key is configured.',
-                        needsKey: true,
-                        gemini: { status: 'missing', message: 'Add a Gemini API key to continue.' },
-                    }, corsHeaders);
-                    return;
-                }
-                startConfiguredKeyValidation(ctx);
-                await waitForConfiguredKeyValidation(ctx);
-                const summary = configSummary(ctx);
-                if (summary.gemini.status === 'valid') {
-                    sendJson(res, 200, summary, corsHeaders);
-                } else {
-                    sendJson(res, 503, {
-                        ...summary,
-                        error: summary.gemini.message ?? 'Gemini API key validation failed.',
-                        needsKey: true,
-                    }, corsHeaders);
-                }
+            if (method === 'POST' && pathname === '/config/check') {
+                await startClaudeCheck(ctx);
+                sendJson(res, 200, configSummary(ctx), corsHeaders);
                 return;
             }
 
@@ -831,39 +377,12 @@ export function createServer(ctx: ServeContext): http.Server {
             }
 
             if (pathname === '/settings/embedding' && method === 'GET') {
-                sendJson(res, 200, ctx.localModelJob ?? localModelStatus(clientConfigStore(ctx)), corsHeaders);
+                sendJson(res, 200, ctx.localModelJob ?? await localModelStatusWithLegacy(clientConfigStore(ctx)), corsHeaders);
                 return;
             }
             if (pathname.startsWith('/settings/embedding/') && method === 'POST') {
-                if (ctx.config.mode !== 'local') {
-                    sendJson(res, 400, { error: 'Local model operations are unavailable in remote mode. Switch storage to local first.' }, corsHeaders);
-                    return;
-                }
                 if (ctx.localModelJob?.status === 'installing' || ctx.localModelJob?.status === 'migrating') {
                     sendJson(res, 409, { error: 'A local model operation is already running.' }, corsHeaders);
-                    return;
-                }
-                const body = await readBody(req);
-                const configStore = clientConfigStore(ctx);
-                if (pathname === '/settings/embedding/provider') {
-                    try {
-                        if (trimmedString(body?.provider) === 'gemini' && !geminiIsReady(ctx)) {
-                            throw new Error('Validate your Gemini key in Storage & Gemini before switching text to Gemini.');
-                        }
-                        chooseTextProvider(configStore, trimmedString(body?.provider));
-                        const status = localModelStatus(configStore);
-                        const rawKey = configStore.getEnv('GEMINI_API_KEY');
-                        ctx.config = {
-                            ...ctx.config,
-                            embeddingProvider: status.provider,
-                            geminiApiKey: isLocalGeminiApiKey(rawKey) ? undefined : rawKey,
-                        };
-                        ctx.store = buildStore(ctx.config, ctx.createBackend);
-                        ctx.localModelJob = undefined;
-                        sendJson(res, 200, localModelStatus(configStore), corsHeaders);
-                    } catch (error) {
-                        sendJson(res, 400, { error: errorMessage(error) }, corsHeaders);
-                    }
                     return;
                 }
                 const installing = pathname === '/settings/embedding/install';
@@ -871,165 +390,35 @@ export function createServer(ctx: ServeContext): http.Server {
                     sendJson(res, 404, { error: 'Unknown local model action.' }, corsHeaders);
                     return;
                 }
+                const configStore = clientConfigStore(ctx);
+                if (!installing && !modelInstalled(ctx)) {
+                    sendJson(res, 400, { error: INSTALL_HINT }, corsHeaders);
+                    return;
+                }
                 ctx.localModelJob = { ...localModelStatus(configStore), status: installing ? 'installing' : 'migrating' };
                 const job = ctx.localModelJob;
                 const operation = installing
                     ? installLocalModel(configStore, (message) => { job.message = message; })
-                    : migrateLocalText(configStore, (completed, total) => { job.completed = completed; job.total = total; });
-                void operation.then(() => {
-                    const status = localModelStatus(configStore);
-                    const rawKey = configStore.getEnv('GEMINI_API_KEY');
-                    ctx.config = {
-                        ...ctx.config,
-                        embeddingProvider: status.provider,
-                        geminiApiKey: isLocalGeminiApiKey(rawKey) ? undefined : rawKey,
+                    : migrateLegacyMemories(configStore, (completed, total) => { job.completed = completed; job.total = total; });
+                void operation.then(async () => {
+                    ctx.store = buildStore(ctx);
+                    ctx.localModelJob = {
+                        ...await localModelStatusWithLegacy(configStore),
+                        message: installing ? 'Installed.' : 'Migration complete.',
                     };
-                    ctx.store = buildStore(ctx.config, ctx.createBackend);
-                    ctx.localModelJob = { ...status, message: installing ? 'Installed. Existing memories were not migrated.' : 'Text migration complete. Media remains on Gemini.' };
-                }).catch((error: unknown) => {
-                    ctx.localModelJob = { ...job, status: 'error', message: errorMessage(error) };
+                }).catch(async (error: unknown) => {
+                    const message = errorMessage(error);
+                    // Re-read status so a failed migration still reports
+                    // legacyMemories; the app hides its Migrate retry without it.
+                    const latest = await localModelStatusWithLegacy(configStore).catch(() => job);
+                    ctx.localModelJob = { ...job, ...latest, status: 'error', message };
                 });
                 sendJson(res, 202, job, corsHeaders);
                 return;
             }
 
-            if (method === 'GET' && pathname === '/settings') {
-                sendJson(res, 200, settingsSummary(ctx), corsHeaders);
-                return;
-            }
-
-            if (method === 'POST' && pathname === '/settings/remotes') {
-                const body = await readBody(req);
-                const name = trimmedString(body?.name);
-                const remoteUrl = trimmedString(body?.url);
-                const token = trimmedString(body?.token);
-                if (!name || !remoteUrl) {
-                    sendJson(res, 400, { error: "'name' and 'url' are required" }, corsHeaders);
-                    return;
-                }
-                const configStore = clientConfigStore(ctx);
-                try {
-                    const existing = configStore.get(name);
-                    if (!existing && !token) {
-                        throw new Error("'token' is required for a new remote");
-                    }
-                    if (existing && !token && !configStore.getEnv(existing.tokenEnvVar)?.trim()) {
-                        throw new Error("'token' is required because this remote does not have one configured");
-                    }
-                    const tokenEnvVar = existing?.tokenEnvVar ?? tokenEnvVarForRemote(name);
-                    configStore.add(name, remoteUrl, tokenEnvVar);
-                    if (token) {
-                        configStore.setEnv(tokenEnvVar, token);
-                        process.env[tokenEnvVar] = token;
-                    }
-                    if (ctx.config.mode === 'remote' && ctx.config.remoteName === name) {
-                        ctx.config = remoteConfig(ctx, name);
-                        ctx.store = createBackend(ctx, ctx.config);
-                    }
-                    sendJson(res, 200, settingsSummary(ctx), corsHeaders);
-                } catch (error) {
-                    sendJson(res, 400, { error: errorMessage(error) }, corsHeaders);
-                }
-                return;
-            }
-
-            const remoteSettingsMatch = pathname.match(/^\/settings\/remotes\/([^/]+)$/);
-            if (method === 'DELETE' && remoteSettingsMatch) {
-                const name = decodeURIComponent(remoteSettingsMatch[1]);
-                const configStore = clientConfigStore(ctx);
-                try {
-                    const existing = configStore.get(name);
-                    if (!configStore.remove(name)) {
-                        sendJson(res, 404, { error: `Remote "${name}" is not configured.` }, corsHeaders);
-                        return;
-                    }
-                    if (existing?.tokenEnvVar === tokenEnvVarForRemote(name)) {
-                        delete process.env[existing.tokenEnvVar];
-                    }
-                    if (ctx.config.mode === 'remote' && ctx.config.remoteName === name) {
-                        ctx.config = localConfig(ctx);
-                        ctx.store = buildStore(ctx.config, ctx.createBackend);
-                    }
-                    sendJson(res, 200, settingsSummary(ctx), corsHeaders);
-                } catch (error) {
-                    sendJson(res, 400, { error: errorMessage(error) }, corsHeaders);
-                }
-                return;
-            }
-
-            if (method === 'POST' && pathname === '/settings/mode') {
-                if (ctx.localModelJob?.status === 'installing' || ctx.localModelJob?.status === 'migrating') {
-                    sendJson(res, 409, { error: 'Wait for the local model operation to finish before switching storage.' }, corsHeaders);
-                    return;
-                }
-                const body = await readBody(req);
-                const mode = trimmedString(body?.mode).toLowerCase();
-                try {
-                    if (mode === 'local') {
-                        clientConfigStore(ctx).activateLocal();
-                        ctx.config = localConfig(ctx);
-                        ctx.store = buildStore(ctx.config, ctx.createBackend);
-                    } else if (mode === 'remote') {
-                        const name = trimmedString(body?.name);
-                        if (!name) throw new Error("'name' is required for remote mode.");
-                        const nextConfig = remoteConfig(ctx, name);
-                        clientConfigStore(ctx).activateRemote(name);
-                        ctx.config = nextConfig;
-                        ctx.store = createBackend(ctx, ctx.config);
-                    } else {
-                        throw new Error("'mode' must be local or remote.");
-                    }
-                    sendJson(res, 200, settingsSummary(ctx), corsHeaders);
-                } catch (error) {
-                    sendJson(res, 400, { error: errorMessage(error) }, corsHeaders);
-                }
-                return;
-            }
-
-            if (method === 'POST' && pathname === '/settings/test') {
-                const body = await readBody(req);
-                const name = typeof body?.name === 'string' ? body.name.trim() : ctx.config.remoteName ?? '';
-                if (!name) {
-                    sendJson(res, 400, { error: "'name' is required" }, corsHeaders);
-                    return;
-                }
-                try {
-                    sendJson(res, 200, await testRemoteConnection(ctx, name), corsHeaders);
-                } catch (error) {
-                    sendJson(res, 400, { error: errorMessage(error) }, corsHeaders);
-                }
-                return;
-            }
-
-            if (method === 'POST' && pathname === '/settings/import-local') {
-                const body = await readBody(req);
-                const name = typeof body?.name === 'string' ? body.name.trim() : ctx.config.remoteName ?? '';
-                if (!name) {
-                    sendJson(res, 400, { error: "'name' is required" }, corsHeaders);
-                    return;
-                }
-                try {
-                    sendJson(res, 200, await migrateLocalToRemote(ctx, name), corsHeaders);
-                } catch (error) {
-                    sendJson(res, 400, { error: errorMessage(error) }, corsHeaders);
-                }
-                return;
-            }
-
-            // Local memory operations are blocked until the configured key has
-            // completed a real Gemini embedding request during this sidecar run.
-            if (ctx.config.mode === 'local' && ctx.config.embeddingProvider !== 'mlx' && !geminiIsReady(ctx)) {
-                const gemini = publicGeminiReadiness(ctx);
-                sendJson(res, 503, {
-                    error: gemini.message ?? 'Gemini API key validation is required.',
-                    needsKey: true,
-                    gemini,
-                }, corsHeaders);
-                return;
-            }
-
             if (ctx.store === null) {
-                sendJson(res, 503, { error: 'No memory backend configured' }, corsHeaders);
+                sendJson(res, 503, { error: INSTALL_HINT, needsInstall: true }, corsHeaders);
                 return;
             }
 
@@ -1079,8 +468,8 @@ export function createServer(ctx: ServeContext): http.Server {
                 try {
                     const folders = resolveIngestFolders(ctx, body?.sources);
                     const model = trimmedString(body?.model) || undefined;
-                    const mode = trimmedString(body?.mode) === 'batch' ? 'batch' as const : 'standard' as const;
                     const manager = ingestManager(ctx);
+                    requireClaudeReady(ctx, 'Chat-history ingestion');
                     if (manager.isRunning()) {
                         sendJson(res, 409, { error: 'An ingestion run is already in progress.' }, corsHeaders);
                         return;
@@ -1088,7 +477,7 @@ export function createServer(ctx: ServeContext): http.Server {
                     const store = ctx.store;
                     // Fire and forget: the run is polled via GET /ingest/status.
                     // Errors are captured in the manager's progress state.
-                    void manager.run({ folders, model, mode }, store).catch(() => undefined);
+                    void manager.run({ folders, model }, store).catch(() => undefined);
                     sendJson(res, 200, { started: true }, corsHeaders);
                 } catch (error) {
                     sendJson(res, 400, { error: errorMessage(error) }, corsHeaders);
@@ -1097,37 +486,18 @@ export function createServer(ctx: ServeContext): http.Server {
             }
 
             if (method === 'GET' && pathname === '/ingest/status') {
-                try {
-                    sendJson(res, 200, ingestManager(ctx).getProgress(), corsHeaders);
-                } catch {
-                    // No local key (remote mode) — nothing can be running.
-                    sendJson(res, 200, { state: 'idle', processed: 0, failed: 0, skipped: 0, total: 0 }, corsHeaders);
-                }
-                return;
-            }
-
-            if (method === 'POST' && pathname === '/ingest/collect') {
-                try {
-                    sendJson(res, 200, await ingestManager(ctx).collect(ctx.store), corsHeaders);
-                } catch (error) {
-                    sendJson(res, 400, { error: errorMessage(error) }, corsHeaders);
-                }
+                sendJson(res, 200, ingestManager(ctx).getProgress(), corsHeaders);
                 return;
             }
 
             if (method === 'POST' && pathname === '/ingest/cancel') {
-                try {
-                    const manager = ingestManager(ctx);
-                    if (manager.isRunning()) {
-                        manager.cancel();
-                        sendJson(res, 200, { cancelled: 'run' }, corsHeaders);
-                        return;
-                    }
-                    const cancelledBatch = await manager.cancelBatch();
-                    sendJson(res, 200, { cancelled: cancelledBatch ? 'batch' : 'none' }, corsHeaders);
-                } catch (error) {
-                    sendJson(res, 400, { error: errorMessage(error) }, corsHeaders);
+                const manager = ingestManager(ctx);
+                if (manager.isRunning()) {
+                    manager.cancel();
+                    sendJson(res, 200, { cancelled: 'run' }, corsHeaders);
+                    return;
                 }
+                sendJson(res, 200, { cancelled: 'none' }, corsHeaders);
                 return;
             }
 
@@ -1154,6 +524,7 @@ export function createServer(ctx: ServeContext): http.Server {
                     const threshold = typeof body?.threshold === 'number' ? body.threshold : undefined;
                     const manager = hygieneManager(ctx);
                     const store = localStore(ctx);
+                    requireClaudeReady(ctx, 'Memory hygiene');
                     if (manager.isRunning()) {
                         sendJson(res, 409, { error: 'A hygiene run is already in progress.' }, corsHeaders);
                         return;
@@ -1169,12 +540,7 @@ export function createServer(ctx: ServeContext): http.Server {
             }
 
             if (method === 'GET' && pathname === '/hygiene/status') {
-                try {
-                    sendJson(res, 200, hygieneManager(ctx).getProgress(), corsHeaders);
-                } catch {
-                    // No local key (remote mode) — nothing can be running.
-                    sendJson(res, 200, { state: 'idle', judged: 0, failed: 0, total: 0 }, corsHeaders);
-                }
+                sendJson(res, 200, hygieneManager(ctx).getProgress(), corsHeaders);
                 return;
             }
 
@@ -1242,29 +608,24 @@ export function createServer(ctx: ServeContext): http.Server {
 export async function runServe(args: string[]): Promise<void> {
     const { port } = parseArgs(args);
     const config = createConfig();
-    // Boot even without a key; the desktop app will POST one to /config.
 
-    // Mint a per-launch token. 32 random bytes → 64 hex characters. This is
-    // handed to the WebView via the `PORT=N TOKEN=<hex>` handshake line and
-    // embedded in every fetch call by the frontend. Any other page on the
-    // machine cannot obtain the token without reading local process state.
+    // Mint a per-launch token. 32 random bytes → 64 hex characters, handed to
+    // the app via the `PORT=N TOKEN=<hex>` handshake line.
     const token = crypto.randomBytes(32).toString('hex');
 
-    // The allowed origin is the WebView's custom scheme. The zero-native shell
-    // loads the frontend from `zero://app` on production and
-    // `http://127.0.0.1:5173` in dev. If GEMDEX_WEBVIEW_ORIGIN is set in the
-    // environment (injected by the Zig shell in a future build) we honour it;
-    // otherwise we accept only `zero://app` as the production origin.
+    // Browsers always send Origin on cross-origin requests; the native app
+    // sends none. GEMDEX_WEBVIEW_ORIGIN allows one embedded web origin.
     const allowedOrigin = process.env.GEMDEX_WEBVIEW_ORIGIN ?? 'zero://app';
 
     const ctx: ServeContext = {
         config,
-        store: buildStore(config),
+        store: null,
         token,
         allowedOrigin,
         clientConfigStore: new ClientConfigStore(),
     };
-    startConfiguredKeyValidation(ctx);
+    ctx.store = buildStore(ctx);
+    void startClaudeCheck(ctx);
     const server = createServer(ctx);
 
     await new Promise<void>((resolve) => {

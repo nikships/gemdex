@@ -5,6 +5,7 @@
  * been ingested.
  */
 
+import type { ModelCostEstimate } from '../inference/claude-code';
 import type { ImportRecordsResult, MemoryExportRecord } from '../memory/types';
 
 /** Where a session file came from. Drives the deterministic memory id prefix. */
@@ -73,35 +74,11 @@ export interface IngestLedgerEntry {
     promptHash?: string;
 }
 
-/** A pending Gemini Batch API job, persisted so collection survives restarts. */
-export interface PendingBatchJob {
-    /** Gemini batch job resource name, e.g. `batches/123`. */
-    jobName: string;
-    model: string;
-    /** Epoch milliseconds when the job was submitted. */
-    submittedAt: number;
-    /** Maps each request key to the session file it digests. */
-    requests: Record<string, PendingBatchRequest>;
-}
-
-export interface PendingBatchRequest {
-    source: IngestSource;
-    filePath: string;
-    mtimeMs: number;
-    size: number;
-    sessionId: string;
-    /** SHA-256 of the digest prompt, recorded into the ledger on save. Absent on jobs submitted before this field existed. */
-    promptHash?: string;
-    /** Pre-rendered header/footer context so collection doesn't re-parse. */
-    sessionMeta: SessionMeta;
-}
-
 /** The on-disk ledger shape (`~/.gemdex/ingest.json`). */
 export interface IngestLedger {
     version: 1;
     /** Keyed by absolute file path. */
     files: Record<string, IngestLedgerEntry>;
-    pendingBatch?: PendingBatchJob;
 }
 
 /** One conversational turn extracted from a transcript. */
@@ -138,15 +115,6 @@ export interface SessionDigest {
     gotchas: string[];
 }
 
-/** Cost estimate for one model at standard and batch pricing. */
-export interface ModelCostEstimate {
-    model: string;
-    /** USD, standard interactive pricing. */
-    standardUsd: number;
-    /** USD, Batch API pricing (50% of standard). */
-    batchUsd: number;
-}
-
 /** Pending count and cost estimates for one ingestion scope. */
 export interface IngestScanTotals {
     /** Non-trivial sessions that would be processed. */
@@ -167,7 +135,7 @@ export interface IngestScanResult extends IngestScanTotals {
     skippedTrivialFiles: SessionFile[];
 }
 
-export type IngestRunState = 'idle' | 'running' | 'batchPending' | 'done' | 'failed' | 'cancelled';
+export type IngestRunState = 'idle' | 'running' | 'done' | 'failed' | 'cancelled';
 
 /** Live progress for an in-flight (or finished) ingestion run. */
 export interface IngestProgress {
@@ -178,6 +146,4 @@ export interface IngestProgress {
     total: number;
     currentFile?: string;
     error?: string;
-    /** Set when a batch job was submitted and is awaiting collection. */
-    pendingBatch?: { jobName: string; model: string; submittedAt: number; requestCount: number };
 }

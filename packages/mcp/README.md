@@ -1,213 +1,131 @@
 # gemdex-mcp
 
-MCP memory layer for AI coding agents — `save_memory` / `recall` /
-`get_memory` / `update_memory` / `delete_memory` (plus outcome + attachment
-tools) backed by Gemini embeddings + embedded LanceDB.
-
+Local memory for AI coding agents: on-device BGE-M3 embeddings via MLX,
+embedded LanceDB, seven stdio MCP tools, and a localhost desktop sidecar.
 Part of [Gemdex](https://github.com/nikships/gemdex).
 
-## Install for Claude Code
+## Install
+
+Requires Node.js ≥24, native arm64 macOS 14+ (Apple Silicon, not Rosetta).
 
 ```bash
+npx gemdex-mcp install
 claude mcp add gemdex -- npx -y gemdex-mcp@latest
 ```
 
-All seven tools return setup guidance until you choose a backend. Ask Claude to
-help choose, then run one command on your machine:
+Installation explicitly downloads managed Python/MLX and pinned
+`mlx-community/bge-m3-mlx-8bit` weights, about 600 MB. No preinstalled Python,
+uv, Homebrew, compiler, or model tooling is needed. Embeddings run offline
+after installation. There is no API key, provider switch, or remote backend
+setting. Before installation all seven tools return setup guidance.
 
-- `npx gemdex-mcp setup gemini` — hidden key prompt, validated before persistence.
-- `npx gemdex-mcp install` — Apple Silicon only: installs managed Python/MLX and
-  pinned `mlx-community/bge-m3-mlx-8bit`, then sets `GEMINI_API_KEY=local`
-  (exact lowercase) so local text embeddings activate.
-  Requires macOS 14+ and native arm64 Node (not Rosetta).
-  No preinstalled Python, uv, Homebrew, Hugging Face tooling or compiler needed.
-- `npx gemdex-mcp init-remote home https://memory.example.com` — connect an
-  existing server, with a hidden bearer-token prompt.
-
-**Local LLM gate:** the managed local model is used **only** when the Gemini API
-key env value is exactly `local` (e.g. MCP `"GEMINI_API_KEY": "local"` or
-`~/.gemdex/.env` after `install` / `embedding mlx`). Any other non-empty value is
-treated as a real Gemini API key. Empty/missing still requires setup — it does
-**not** fall through to local MLX. `GEMDEX_EMBEDDING_PROVIDER=mlx` alone is not
-enough.
-
-Install needs network access and **does not migrate existing memories**. Use
-`npx gemdex-mcp migrate-text` separately to move text into a new 1024-dimensional
-bank, with rerunnable progress. Media/attachment rows stay on Gemini. Recall
-searches both banks; it reports a Gemini failure rather than silently hiding
-legacy/media memories. With `GEMINI_API_KEY=local`, new MLX-only text works
-offline; media and history digestion still need a real Gemini key.
-
-Use `npx gemdex-mcp embedding gemini` or `embedding mlx` to switch future text
-writes (`mlx` writes `GEMINI_API_KEY=local`; `gemini` needs a real key), and
-`npx gemdex-mcp status` to inspect configuration. Settings are saved under
-`~/.gemdex` and shared with the Swift app's **Storage & Gemini** controls.
-Remove conflicting launch environment overrides before switching. Retry the tool
-after setup; reconnect via Claude Code `/mcp` if needed. History digestion and
-media still need Gemini; BYOI continues to embed server-side unchanged.
-
-No Docker, no daemon. Memories live at `~/.gemdex/lance` by default.
-
-To use a self-hosted Gemdex Server instead, configure remote mode. The client
-does not need `GEMINI_API_KEY`; embedding runs on the server:
-
-```bash
-claude mcp add gemdex \
-  -e GEMDEX_MODE=remote \
-  -e GEMDEX_REMOTE_URL=https://memory.example.com \
-  -e GEMDEX_REMOTE_TOKEN=your-server-token \
-  -- npx -y gemdex-mcp@latest
-```
-
-### Configure remotes with the CLI
-
-The easiest path is `init-remote` — it adds the remote, prompts for the token
-(without echoing it), verifies the server is reachable, authenticated, and
-version-compatible, switches to remote mode, and prints the agent command:
-
-```bash
-npx gemdex init-remote production https://memory.example.com
-
-# Also copy this machine's local memories into the server in the same step:
-npx gemdex init-remote production https://memory.example.com --import-local
-```
-
-Or run the individual steps:
-
-```bash
-# Prompts for the bearer token without echoing it.
-npx gemdex remote add production https://memory.example.com
-
-npx gemdex remote list
-npx gemdex mode remote production
-npx gemdex status
-
-# Return to the embedded local backend.
-npx gemdex mode local
-
-# Copy the local store to a named remote, preserving memory ids.
-npx gemdex import-local-to-remote production
-```
-
-Named remotes live in `~/.gemdex/config.json`. Bearer tokens are stored
-separately in `~/.gemdex/.env` with user-only file permissions and are never
-printed. For automation, use `--token-stdin`; to manage the secret externally,
-use `--token-env MY_TOKEN_VAR`.
-
-### Local and remote at the same time
-
-Mode is per process via `GEMDEX_MODE`, so you can register two MCP servers — one
-local, one remote — as two independent memory pools that never merge:
-
-```bash
-claude mcp add gemdex-local \
-  -e GEMDEX_MODE=local -e GEMINI_API_KEY=your-key \
-  -- npx -y gemdex-mcp@latest
-
-claude mcp add gemdex-remote \
-  -e GEMDEX_MODE=remote \
-  -e GEMDEX_REMOTE_URL=https://memory.example.com \
-  -e GEMDEX_REMOTE_TOKEN=your-server-token \
-  -- npx -y gemdex-mcp@latest
-```
-
-Pass `GEMDEX_MODE` per server (not `gemdex mode …`, which sets one shared mode).
-
-## Install for any MCP client
+Other MCP clients can use:
 
 ```json
 {
   "mcpServers": {
     "gemdex": {
       "command": "npx",
-      "args": ["-y", "gemdex-mcp@latest"],
-      "env": {
-        "GEMINI_API_KEY": "your-key"
-      }
+      "args": ["-y", "gemdex-mcp@latest"]
     }
   }
 }
 ```
 
-See the [BYOI operations guide](../../docs/BYOI_OPERATIONS.md) for server
-deployment, TLS, storage, backup/restore, upgrades, and troubleshooting.
+The local pool lives at `~/.gemdex/lance`, with attachment bytes at
+`~/.gemdex/blobs`. For a shared self-hosted pool, connect your agent directly
+to the [Streamable HTTP MCP endpoint](../mcp-http/README.md). The npx package
+and desktop sidecar manage only the local pool.
+
+### Upgrade from Gemini-based releases
+
+After installation, run `npx gemdex-mcp migrate` to re-embed legacy `memories`
+into `memories_mlx_bge_m3_8bit` (1024 dimensions). Installation alone does not
+migrate. Progress is reported and migration is safe to rerun.
+
+Recall and hygiene refuse to run while legacy rows remain, avoiding incomplete
+results. List/get/update/delete/export remain available after installation.
+Migration preserves text, titles, timestamps and attachment blobs. Legacy
+media is readable but is not embedded or searchable as media.
+
+## CLI
+
+| Command | Purpose |
+|---------|---------|
+| `npx gemdex-mcp install` | Download and verify runtime/model |
+| `npx gemdex-mcp migrate` | Re-embed legacy memories |
+| `npx gemdex-mcp status` | Show model, legacy count, store and Claude Code readiness |
+| `npx gemdex-mcp backfill-transcripts [--force] [--dry-run]` | Attach transcript files referenced by existing digest footers |
+| `npx gemdex-mcp ingest-history [--source claude\|factory\|codex\|antigravity\|PATH]... [--model haiku] [--dry-run]` | Digest new local sessions |
+
+Backfill skips missing files with a message. Ingestion defaults to detected
+preset folders and processes only sessions absent from its successful-ingest
+ledger. Changed sessions already in the ledger are skipped. `--dry-run`
+scans and estimates; it does not call the model.
+
+## Chat-history ingestion and hygiene
+
+Install Claude Code and sign in with `claude auth login`. Gemdex uses that
+existing login for isolated `claude -p --model haiku` structured-JSON calls:
+no tools, user settings, skills, MCP servers, hooks, CLAUDE.md, or session
+persistence, and a temporary working directory.
+
+Local ingestion and hygiene use concurrency four, at most three total attempts,
+and a five-minute timeout per inference call. Estimates use Haiku list prices
+($1 input / $5 output per million tokens). With a Claude subscription, usage
+counts against the plan's limits rather than being billed per token.
+Readiness is `ready | missing | unauthenticated | error`; the sidecar also
+reports `checking` during a probe.
+
+The digest text is embedded locally; its cleaned transcript is stored as a
+non-embedded attachment. See [ingestion paths](../../docs/CHAT_HISTORY.md) for
+the distinction between local ingestion and server-side uploads.
 
 ## Tools
 
-- `save_memory(content, title?)` — persist a new memory; returns its `id`.
-- `recall(query, limit?)` — retrieve full memories by natural language (hybrid
-  semantic + BM25), ranked by relevance. Never returns fragments.
-- `update_memory(id, content?, edits?, title?)` — revise an existing memory in
-  place. `edits` is a targeted find-and-replace (`{ oldText, newText, replaceAll? }`)
-  so you can change part of a large memory without resending it; `content` is a
-  full rewrite. The two are mutually exclusive.
+| Tool | Behavior |
+|------|----------|
+| `save_memory` | Save text and/or text-file attachments; return id and title |
+| `recall` | Text query, fixed top-10 title index, never full bodies |
+| `get_memory` | Open a full parent by id; increment recall stats |
+| `update_memory` | Replace content or apply literal `edits`; preserve omitted fields |
+| `report_outcome` | Record `worked`, `failed`, or `stale` in the client stats ledger |
+| `read_attachment` | Read a memory's attachment bytes as UTF-8 or base64 |
+| `delete_memory` | Permanently delete a memory and clear its client stats |
 
-Deletion is intentionally **not** an agent tool — it's a human action in the
-Gemdex desktop app.
+Prefer updates for corrections and delete only when the memory should be gone.
+HTTP MCP is a separate six-tool surface without delete.
 
-## Chat-history ingestion
-
-```bash
-npx gemdex ingest-history --source claude --dry-run
-npx gemdex ingest-history --source claude
-```
-
-Ingestion processes **only sessions that have never been successfully ingested**.
-Previously ingested sessions are reported as skipped and are never re-digested,
-even if the transcript later changes. This invariant is enforced by the core
-engine; there is no CLI or sidecar override. Digestion always needs a local
-`GEMINI_API_KEY`, including when memory storage is remote.
-
-### Syncing history to a self-hosted host
-
-`sync-history` is the same pipeline pointed at a **remote** Gemdex host, so every
-machine you code on feeds one searchable pool:
-
-```bash
-npx gemdex sync-history --url https://gemdex.example.com/mcp --dry-run
-npx gemdex sync-history --url https://gemdex.example.com/mcp
-```
-
-The first run opens a browser once to sign in as the host's allowlisted Google
-account; after that the stored refresh token is redeemed silently. Set
-`GEMDEX_SYNC_URL` to skip `--url`, and use `--logout` to forget a host's
-credentials (kept in `~/.gemdex/sync-auth.json`, `0600`).
-
-Notes:
-
-- Digests are built **on your machine** (your `GEMINI_API_KEY`) — only the digest
-  and the transcript are uploaded, never your whole session history unprocessed.
-- Session ids are deterministic, so syncing the same history twice updates in
-  place instead of creating duplicates. Safe to re-run, and safe to run from
-  several machines.
-- `https` is required for anything but a loopback host: the request carries an
-  access token.
-- This is a **write-only** capability. It can add or update chat digests on the
-  host and nothing else.
+New local attachments are text files only: `.txt`, `.json`, `.jsonl`/`.ndjson`.
+Pass a local `path` (preferred) or inline base64 `data` and `mimeType`.
+Accepted MIME types: `text/plain`, `application/json`, `application/jsonl`,
+`application/x-ndjson`, `text/x-jsonl`. The limit is four files per memory,
+20 MiB each. File bytes are never embedded. Images, audio, video, PDF and media
+recall queries are unsupported. Omitting attachments on update preserves them;
+`attachments:[]` clears them.
 
 ## Desktop sidecar
 
-The same binary also runs the localhost HTTP manager API used by the desktop app:
-
-```bash
-npx gemdex serve --port 0   # 127.0.0.1 only; --port 0 = OS picks a free port
-```
+`npx gemdex-mcp serve --port 0` starts the local HTTP API, bound to
+`127.0.0.1`. The desktop app spawns it and reads the
+`PORT=<n> TOKEN=<hex>` handshake. Model install/migration are explicit
+asynchronous settings actions; Claude Code readiness gates ingestion/hygiene,
+not ordinary memory reads. See the
+[sidecar contract](AGENTS.md#sidecar-contract) for routes and status fields.
 
 ## Environment
 
-| Variable | Description |
-|----------|-------------|
-| `GEMDEX_MODE` | `local` (default) or `remote` |
-| `GEMINI_API_KEY` | Real Google AI Studio key, or exact `local` for managed MLX text |
-| `LANCEDB_PATH` | *(optional)* Custom directory for the embedded store (default `~/.gemdex/lance`) |
-| `GEMDEX_REMOTE_URL` | Required in remote mode; Gemdex Server root URL |
-| `GEMDEX_REMOTE_TOKEN` | Required in remote mode by default; server bearer token |
-| `GEMDEX_REMOTE_TOKEN_ENV_VAR` | Optional alternate env var containing the remote token |
-| `GEMDEX_SYNC_URL` | *(optional)* Default host `/mcp` endpoint for `sync-history` |
-| `GEMDEX_REMOTE_NAME` | Optional human-readable remote name |
-
-See the [main repo](https://github.com/nikships/gemdex) for all environment
-variables and configuration options.
+| Variable | Purpose |
+|----------|---------|
+| `LANCEDB_PATH` | Override `~/.gemdex/lance` |
+| `GEMDEX_CLAUDE_PATH` | Override Claude binary discovery for ingestion/hygiene |
+| `HYBRID_MODE` | `false` disables BM25; default `true` |
+| `GEMDEX_SERVE_PORT` | Sidecar port; default auto/0 |
+| `GEMDEX_WEBVIEW_ORIGIN` | Allowed sidecar Origin; default `zero://app` |
+| `GEMDEX_STATS_PATH` | Override `~/.gemdex/stats.json` |
+| `GEMDEX_TRUST_RANKING` | `true` enables outcome-weighted title ranking |
+| `GEMDEX_SIMILAR_ON_SAVE` | `false` disables similarity advisories |
+| `GEMDEX_SIMILAR_THRESHOLD` | Similarity threshold in `(0,1]`, default 0.90 |
 
 ## MCP Registry
 

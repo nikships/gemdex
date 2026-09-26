@@ -9,25 +9,45 @@ struct DetailPane: View {
         ZStack {
             BrandBackdrop()
 
-            if model.showSettings {
-                StorageSettingsView(isEmbedded: true)
-                    .transition(.opacity.combined(with: .move(edge: .trailing)))
-            } else if model.showIngest {
-                IngestView(isEmbedded: true)
-                    .transition(.opacity.combined(with: .move(edge: .trailing)))
-            } else if model.showHygiene {
-                HygieneView(isEmbedded: true)
-                    .transition(.opacity.combined(with: .move(edge: .trailing)))
-            } else if model.isEditorOpen {
-                EditorView()
-                    .transition(.opacity.combined(with: .move(edge: .trailing)))
-            } else {
-                placeholder
-                    .transition(.opacity)
+            VStack(spacing: 0) {
+                ZStack {
+                    if model.showSettings {
+                        StorageSettingsView(isEmbedded: true)
+                            .transition(.opacity.combined(with: .move(edge: .trailing)))
+                    } else if model.showIngest {
+                        IngestView(isEmbedded: true)
+                            .transition(.opacity.combined(with: .move(edge: .trailing)))
+                    } else if model.showHygiene {
+                        HygieneView(isEmbedded: true)
+                            .transition(.opacity.combined(with: .move(edge: .trailing)))
+                    } else if model.isEditorOpen {
+                        EditorView()
+                            .transition(.opacity.combined(with: .move(edge: .trailing)))
+                    } else {
+                        placeholder
+                            .transition(.opacity)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                // Activity Center: pinned below the detail content (never under
+                // the translucent toolbar or across the sidebar) so progress and
+                // Cancel stay reachable while navigating between panels.
+                ActivityRail(hiding: openPanelJob)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, model.activityList.contains { $0.kind != openPanelJob } ? 14 : 0)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(.spring(response: 0.4, dampingFraction: 0.85), value: model.showSettings || model.showIngest || model.showHygiene || model.isEditorOpen)
+    }
+
+    /// The job whose panel is currently showing its own progress.
+    private var openPanelJob: JobKind? {
+        if model.showSettings { return .embedding }
+        if model.showIngest { return .ingest }
+        if model.showHygiene { return .hygiene }
+        return nil
     }
 
     private var placeholder: some View {

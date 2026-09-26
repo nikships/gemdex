@@ -2,9 +2,9 @@
 """
 gemdex_admin.py — thin admin client for the `gemdex serve` localhost sidecar.
 
-The gemdex MCP surface deliberately exposes NO delete tool: deletion is only
-reachable via the sidecar's token-gated `DELETE /memories/:id` route (see
-packages/mcp/src/serve.ts). This helper boots that sidecar, performs the
+Bulk export and batched deletes are not MCP tools; they are reachable via the
+sidecar's token-gated HTTP routes (see packages/mcp/src/serve.ts). This
+helper boots that sidecar, performs the
 token handshake, and exposes the read + delete primitives the consolidation
 skill needs:
 
@@ -18,9 +18,9 @@ skill needs:
 The sidecar is booted per invocation, the handshake line
 (`PORT=<n> TOKEN=<hex>`) is read from stdout, requests are made against
 127.0.0.1 with the `X-Gemdex-Token` header, and the sidecar is torn down on
-exit. Local mode requires a validated GEMINI_API_KEY (the sidecar answers
-`503 {needsKey:true}` on data routes until one is present); this script
-surfaces that clearly instead of hanging.
+exit. The sidecar answers `503 {needsInstall:true}` on data routes until the
+local embedding model is installed (`npx gemdex-mcp install`); this script
+surfaces that clearly instead of failing with a bare HTTP error.
 
 Usage:
     gemdex_admin.py list [--json]
@@ -119,32 +119,24 @@ class Sidecar:
     def _req(self, method: str, path: str, body: Optional[dict] = None) -> Any:
         url = f"http://127.0.0.1:{self.port}{path}"
         data = json.dumps(body).encode() if body is not None else None
-        # The sidecar validates a local GEMINI_API_KEY asynchronously on boot and
-        # answers 503 {needsKey:true} on data routes until it passes. Retry for a
-        # bounded window so a fresh launch doesn't spuriously fail the race.
-        deadline = time.time() + 30
-        while True:
-            req = urllib.request.Request(url, data=data, method=method)
-            req.add_header("X-Gemdex-Token", self.token or "")
-            if body is not None:
-                req.add_header("Content-Type", "application/json")
-            try:
-                with urllib.request.urlopen(req, timeout=300) as resp:
-                    raw_body = resp.read().decode()
-                    return json.loads(raw_body) if raw_body.strip() else None
-            except urllib.error.HTTPError as e:
-                detail = e.read().decode(errors="replace")
-                if e.code == 503 and "needsKey" in detail:
-                    if time.time() < deadline:
-                        time.sleep(1)
-                        continue
-                    raise SystemExit(
-                        "Sidecar has no validated GEMINI_API_KEY (local mode). "
-                        "Set one in the desktop app or ~/.gemdex/.env, then retry."
-                    )
-                raise SystemExit(f"HTTP {e.code} on {method} {path}: {detail}")
-            except urllib.error.URLError as e:
-                raise SystemExit(f"Request failed on {method} {path}: {e}")
+        req = urllib.request.Request(url, data=data, method=method)
+        req.add_header("X-Gemdex-Token", self.token or "")
+        if body is not None:
+            req.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                raw_body = resp.read().decode()
+                return json.loads(raw_body) if raw_body.strip() else None
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode(errors="replace")
+            if e.code == 503 and "needsInstall" in detail:
+                raise SystemExit(
+                    "The local embedding model is not installed. "
+                    "Run `npx gemdex-mcp install`, then retry."
+                )
+            raise SystemExit(f"HTTP {e.code} on {method} {path}: {detail}")
+        except urllib.error.URLError as e:
+            raise SystemExit(f"Request failed on {method} {path}: {e}")
 
     # --- primitives -----------------------------------------------------
     def list(self) -> Any:
@@ -152,9 +144,8 @@ class Sidecar:
 
     def export(self) -> str:
         # The core /export route answers a single JSON object {records:[...]}.
-        # Route through _req so it shares the 503/needsKey retry that covers the
-        # async key-validation race, then re-emit as JSONL (one memory per line)
-        # — the format this command documents and the consolidation skill reads.
+        # Re-emit as JSONL (one memory per line), the format this command
+        # documents and the consolidation skill reads.
         data = self._req("GET", "/export")
         records = data.get("records", []) if isinstance(data, dict) else data
         return "".join(json.dumps(r) + "\n" for r in records)

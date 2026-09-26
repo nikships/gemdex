@@ -1,5 +1,4 @@
-import { GoogleGenAI, Type } from '@google/genai';
-import { DEFAULT_DIGEST_MODEL, DIGEST_MODELS } from '../ingest/digester';
+import { ClaudeCodeRunner, DEFAULT_CLAUDE_MODEL, assertSupportedModel } from '../inference/claude-code';
 import { HygieneConfidence, HygieneFinding, HygieneVerdictKind } from './types';
 
 /** Content chars per memory included in a judge prompt. */
@@ -30,25 +29,35 @@ supersededBy (the id of the newer covering memory) and evidence (one short
 quote pair: the stale claim and the newer claim). Confidence: 'high' only
 when you would stake the deletion on it.`;
 
+/**
+ * Judge structured-output schema. Claude Code's `--json-schema` requires an
+ * object at the top level, so the per-memory verdicts live under `verdicts`.
+ */
 export const JUDGE_RESPONSE_SCHEMA = {
-    type: Type.ARRAY,
-    items: {
-        type: Type.OBJECT,
-        properties: {
-            memory_id: { type: Type.STRING },
-            verdict: {
-                type: Type.STRING,
-                enum: ['keep', 'duplicate', 'superseded', 'contradicted'],
-            },
-            superseded_by: { type: Type.STRING },
-            evidence: { type: Type.STRING },
-            confidence: {
-                type: Type.STRING,
-                enum: ['high', 'medium', 'low'],
+    type: 'object',
+    properties: {
+        verdicts: {
+            type: 'array',
+            items: {
+                type: 'object',
+                properties: {
+                    memory_id: { type: 'string' },
+                    verdict: {
+                        type: 'string',
+                        enum: ['keep', 'duplicate', 'superseded', 'contradicted'],
+                    },
+                    superseded_by: { type: 'string' },
+                    evidence: { type: 'string' },
+                    confidence: {
+                        type: 'string',
+                        enum: ['high', 'medium', 'low'],
+                    },
+                },
+                required: ['memory_id', 'verdict', 'confidence'],
             },
         },
-        required: ['memory_id', 'verdict', 'confidence'],
     },
+    required: ['verdicts'],
 } as const;
 
 /** Build the judge prompt: one block per memory, ordered oldest → newest. */
@@ -72,20 +81,18 @@ const VERDICTS: HygieneVerdictKind[] = ['keep', 'duplicate', 'superseded', 'cont
 const CONFIDENCES: HygieneConfidence[] = ['high', 'medium', 'low'];
 
 /**
- * Parse the judge's structured-output JSON into findings. Guarantees exactly
+ * Turn the judge's structured output into findings. Accepts the
+ * `{ verdicts: [...] }` object (or a bare verdict array). Guarantees exactly
  * one finding per known member: missing members default to keep/low,
  * hallucinated ids are dropped, and if the model condemned every member the
  * newest one is flipped back to keep (at least one keep per cluster).
  */
-export function parseJudgeResponse(text: string, memberIds: string[]): HygieneFinding[] {
-    let parsed: unknown;
-    try {
-        parsed = JSON.parse(text);
-    } catch {
-        throw new Error('Judge model returned invalid JSON');
-    }
+export function parseJudgeOutput(output: unknown, memberIds: string[]): HygieneFinding[] {
+    const parsed = Array.isArray(output)
+        ? output
+        : (output && typeof output === 'object' ? (output as Record<string, unknown>).verdicts : undefined);
     if (!Array.isArray(parsed)) {
-        throw new Error('Judge model returned a non-array response');
+        throw new Error('Judge model returned no verdict list');
     }
 
     const known = new Set(memberIds);
@@ -129,50 +136,47 @@ export function parseJudgeResponse(text: string, memberIds: string[]): HygieneFi
     return findings;
 }
 
-export interface ClusterJudgeConfig {
-    apiKey: string;
-    model?: string;
-    baseURL?: string;
+/** Parse the judge's structured-output JSON text into findings. */
+export function parseJudgeResponse(text: string, memberIds: string[]): HygieneFinding[] {
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(text);
+    } catch {
+        throw new Error('Judge model returned invalid JSON');
+    }
+    return parseJudgeOutput(parsed, memberIds);
 }
 
-/** Thin client that judges one cluster of memories via `generateContent`. */
-export class ClusterJudge {
-    private client: GoogleGenAI;
+/** Anything that returns per-member verdicts for one cluster. */
+export interface Judge {
     readonly model: string;
-
-    constructor(config: ClusterJudgeConfig) {
-        this.model = config.model ?? DEFAULT_DIGEST_MODEL;
-        if (!DIGEST_MODELS[this.model]) {
-            throw new Error(
-                `Unsupported judge model "${this.model}". Supported: ${Object.keys(DIGEST_MODELS).join(', ')}`,
-            );
-        }
-        this.client = new GoogleGenAI({
-            apiKey: config.apiKey,
-            ...(config.baseURL && { httpOptions: { baseUrl: config.baseURL } }),
-        });
-    }
-
-    getClient(): GoogleGenAI {
-        return this.client;
-    }
-
     /** Judge one cluster. `members` should be ordered newest-first (scan order). */
+    judge(members: JudgeMemberInput[]): Promise<HygieneFinding[]>;
+}
+
+export interface ClusterJudgeConfig {
+    model?: string;
+    runner?: ClaudeCodeRunner;
+}
+
+/** Judges one cluster of memories through the user's local Claude Code CLI. */
+export class ClusterJudge implements Judge {
+    readonly model: string;
+    private readonly runner: ClaudeCodeRunner;
+
+    constructor(config: ClusterJudgeConfig = {}) {
+        this.model = config.model ?? DEFAULT_CLAUDE_MODEL;
+        assertSupportedModel(this.model);
+        this.runner = config.runner ?? new ClaudeCodeRunner();
+    }
+
     async judge(members: JudgeMemberInput[]): Promise<HygieneFinding[]> {
-        const response = await this.client.models.generateContent({
+        const { output } = await this.runner.runStructured({
             model: this.model,
-            contents: buildJudgePrompt(members),
-            config: {
-                responseMimeType: 'application/json',
-                responseSchema: JUDGE_RESPONSE_SCHEMA,
-                systemInstruction: JUDGE_SYSTEM_INSTRUCTION,
-                temperature: 0,
-            },
+            systemPrompt: JUDGE_SYSTEM_INSTRUCTION,
+            prompt: buildJudgePrompt(members),
+            schema: JUDGE_RESPONSE_SCHEMA,
         });
-        const text = response.text;
-        if (!text) {
-            throw new Error('Judge model returned an empty response');
-        }
-        return parseJudgeResponse(text, members.map((m) => m.memoryId));
+        return parseJudgeOutput(output, members.map((m) => m.memoryId));
     }
 }

@@ -81,7 +81,7 @@ jobs:
           echo "Bundle layout OK."
 
   byoi-integration:
-    name: BYOI integration (Postgres + MCP + sidecar)
+    name: BYOI integration (Postgres + server)
     runs-on: ubuntu-latest
     services:
       postgres:

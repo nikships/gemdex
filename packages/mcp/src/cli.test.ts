@@ -1,427 +1,376 @@
-import { test } from 'node:test';
+import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import * as fs from 'node:fs/promises';
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import {
+    Embedding,
+    EmbeddingVector,
+    FileBlobStore,
+    LanceDBVectorDatabase,
+    LEGACY_GEMINI_COLLECTION,
+    LocalMemoryBackend,
+    MLX_MODEL,
+    TRANSCRIPT_ATTACHMENT_CAPTION,
+    TRANSCRIPT_ATTACHMENT_ID,
+    getMlxStatus,
+} from 'gemdex-core';
 import type {
     AttachmentBytes,
     AttachmentCaptionUpdate,
+    ClaudeCodeReadiness,
     ImportRecordsResult,
-    IngestManager,
-    IngestTarget,
     Memory,
-    MemoryAttachmentInput,
     MemoryBackend,
     MemoryExportRecord,
     MemoryRecallResult,
     MemorySummary,
-    SaveMemoryInput,
-    UpdateMemoryInput,
+    SaveResult,
 } from 'gemdex-core';
 import { ClientConfigStore } from './cli-config.js';
 import { runCli } from './cli.js';
-import { createConfig } from './config.js';
-import { SyncCredentialStore } from './sync-config.js';
 
-class FakeBackend implements MemoryBackend {
-    records = new Map<string, MemoryExportRecord>();
-    failIds = new Set<string>();
+const DIM = 8;
 
-    async save(_input: SaveMemoryInput): Promise<Memory> {
-        throw new Error('not implemented');
+class FakeEmbedding extends Embedding {
+    protected maxTokens = 8192;
+    async detectDimension(): Promise<number> { return DIM; }
+    getDimension(): number { return DIM; }
+    getProvider(): string { return 'Fake'; }
+    async embed(text: string): Promise<EmbeddingVector> {
+        return { vector: Array.from({ length: DIM }, (_, i) => (text.length + i) % 5 + 1), dimension: DIM };
     }
-
-    async recall(
-        _query?: string,
-        _limit?: number,
-        _queryAttachments?: MemoryAttachmentInput[],
-    ): Promise<MemoryRecallResult[]> {
-        return [];
+    async embedBatch(texts: string[]): Promise<EmbeddingVector[]> {
+        return Promise.all(texts.map((text) => this.embed(text)));
     }
+}
 
-    async update(_id: string, _input: UpdateMemoryInput): Promise<Memory> {
-        throw new Error('not implemented');
-    }
+/** In-memory backend covering what backfill-transcripts touches (list/get/importRecords). */
+class BackfillBackend implements MemoryBackend {
+    memories = new Map<string, Memory>();
+    imported: MemoryExportRecord[] = [];
+    rejectIds = new Set<string>();
+    getFailures = new Set<string>();
 
+    async save(): Promise<SaveResult> { throw new Error('not implemented'); }
+    async recall(): Promise<MemoryRecallResult[]> { return []; }
+    async update(): Promise<Memory> { throw new Error('not implemented'); }
     async updateAttachmentCaptions(_id: string, _captions: AttachmentCaptionUpdate[]): Promise<Memory> {
         throw new Error('not implemented');
     }
-
     async get(id: string): Promise<Memory | null> {
-        const item = this.records.get(id);
-        return item ? { ...item, attachments: [] } : null;
+        if (this.getFailures.has(id)) throw new Error('store read failed');
+        return this.memories.get(id) ?? null;
     }
-
     async list(): Promise<MemorySummary[]> {
-        return [];
+        return [...this.memories.values()].map((memory) => ({
+            id: memory.id,
+            title: memory.title,
+            preview: memory.content.slice(0, 40),
+            createdAt: memory.createdAt,
+            updatedAt: memory.updatedAt,
+            attachments: memory.attachments,
+        }));
     }
-
-    async delete(_id: string): Promise<void> {}
-
+    async delete(): Promise<void> {}
     async exportAll(): Promise<MemoryExportRecord[]> {
-        return [...this.records.values()];
+        throw new Error('backfill must never export the whole pool');
     }
-
     async importRecords(records: MemoryExportRecord[]): Promise<ImportRecordsResult> {
-        const item = records[0];
-        if (this.failIds.has(item.id)) throw new Error('rejected');
-        this.records.set(item.id, item);
+        const record = records[0];
+        if (this.rejectIds.has(record.id)) {
+            return { imported: 0, failed: 1, errors: [{ index: 0, id: record.id, error: 'rejected by store' }] };
+        }
+        this.imported.push(record);
         return { imported: 1, failed: 0, errors: [] };
     }
-
-    async readAttachment(_memoryId: string, _attachmentId: string): Promise<AttachmentBytes | null> {
-        return null;
-    }
+    async readAttachment(): Promise<AttachmentBytes | null> { return null; }
 }
 
-function record(id: string): MemoryExportRecord {
-    return {
-        id,
-        title: id,
-        content: `content ${id}`,
-        createdAt: 1,
-        updatedAt: 2,
-    };
+function digestMemory(id: string, content: string, attachments: Memory['attachments'] = []): Memory {
+    return { id, title: id, content, attachments, createdAt: 1, updatedAt: 2 };
 }
 
-interface CliOverrides {
-    local?: MemoryBackend;
-    remote?: MemoryBackend;
-    fetch?: typeof fetch;
-    syncTarget?: IngestTarget;
-    openBrowser?: (url: string) => void;
-    ingestManager?: IngestManager;
+/** A Claude Code JSONL transcript with enough real conversation to be non-trivial. */
+function writeClaudeSession(filePath: string, sessionId: string): void {
+    const text = 'Explain how to notarize the macOS build with notarytool and staple the ticket. '.repeat(4);
+    const lines = [
+        { type: 'user', sessionId, cwd: '/repo', timestamp: '2026-01-01T00:00:00Z', message: { role: 'user', content: text } },
+        { type: 'assistant', sessionId, timestamp: '2026-01-01T00:01:00Z', message: { role: 'assistant', content: [{ type: 'text', text }] } },
+    ];
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, lines.map((line) => JSON.stringify(line)).join('\n') + '\n');
 }
 
-async function withCli(
-    callback: (
-        run: (
-            args: string[],
-            overrides?: CliOverrides,
-        ) => Promise<{ code: number | null; stdout: string; stderr: string }>,
-        store: ClientConfigStore,
-        rootDir: string,
-    ) => Promise<void>,
-): Promise<void> {
-    const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'gemdex-cli-'));
-    const store = new ClientConfigStore({ rootDir });
-    // envManager falls back to the developer's real ~/.gemdex/.env, so pin the
-    // variables these paths read: process.env wins, keeping the suite identical
-    // on a laptop with a configured Gemdex and on a bare CI runner.
-    const savedEnv = { ...process.env };
-    process.env.GEMINI_API_KEY = 'test-key';
-    delete process.env.GEMDEX_SYNC_URL;
-    delete process.env.GEMDEX_MODE;
-    try {
-        await callback(async (args, overrides = {}) => {
-            let stdout = '';
-            let stderr = '';
-            const code = await runCli(args, {
-                store,
-                io: {
-                    stdout: (message) => { stdout += message; },
-                    stderr: (message) => { stderr += message; },
-                    readSecret: async () => 'secret-token',
-                },
-                fetch: overrides.fetch ??
-                    (async () => new Response('{"ok":true}', { status: 200 })) as typeof fetch,
-                createLocalBackend: () => overrides.local ?? new FakeBackend(),
-                createRemoteBackend: () => overrides.remote ?? new FakeBackend(),
-                ...(overrides.syncTarget && { createSyncTarget: () => overrides.syncTarget! }),
-                ...(overrides.ingestManager && { createIngestManager: () => overrides.ingestManager! }),
-                openBrowser: overrides.openBrowser ?? (() => {
-                    throw new Error('the browser must not be opened in tests');
-                }),
-                createSyncCredentialStore: (mcpUrl) => new SyncCredentialStore(mcpUrl, { rootDir }),
-            });
-            return { code, stdout, stderr };
-        }, store, rootDir);
-    } finally {
-        process.env = savedEnv;
-        await fs.rm(rootDir, { recursive: true, force: true });
-    }
+function markModelInstalled(rootDir: string): void {
+    const status = getMlxStatus(rootDir);
+    fs.mkdirSync(status.path, { recursive: true });
+    fs.writeFileSync(path.join(status.path, 'installed'), path.basename(status.path));
 }
 
-test('remote add/list/mode/remove stores named configuration and keeps token out of JSON', async () => {
-    await withCli(async (run, store) => {
-        const added = await run(['remote', 'add', 'prod', 'https://memory.example.com/']);
-        assert.equal(added.code, 0);
-        assert.match(added.stdout, /Added remote "prod"/);
-        assert.doesNotMatch(`${added.stdout}${added.stderr}`, /secret-token/);
-
-        const configText = await fs.readFile(store.configPath, 'utf8');
-        const envText = await fs.readFile(store.envPath, 'utf8');
-        assert.doesNotMatch(configText, /secret-token/);
-        assert.match(envText, /GEMDEX_REMOTE_TOKEN_PROD=secret-token/);
-
-        assert.match((await run(['remote', 'list'])).stdout, /prod\thttps:\/\/memory\.example\.com/);
-        assert.equal((await run(['mode', 'remote', 'prod'])).code, 0);
-        assert.equal(store.getEnv('GEMDEX_MODE'), 'remote');
-        assert.equal(store.getEnv('GEMDEX_REMOTE_NAME'), 'prod');
-        assert.deepEqual(createConfig((name) => store.getEnv(name)).remote, {
-            url: 'https://memory.example.com',
-            token: 'secret-token',
-        });
-        assert.match((await run(['remote', 'list'])).stdout, /^\* prod/m);
-
-        assert.equal((await run(['remote', 'remove', 'prod'])).code, 0);
-        assert.equal(store.getEnv('GEMDEX_MODE'), 'local');
-        assert.equal(store.getEnv('GEMDEX_REMOTE_TOKEN_PROD'), undefined);
-        assert.deepEqual(store.list(), []);
-    });
-});
-
-test('status reports remote health and authenticated API reachability', async () => {
-    await withCli(async (run, store) => {
-        store.add('prod', 'https://memory.example.com', 'TOKEN');
-        store.setEnv('TOKEN', 'token');
-        store.activateRemote('prod');
-
-        const result = await run(['status']);
-        assert.equal(result.code, 0);
-        assert.match(result.stdout, /Mode: remote \(prod\)/);
-        assert.match(result.stdout, /Reachable: yes/);
-        assert.match(result.stdout, /Authenticated: yes/);
-    });
-});
-
-function versionResponse(overrides: Record<string, unknown> = {}): Response {
-    return new Response(
-        JSON.stringify({
-            name: 'gemdex-server',
-            apiVersion: 'v1',
-            serverVersion: '0.1.0',
-            minClientVersion: '0.3.0',
-            protocolVersion: 1,
-            capabilities: {},
-            ...overrides,
-        }),
-        { status: 200 },
-    );
+/**
+ * A stand-in `claude` executable: answers `--version` and `auth status --json`
+ * and records every invocation, so the real probe runs without the real CLI.
+ */
+function writeFakeClaude(dir: string, loggedIn: boolean): { binary: string; log: string } {
+    const binary = path.join(dir, 'fake-claude');
+    const log = path.join(dir, 'fake-claude.log');
+    fs.writeFileSync(binary, `#!${process.execPath}
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + '\\n');
+if (args[0] === '--version') {
+    process.stdout.write('9.8.7 (Claude Code)\\n');
+} else if (args[0] === 'auth') {
+    process.stdout.write(JSON.stringify({ loggedIn: ${loggedIn}, authMethod: 'claude.ai' }));
+} else {
+    process.stderr.write('unexpected invocation');
+    process.exit(2);
+}
+`, { mode: 0o755 });
+    return { binary, log };
 }
 
-test('init-remote stores the remote, verifies, activates, and prints the agent command', async () => {
-    await withCli(async (run, store) => {
-        const remote = new FakeBackend();
-        const fetchImpl = (async (input: Parameters<typeof fetch>[0]) => {
-            assert.match(String(input), /\/v1\/version$/);
-            return versionResponse();
-        }) as typeof fetch;
+const ENV_KEYS = ['LANCEDB_PATH', 'GEMDEX_CLAUDE_PATH'];
+let rootDir: string;
+let store: ClientConfigStore;
+let savedEnv: Array<string | undefined>;
 
-        const result = await run(
-            ['init-remote', 'macmini', 'https://mac-mini.example.ts.net/'],
-            { remote, fetch: fetchImpl },
-        );
-
-        assert.equal(result.code, 0);
-        assert.match(result.stdout, /Added remote "macmini"/);
-        assert.match(result.stdout, /Server reachable and version-compatible\./);
-        assert.match(result.stdout, /Authenticated successfully\./);
-        assert.match(result.stdout, /Gemdex mode is now remote: macmini\./);
-        assert.match(result.stdout, /claude mcp add gemdex/);
-        assert.doesNotMatch(`${result.stdout}${result.stderr}`, /secret-token/);
-
-        // Token stored out of config.json; mode flipped to remote.
-        assert.equal(store.getEnv('GEMDEX_MODE'), 'remote');
-        assert.equal(store.getEnv('GEMDEX_REMOTE_NAME'), 'macmini');
-        const configText = await fs.readFile(store.configPath, 'utf8');
-        assert.doesNotMatch(configText, /secret-token/);
-    });
+beforeEach(() => {
+    rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gemdex-cli-'));
+    store = new ClientConfigStore({ rootDir });
+    savedEnv = ENV_KEYS.map((key) => process.env[key]);
+    ENV_KEYS.forEach((key) => { delete process.env[key]; });
+    store.setEnv('LANCEDB_PATH', path.join(rootDir, 'lance'));
 });
 
-test('init-remote with --import-local copies local memories and can skip activation', async () => {
-    await withCli(async (run, store) => {
-        const local = new FakeBackend();
-        local.records.set('one', record('one'));
-        local.records.set('two', record('two'));
-        const remote = new FakeBackend();
-        const fetchImpl = (async () => versionResponse()) as typeof fetch;
-
-        const result = await run(
-            ['init-remote', 'macmini', 'https://mac-mini.example.ts.net', '--import-local', '--no-activate'],
-            { local, remote, fetch: fetchImpl },
-        );
-
-        assert.equal(result.code, 0);
-        assert.match(result.stdout, /Imported local memories — Created: 2, Updated: 0, Skipped: 0\./);
-        assert.equal(remote.records.get('one')?.id, 'one');
-        assert.equal(remote.records.get('two')?.id, 'two');
-        // --no-activate leaves the machine in local mode.
-        assert.notEqual(store.getEnv('GEMDEX_MODE'), 'remote');
+afterEach(() => {
+    ENV_KEYS.forEach((key, index) => {
+        if (savedEnv[index] === undefined) delete process.env[key];
+        else process.env[key] = savedEnv[index];
     });
+    fs.rmSync(rootDir, { recursive: true, force: true });
 });
 
-test('init-remote fails fast on an incompatible server protocol version', async () => {
-    await withCli(async (run, store) => {
-        const fetchImpl = (async () => versionResponse({ protocolVersion: 2 })) as typeof fetch;
+interface RunOptions {
+    backend?: MemoryBackend;
+    checkClaudeCode?: () => Promise<ClaudeCodeReadiness>;
+}
 
-        const result = await run(
-            ['init-remote', 'macmini', 'https://mac-mini.example.ts.net'],
-            { fetch: fetchImpl },
-        );
-
-        assert.equal(result.code, 1);
-        assert.match(result.stderr, /protocolVersion/);
-        // Never switched into remote mode on failure.
-        assert.notEqual(store.getEnv('GEMDEX_MODE'), 'remote');
-    });
-});
-
-test('migration preserves ids and reports created, updated, and skipped records', async () => {
-    await withCli(async (run, store) => {
-        store.add('prod', 'https://memory.example.com', 'TOKEN');
-        store.setEnv('TOKEN', 'token');
-        const local = new FakeBackend();
-        local.records.set('new-id', record('new-id'));
-        local.records.set('existing-id', record('existing-id'));
-        local.records.set('bad-id', record('bad-id'));
-        const remote = new FakeBackend();
-        remote.records.set('existing-id', record('existing-id'));
-        remote.failIds.add('bad-id');
-
-        const result = await run(['import-local-to-remote', 'prod'], { local, remote });
-        assert.equal(result.code, 1);
-        assert.match(result.stdout, /Created: 1/);
-        assert.match(result.stdout, /Updated: 1/);
-        assert.match(result.stdout, /Skipped: 1/);
-        assert.match(result.stderr, /Skipped bad-id: rejected/);
-        assert.equal(remote.records.get('new-id')?.id, 'new-id');
-    });
-});
-
-/** A stand-in IngestManager: sync-history must not need a real Gemini key to be exercised. */
-function fakeIngestManager(target: { records: MemoryExportRecord[] }): IngestManager {
-    return {
-        scan: () => ({
-            processableFiles: ['/tmp/session.jsonl'],
-            skippedTrivialFiles: [],
-            pendingCount: 1,
-            estimatedInputTokens: 1000,
-            estimates: [{ model: 'gemini-2.5-flash', standardUsd: 0.01, batchUsd: 0.005 }],
-            buckets: { changedFiles: [], upToDate: [], skippedActive: [] },
-        }),
-        run: async (_options: unknown, ingestTarget: IngestTarget) => {
-            const result = await ingestTarget.importRecords([record('chat:factory:abc')]);
-            target.records.push(record('chat:factory:abc'));
-            return {
-                total: 1,
-                processed: result.imported,
-                failed: result.failed,
-                skipped: 0,
-            };
+async function run(args: string[], options: RunOptions = {}): Promise<{ code: number | null; stdout: string; stderr: string }> {
+    let stdout = '';
+    let stderr = '';
+    const code = await runCli(args, {
+        store,
+        io: {
+            stdout: (message) => { stdout += message; },
+            stderr: (message) => { stderr += message; },
         },
-        getProgress: () => ({ total: 1, processed: 0, failed: 0, skipped: 0 }),
-    } as unknown as IngestManager;
+        createBackend: () => options.backend ?? new BackfillBackend(),
+        ...(options.checkClaudeCode && { checkClaudeCode: options.checkClaudeCode }),
+    });
+    return { code, stdout, stderr };
 }
 
-test('sync-history requires a host URL and rejects plaintext http off-loopback', async () => {
-    await withCli(async (run) => {
-        const missing = await run(['sync-history']);
-        assert.equal(missing.code, 1);
-        assert.match(missing.stderr, /--url https:\/\/your-host\/mcp or set GEMDEX_SYNC_URL/);
-
-        // A bearer over cleartext to a remote host is the one mistake that
-        // silently leaks the credential, so it is refused outright.
-        const insecure = await run(['sync-history', '--url', 'http://gemdex.example.com/mcp']);
-        assert.equal(insecure.code, 1);
-        assert.match(insecure.stderr, /must use https for a non-loopback host/);
-
-        const notAUrl = await run(['sync-history', '--url', 'not-a-url']);
-        assert.equal(notAUrl.code, 1);
-        assert.match(notAUrl.stderr, /not a valid absolute URL/);
-    });
+const ready = async (): Promise<ClaudeCodeReadiness> => ({
+    status: 'ready', version: '2.1.0', path: '/opt/claude', checkedAt: 1,
 });
 
-test('sync-history resolves the host from --url, then GEMDEX_SYNC_URL', async () => {
-    await withCli(async (run, store, rootDir) => {
-        const collected: MemoryExportRecord[] = [];
-        const syncTarget: IngestTarget = {
-            importRecords: async (records) => {
-                collected.push(...records);
-                return { imported: records.length, failed: 0, errors: [] };
-            },
-        };
-        const manager = fakeIngestManager({ records: [] });
-
-        store.setEnv('GEMDEX_SYNC_URL', 'https://from-env.example.com/mcp');
-        const fromEnv = await run(
-            ['sync-history', '--source', rootDir],
-            { syncTarget, ingestManager: manager },
-        );
-        assert.equal(fromEnv.code, 0);
-        assert.match(fromEnv.stdout, /Syncing chat history to https:\/\/from-env\.example\.com\/mcp/);
-
-        // The explicit flag wins over the stored default.
-        const fromFlag = await run(
-            ['sync-history', '--url', 'https://from-flag.example.com/mcp/', '--source', rootDir],
-            { syncTarget, ingestManager: manager },
-        );
-        assert.match(fromFlag.stdout, /Syncing chat history to https:\/\/from-flag\.example\.com\/mcp\b/);
-        // Trailing slash normalized away, so the stored-credential key is stable.
-        assert.doesNotMatch(fromFlag.stdout, /mcp\/\n/);
-
-        assert.equal(collected.length, 2);
-        assert.equal(collected[0].id, 'chat:factory:abc');
-        assert.match(fromFlag.stdout, /Done — Ingested: 1, Failed: 0/);
-    });
+test('non-CLI arguments fall through to the MCP server, including removed remote/Gemini verbs', async () => {
+    for (const args of [
+        [],
+        ['serve'],
+        ['remote', 'list'],
+        ['mode', 'local'],
+        ['init-remote', 'prod', 'https://memory.example.test'],
+        ['import-local-to-remote'],
+        ['sync-history'],
+        ['setup', 'gemini'],
+        ['embedding', 'mlx'],
+        ['migrate-text'],
+    ]) {
+        const result = await run(args);
+        assert.equal(result.code, null, `${args.join(' ')} must not be handled by the CLI`);
+        assert.equal(result.stdout, '');
+        assert.equal(result.stderr, '');
+    }
 });
 
-test('sync-history --dry-run prints the estimate without authorizing or sending', async () => {
-    await withCli(async (run, _store, rootDir) => {
-        let sent = 0;
-        const syncTarget: IngestTarget = {
-            importRecords: async (records) => {
-                sent += records.length;
-                return { imported: records.length, failed: 0, errors: [] };
-            },
-        };
+test('install and migrate reject extra arguments with a usage error', async () => {
+    const install = await run(['install', '--force']);
+    assert.equal(install.code, 1);
+    assert.match(install.stderr, /Usage: npx gemdex-mcp install/);
 
-        const result = await run(
-            ['sync-history', '--url', 'https://host.example.com/mcp', '--dry-run', '--source', rootDir],
-            { syncTarget, ingestManager: fakeIngestManager({ records: [] }) },
-        );
-
-        assert.equal(result.code, 0);
-        assert.match(result.stdout, /Estimated input tokens: ~1,000/);
-        assert.match(result.stdout, /Cost estimates/);
-        // No upload, and (via withCli's throwing default) no browser either.
-        assert.equal(sent, 0);
-    });
+    const migrate = await run(['migrate', 'now']);
+    assert.equal(migrate.code, 1);
+    assert.match(migrate.stderr, /Usage: npx gemdex-mcp migrate/);
 });
 
-test('sync-history --logout forgets only the named host', async () => {
-    await withCli(async (run, _store, rootDir) => {
-        const kept = new SyncCredentialStore('https://other.example.com/mcp', { rootDir });
-        kept.writeTokens({ access_token: 'other-token', token_type: 'Bearer' });
-        const target = new SyncCredentialStore('https://host.example.com/mcp', { rootDir });
-        target.writeTokens({ access_token: 'host-token', token_type: 'Bearer' });
-        assert.equal(target.hasCredentials(), true);
+test('install surfaces installer refusals and never reports success', async () => {
+    // A live PID holding the lock makes the installer stop before any
+    // download; a non-Apple-Silicon host fails on the platform check first.
+    const lockDir = path.dirname(getMlxStatus(rootDir).path);
+    fs.mkdirSync(lockDir, { recursive: true });
+    fs.writeFileSync(path.join(lockDir, 'install.lock'), `${process.pid}:held-by-test`);
 
-        const result = await run(['sync-history', '--url', 'https://host.example.com/mcp', '--logout']);
-
-        assert.equal(result.code, 0);
-        assert.match(result.stdout, /Forgot stored sync credentials for https:\/\/host\.example\.com\/mcp/);
-        assert.equal(target.hasCredentials(), false);
-        // Multi-host state is keyed per URL; logout must not sign you out everywhere.
-        assert.equal(kept.hasCredentials(), true);
-    });
+    const result = await run(['install']);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /Error: .*(already in progress|Apple Silicon)/);
+    assert.doesNotMatch(result.stdout, /Local model installed/);
 });
 
-test('stored sync credentials are written 0600 and never printed', async () => {
-    await withCli(async (run, _store, rootDir) => {
-        const credentials = new SyncCredentialStore('https://host.example.com/mcp', { rootDir });
-        credentials.writeTokens({ access_token: 'super-secret', refresh_token: 'refresh-me', token_type: 'Bearer' });
+test('migrate refuses before the local model is installed', async () => {
+    const result = await run(['migrate']);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /Run npx gemdex-mcp install first/);
+    assert.equal(result.stdout, '');
+});
 
-        const mode = (await fs.stat(credentials.filePath)).mode & 0o777;
-        assert.equal(mode, 0o600);
+test('migrate with nothing in the legacy index reports completion', async () => {
+    markModelInstalled(rootDir);
+    const result = await run(['migrate']);
+    assert.equal(result.code, 0);
+    assert.match(result.stderr, /Migrating memories: 0\/0/);
+    assert.match(result.stdout, /Migration complete/);
+});
 
-        const result = await run(
-            ['sync-history', '--url', 'https://host.example.com/mcp', '--dry-run', '--source', rootDir],
-            {
-                syncTarget: { importRecords: async () => ({ imported: 0, failed: 0, errors: [] }) },
-                ingestManager: fakeIngestManager({ records: [] }),
-            },
-        );
-        assert.doesNotMatch(`${result.stdout}${result.stderr}`, /super-secret|refresh-me/);
+test('status reports store path, model state and Claude Code readiness', async () => {
+    const result = await run(['status'], { checkClaudeCode: ready });
+    assert.equal(result.code, 0);
+    assert.match(result.stdout, new RegExp(`Store: ${path.join(rootDir, 'lance').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+    assert.match(result.stdout, new RegExp(`Local model: not-installed \\(${MLX_MODEL.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)`));
+    assert.doesNotMatch(result.stdout, /Legacy memories/);
+    assert.match(result.stdout, /Claude Code \(ingestion \+ hygiene\): ready \(2\.1\.0\) at \/opt\/claude/);
+});
+
+test('status reports a missing or signed-out Claude Code with its message', async () => {
+    const missing = await run(['status'], {
+        checkClaudeCode: async () => ({ status: 'missing', message: 'Claude Code CLI not found.', checkedAt: 1 }),
     });
+    assert.equal(missing.code, 0);
+    assert.match(missing.stdout, /Claude Code \(ingestion \+ hygiene\): missing — Claude Code CLI not found\./);
+
+    const signedOut = await run(['status'], {
+        checkClaudeCode: async () => ({ status: 'unauthenticated', message: 'Not logged in.', checkedAt: 1 }),
+    });
+    assert.match(signedOut.stdout, /unauthenticated — Not logged in\./);
+});
+
+test('status points at migrate when legacy Gemini memories remain', async () => {
+    markModelInstalled(rootDir);
+    const legacy = new LocalMemoryBackend({
+        embedding: new FakeEmbedding(),
+        vectorDatabase: new LanceDBVectorDatabase({ uri: path.join(rootDir, 'lance') }),
+        collectionName: LEGACY_GEMINI_COLLECTION,
+        blobStore: new FileBlobStore(path.join(rootDir, 'blobs')),
+    });
+    await legacy.save({ content: 'legacy memory about release signing' });
+    await legacy.save({ content: 'legacy memory about staging deploys' });
+    await legacy.save({ content: 'legacy memory about database backups' });
+
+    const result = await run(['status'], { checkClaudeCode: ready });
+    assert.equal(result.code, 0);
+    assert.match(result.stdout, /Local model: installed/);
+    assert.match(result.stdout, /Legacy memories awaiting migration: 3 — run npx gemdex-mcp migrate/);
+});
+
+test('status probes the configured claude binary when no checker is injected', async () => {
+    const fake = writeFakeClaude(rootDir, true);
+    process.env.GEMDEX_CLAUDE_PATH = fake.binary;
+
+    const result = await run(['status']);
+    assert.equal(result.code, 0);
+    assert.match(result.stdout, /Claude Code \(ingestion \+ hygiene\): ready \(9\.8\.7 \(Claude Code\)\)/);
+    assert.ok(result.stdout.includes(`at ${fake.binary}`));
+    const calls = fs.readFileSync(fake.log, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+    assert.deepEqual(calls, [['--version'], ['auth', 'status', '--json']]);
+});
+
+test('status reports a signed-out claude binary as unauthenticated', async () => {
+    process.env.GEMDEX_CLAUDE_PATH = writeFakeClaude(rootDir, false).binary;
+    const result = await run(['status']);
+    assert.equal(result.code, 0);
+    assert.match(result.stdout, /Claude Code \(ingestion \+ hygiene\): unauthenticated — Claude Code is not logged in/);
+});
+
+test('backfill-transcripts attaches, skips and reports each digest category', async () => {
+    const sessionsDir = path.join(rootDir, 'sessions');
+    const present = path.join(sessionsDir, 'present.jsonl');
+    writeClaudeSession(present, 'present');
+    const absent = path.join(sessionsDir, 'absent.jsonl');
+
+    const backend = new BackfillBackend();
+    backend.memories.set('chat:custom:present', digestMemory('chat:custom:present', `Digest\n---\nFull transcript: ${present}\n`));
+    backend.memories.set('chat:custom:absent', digestMemory('chat:custom:absent', `Digest\n---\nFull transcript: ${absent}\n`));
+    backend.memories.set('chat:custom:nopath', digestMemory('chat:custom:nopath', 'Digest with no footer'));
+    backend.memories.set('chat:custom:done', digestMemory('chat:custom:done', 'Digest', [
+        { id: TRANSCRIPT_ATTACHMENT_ID, kind: 'file', mimeType: 'text/plain', byteLength: 10, caption: TRANSCRIPT_ATTACHMENT_CAPTION },
+    ]));
+    backend.memories.set('plain-note', digestMemory('plain-note', `Not a digest\nFull transcript: ${present}\n`));
+
+    const result = await run(['backfill-transcripts'], { backend });
+    assert.equal(result.code, 0);
+    assert.match(result.stdout, /attached: 1\n/);
+    assert.match(result.stdout, /already had transcript: 1\n/);
+    assert.match(result.stdout, /missing file: 1\n/);
+    assert.match(result.stdout, /no path footer: 1\n/);
+    assert.match(result.stdout, /failed: 0\n/);
+    assert.ok(result.stderr.includes(`Missing transcript for chat:custom:absent: ${absent}`));
+
+    assert.equal(backend.imported.length, 1);
+    const [record] = backend.imported;
+    assert.equal(record.id, 'chat:custom:present');
+    assert.equal(record.attachments?.length, 1);
+    const attachment = record.attachments![0];
+    assert.equal(attachment.id, TRANSCRIPT_ATTACHMENT_ID);
+    assert.equal(attachment.mimeType, 'text/plain');
+    assert.match(Buffer.from(attachment.data, 'base64').toString('utf8'), /notarize the macOS build/);
+});
+
+test('backfill-transcripts --dry-run counts attachable digests without importing', async () => {
+    const present = path.join(rootDir, 'sessions', 'present.jsonl');
+    writeClaudeSession(present, 'present');
+    const backend = new BackfillBackend();
+    backend.memories.set('chat:custom:present', digestMemory('chat:custom:present', `Digest\nFull transcript: ${present}\n`));
+
+    const result = await run(['backfill-transcripts', '--dry-run'], { backend });
+    assert.equal(result.code, 0);
+    assert.match(result.stdout, /\[dry-run\] would attach transcript to chat:custom:present/);
+    assert.match(result.stdout, /Backfill transcripts \(dry-run\):/);
+    assert.match(result.stdout, /attached: 1\n/);
+    assert.equal(backend.imported.length, 0);
+});
+
+test('backfill-transcripts --force re-attaches digests that already have a transcript', async () => {
+    const present = path.join(rootDir, 'sessions', 'present.jsonl');
+    writeClaudeSession(present, 'present');
+    const backend = new BackfillBackend();
+    backend.memories.set('chat:custom:present', digestMemory('chat:custom:present', `Digest\nFull transcript: ${present}\n`, [
+        { id: TRANSCRIPT_ATTACHMENT_ID, kind: 'file', mimeType: 'text/plain', byteLength: 3, caption: TRANSCRIPT_ATTACHMENT_CAPTION },
+    ]));
+
+    const skipped = await run(['backfill-transcripts'], { backend });
+    assert.match(skipped.stdout, /already had transcript: 1\n/);
+    assert.equal(backend.imported.length, 0);
+
+    const forced = await run(['backfill-transcripts', '--force'], { backend });
+    assert.equal(forced.code, 0);
+    assert.match(forced.stdout, /attached: 1\n/);
+    assert.equal(backend.imported.length, 1);
+});
+
+test('backfill-transcripts exits 1 when a read or import fails', async () => {
+    const present = path.join(rootDir, 'sessions', 'present.jsonl');
+    writeClaudeSession(present, 'present');
+    const backend = new BackfillBackend();
+    backend.memories.set('chat:custom:rejected', digestMemory('chat:custom:rejected', `Digest\nFull transcript: ${present}\n`));
+    backend.memories.set('chat:custom:unreadable', digestMemory('chat:custom:unreadable', 'Digest'));
+    backend.rejectIds.add('chat:custom:rejected');
+    backend.getFailures.add('chat:custom:unreadable');
+
+    const result = await run(['backfill-transcripts'], { backend });
+    assert.equal(result.code, 1);
+    assert.match(result.stdout, /failed: 2\n/);
+    assert.match(result.stderr, /Failed chat:custom:rejected: rejected by store/);
+    assert.match(result.stderr, /Failed chat:custom:unreadable: store read failed/);
 });

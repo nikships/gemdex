@@ -1,11 +1,11 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { IngestLedger, IngestLedgerEntry, PendingBatchJob } from './types';
+import { IngestLedger, IngestLedgerEntry } from './types';
 
 /**
- * Persistent record of which session files have been ingested (and any
- * pending Batch API job), stored at `~/.gemdex/ingest.json`. Keyed by
+ * Persistent record of which session files have been ingested, stored at
+ * `~/.gemdex/ingest.json`. Keyed by
  * absolute file path; an entry whose recorded mtime/size differ from the
  * file on disk marks the session as changed and due for re-ingestion.
  */
@@ -27,7 +27,7 @@ export class IngestLedgerStore {
                 || typeof parsed.files !== 'object' || parsed.files === null) {
                 throw new Error('unsupported format');
             }
-            return parsed as IngestLedger;
+            return { version: 1, files: parsed.files } as IngestLedger;
         } catch (error) {
             throw new Error(`Unable to read ${this.ledgerPath}: ${error instanceof Error ? error.message : String(error)}`);
         }
@@ -52,20 +52,6 @@ export class IngestLedgerStore {
             ledger.files[filePath] = entries[filePath];
         }
         this.write(ledger);
-    }
-
-    setPendingBatch(job: PendingBatchJob | undefined): void {
-        const ledger = this.load();
-        if (job) {
-            ledger.pendingBatch = job;
-        } else {
-            delete ledger.pendingBatch;
-        }
-        this.write(ledger);
-    }
-
-    getPendingBatch(): PendingBatchJob | undefined {
-        return this.load().pendingBatch;
     }
 
     private write(ledger: IngestLedger): void {

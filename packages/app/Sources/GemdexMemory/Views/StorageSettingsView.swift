@@ -1,28 +1,11 @@
 import SwiftUI
 
-/// Storage settings: switch between the embedded local store and a named BYOI
-/// Gemdex Server, add/update/remove remotes, test connectivity, and import
-/// local memories to the active remote. Mirrors the web app's settings modal.
+/// Storage & Models settings: appearance, the local embedding model (status,
+/// install, migrate), and the Claude Code CLI used for ingestion and hygiene.
 struct StorageSettingsView: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.dismiss) private var dismiss
     var isEmbedded: Bool = false
-
-    @State private var selectedRemote: String = ""
-    @State private var status: String = ""
-    @State private var statusIsError = false
-    @State private var error: String?
-    @State private var confirmMigration = false
-    @State private var confirmInstall = false
-
-    // Add/update remote form.
-    @State private var formName = ""
-    @State private var formURL = ""
-    @State private var formToken = ""
-    @State private var saving = false
-
-    private var settings: SettingsSummary? { model.settings }
-    private var remotes: [RemoteSummary] { settings?.remotes ?? [] }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -32,13 +15,7 @@ struct StorageSettingsView: View {
                 VStack(alignment: .leading, spacing: 22) {
                     appearanceSection
                     embeddingSection
-                    geminiSection
-                    modeChooser
-                    remoteChooser
-                    addRemoteForm
-                    if let error {
-                        Text(error).font(.callout).foregroundStyle(Brand.terracotta)
-                    }
+                    claudeCodeSection
                 }
                 .padding(20)
             }
@@ -48,80 +25,15 @@ struct StorageSettingsView: View {
         .frame(maxWidth: isEmbedded ? 640 : .infinity, maxHeight: isEmbedded ? .infinity : nil)
         .background(isEmbedded ? nil : BrandBackdrop())
         .task { await refresh() }
-        .alert("Install local MLX embeddings?", isPresented: $confirmInstall) {
-            Button("Cancel", role: .cancel) {}
-            Button("Download & install") { Task { await model.changeEmbedding(install: true) } }
-        } message: {
-            Text("Download the MLX runtime and BGE-M3 model to this Mac and activate MLX for new text. Installation does not migrate existing memories. Keep Gemdex running until it finishes.")
-        }
-        .alert("Migrate existing text to MLX?", isPresented: $confirmMigration) {
-            Button("Cancel", role: .cancel) {}
-            Button("Migrate text") { Task { await model.changeEmbedding(migrate: true) } }
-        } message: {
-            Text("Re-embed existing text locally using MLX. This can take time; keep Gemdex running. Media and legacy Gemini operations still require a Gemini key. Nothing is migrated until you confirm.")
-        }
-    }
-
-    private var embeddingSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Local text embeddings").font(.headline)
-            Text("MLX runs BGE-M3 text embeddings on this Mac without a Gemini key. Media, legacy Gemini memories, chat-history digestion, and hygiene analysis still need a verified Gemini key. Installation activates MLX for new text; migration is a separate explicit action.")
-                .font(.caption).foregroundStyle(.secondary)
-            if model.backendIsRemote {
-                Text("Remote mode uses the server’s embedding provider. Local install, migration, and provider changes are unavailable; switch to Local first.")
-                    .font(.callout).foregroundStyle(.secondary)
-            } else {
-                if let state = model.embeddingStatus {
-                    Text("Model: \(state.model)").font(.caption).textSelection(.enabled)
-                    Text("Status: \(state.status)").font(.callout.bold())
-                    if let message = state.message {
-                        Text(message).font(.callout)
-                            .foregroundStyle(state.status == "error" ? Brand.terracotta : Color.secondary)
-                            .textSelection(.enabled)
-                    }
-                    if state.isRunning {
-                        if let total = state.total, total > 0 {
-                            ProgressView(value: Double(min(state.completed ?? 0, total)), total: Double(total))
-                            Text("\(state.completed ?? 0) / \(total)").font(.caption.monospacedDigit())
-                        } else {
-                            ProgressView().controlSize(.small)
-                        }
-                        Text("You can close this panel. Progress remains in Activity Center; keep the app running.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    Toggle("Use MLX for local text embeddings", isOn: Binding(
-                        get: { model.embeddingStatus?.provider == "mlx" },
-                        set: { enabled in Task { await model.changeEmbedding(provider: enabled ? "mlx" : "gemini") } }
-                    ))
-                    .disabled(model.embeddingIsBusy || (!state.installed && state.provider != "mlx"))
-                    Text("Turning this off requires a working Gemini key. Switching does not migrate existing memories.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    HStack {
-                        Button(state.status == "error" ? "Retry installation…" : "Install MLX…") { confirmInstall = true }
-                            .disabled(model.embeddingIsBusy || (state.installed && state.status != "error"))
-                        Button(state.status == "error" ? "Retry text migration…" : "Migrate existing text…") { confirmMigration = true }
-                            .disabled(model.embeddingIsBusy || !state.installed)
-                    }
-                } else {
-                    Text("Load local embedding status to see installation options.").font(.callout)
-                }
-                if model.embeddingRequestPending { ProgressView().controlSize(.small) }
-                if let error = model.embeddingError {
-                    Text(error).font(.callout).foregroundStyle(Brand.terracotta).textSelection(.enabled)
-                }
-                Button("Refresh status") { Task { await model.refreshEmbeddingStatus() } }
-                    .disabled(model.embeddingRequestPending)
-            }
-        }
     }
 
     private var header: some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 4) {
-                Label("Storage & Gemini", systemImage: "externaldrive.connected.to.line.below")
+                Label("Storage & Models", systemImage: "externaldrive")
                     .font(.title3.bold())
                     .labelStyle(.titleAndIcon)
-                Text("Choose where memories live and verify the Gemini key used for local embeddings and chat-history ingestion.")
+                Text("Memories are stored in ~/.gemdex on this Mac and embedded locally. Chat-history ingestion and hygiene run on your Claude Code CLI.")
                     .font(.callout).foregroundStyle(.secondary)
             }
             Spacer()
@@ -145,96 +57,92 @@ struct StorageSettingsView: View {
         .padding(20)
     }
 
-    private var geminiSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Gemini API readiness").font(.headline)
-            if let readiness = model.geminiReadiness, readiness.isReady {
-                HStack(spacing: 10) {
-                    Image(systemName: "checkmark.seal.fill")
-                        .foregroundStyle(Brand.sage)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Gemini key verified").font(.callout.bold())
-                        Text("Local embeddings and new-session ingestion are unlocked for this launch.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
+    private var embeddingSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Local embedding model").font(.headline)
+            Text("BGE-M3 on MLX embeds memory text on this Mac (Apple Silicon only). Memories saved with the previous Gemini embedding model need a one-time, confirmed migration before they appear in search.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            EmbeddingModelPanel(allowsMigration: true)
                 .padding(12)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .glassSurface(cornerRadius: Metric.radiusCard, tint: Brand.sage)
-            } else {
-                GeminiReadinessAlert(readiness: model.geminiReadiness, compact: true)
-                GeminiKeySetupPanel(primaryButtonTitle: "Validate Gemini key")
-            }
+                .glassSurface(cornerRadius: Metric.radiusCard)
         }
     }
 
-    private var modeChooser: some View {
-        HStack(spacing: 12) {
-            ModeCard(title: "Local", subtitle: "Gemini or MLX + LanceDB on this machine",
-                     active: settings?.mode == "local") {
-                Task { await apply(mode: "local") }
+    private var claudeCodeSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Claude Code").font(.headline)
+            Text("Chat-history ingestion and memory hygiene call your local Claude Code CLI (`claude -p`, Haiku model) with your existing Claude login.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if model.ingestionIsReady && !model.claudeCodeIsChecking {
+                claudeCodeReadyRow
+            } else {
+                ClaudeCodeReadinessAlert(
+                    blockedFeature: "Ingestion and hygiene are disabled until Claude Code is ready.",
+                    showsSettingsButton: false
+                )
             }
-            ModeCard(title: "Remote", subtitle: "Connect through your BYOI Gemdex Server",
-                     active: settings?.mode == "remote",
-                     disabled: !canUseSelectedRemote) {
-                Task { await apply(mode: "remote", name: selectedRemote) }
-            }
+            claudeCodeDetails
         }
+    }
+
+    private var claudeCodeReadyRow: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "checkmark.seal.fill").foregroundStyle(Brand.sage)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(ClaudeCodeCopy.title(model.claudeCode, checking: false)).font(.callout.bold())
+                Text(model.claudeCode?.message ?? ClaudeCodeCopy.fallbackDetail(model.claudeCode))
+                    .font(.caption).foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            Spacer()
+            Button {
+                Task { await model.checkClaudeCode() }
+            } label: {
+                HStack(spacing: 6) {
+                    if model.claudeCodeCheckPending { ProgressView().controlSize(.small) }
+                    Text("Check again")
+                }
+            }
+            .disabled(model.claudeCodeIsChecking)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassSurface(cornerRadius: Metric.radiusCard, tint: Brand.sage)
     }
 
     @ViewBuilder
-    private var remoteChooser: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Configured remote").font(.headline)
-            HStack {
-                Picker("", selection: $selectedRemote) {
-                    ForEach(remotes) { remote in
-                        Text(remote.hasToken ? remote.name : "\(remote.name) (no token)").tag(remote.name)
+    private var claudeCodeDetails: some View {
+        if let cc = model.claudeCode {
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 4) {
+                GridRow {
+                    Text("Status").foregroundStyle(.secondary)
+                    Text(cc.status).font(.caption.monospaced())
+                }
+                if let version = cc.version {
+                    GridRow {
+                        Text("Version").foregroundStyle(.secondary)
+                        Text(version).font(.caption.monospaced()).textSelection(.enabled)
                     }
                 }
-                .labelsHidden()
-                .disabled(remotes.isEmpty)
-                .onChange(of: selectedRemote) { _ in populateForm() }
+                if let path = cc.path {
+                    GridRow {
+                        Text("Path").foregroundStyle(.secondary)
+                        Text(path).font(.caption.monospaced()).textSelection(.enabled)
+                            .lineLimit(1).truncationMode(.middle)
+                    }
+                }
+                if let checkedAt = cc.checkedAt {
+                    GridRow {
+                        Text("Checked").foregroundStyle(.secondary)
+                        Text(Date(timeIntervalSince1970: checkedAt / 1000).formatted(date: .abbreviated, time: .shortened))
+                            .font(.caption)
+                    }
+                }
             }
-
-            HStack(spacing: 8) {
-                Button("Use remote") { Task { await apply(mode: "remote", name: selectedRemote) } }
-                    .disabled(!canUseSelectedRemote)
-                Button("Test") { Task { await testRemote() } }
-                    .disabled(!canUseSelectedRemote)
-                Button("Import local") { Task { await importLocal() } }
-                    .disabled(!canUseSelectedRemote || !(settings?.localConfigured ?? false))
-                Button("Remove", role: .destructive) { Task { await removeRemote() } }
-                    .disabled(remotes.isEmpty)
-            }
-            .controlSize(.small)
-
-            if !status.isEmpty {
-                Text(status)
-                    .font(.callout)
-                    .foregroundStyle(statusIsError ? Brand.terracotta : Brand.sage)
-            }
-        }
-    }
-
-    private var addRemoteForm: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Add or update a remote").font(.headline)
-            TextField("Name (e.g. production)", text: $formName)
-                .textFieldStyle(.roundedBorder)
-            TextField("Server URL (https://memory.example.com)", text: $formURL)
-                .textFieldStyle(.roundedBorder)
-            SecureField("Bearer token (required for new remotes)", text: $formToken)
-                .textFieldStyle(.roundedBorder)
-            Button {
-                Task { await saveRemote() }
-            } label: {
-                HStack { if saving { ProgressView().controlSize(.small) }; Text("Save remote") }
-            }
-            .brandPrimary()
-            .disabled(saving || trimmedFormName.isEmpty || trimmedFormURL.isEmpty)
-            Text("The token is sent once to the localhost sidecar and stored in ~/.gemdex/.env. It is never returned to this app.")
-                .font(.caption).foregroundStyle(.secondary)
+            .font(.caption)
         }
     }
 
@@ -254,145 +162,8 @@ struct StorageSettingsView: View {
         }
     }
 
-    private var canUseSelectedRemote: Bool {
-        remotes.first { $0.name == selectedRemote }?.hasToken ?? false
-    }
-
-    private var trimmedFormName: String { formName.trimmingCharacters(in: .whitespaces) }
-    private var trimmedFormURL: String { formURL.trimmingCharacters(in: .whitespaces) }
-
-    // MARK: - Actions
-
     private func refresh() async {
-        await model.refreshSettings()
         await model.refreshConfig()
         await model.refreshEmbeddingStatus()
-        if selectedRemote.isEmpty {
-            selectedRemote = model.config?.activeRemote?.name ?? remotes.first?.name ?? ""
-        }
-        populateForm()
-        if settings?.mode == "remote" {
-            let label = selectedRemote.isEmpty ? "remote storage" : selectedRemote
-            status = "Using \(label)."
-        } else {
-            status = "Using the embedded local store."
-        }
-        statusIsError = false
-    }
-
-    private func populateForm() {
-        guard let remote = remotes.first(where: { $0.name == selectedRemote }) else { return }
-        formName = remote.name
-        formURL = remote.url
-        formToken = ""
-    }
-
-    private func apply(mode: String, name: String? = nil) async {
-        error = nil
-        do {
-            try await model.applyMode(mode, name: name)
-            await refresh()
-        } catch {
-            self.error = error.localizedDescription
-        }
-    }
-
-    private func saveRemote() async {
-        error = nil
-        saving = true
-        defer { saving = false }
-        do {
-            try await model.saveRemote(name: trimmedFormName,
-                                       url: trimmedFormURL,
-                                       token: formToken.isEmpty ? nil : formToken)
-            formToken = ""
-            await model.refreshSettings()
-            selectedRemote = trimmedFormName
-            status = "Saved \(selectedRemote)."
-            statusIsError = false
-        } catch {
-            self.error = error.localizedDescription
-        }
-    }
-
-    private func testRemote() async {
-        status = "Testing \(selectedRemote)…"
-        statusIsError = false
-        do {
-            let result = try await model.testRemote(selectedRemote)
-            if result.authenticated {
-                status = "\(selectedRemote) is reachable and authenticated."
-                statusIsError = false
-            } else if result.reachable {
-                status = "\(selectedRemote) is reachable but authentication failed. \(result.detail ?? "")"
-                statusIsError = true
-            } else {
-                status = "\(selectedRemote) is unreachable. \(result.detail ?? "")"
-                statusIsError = true
-            }
-        } catch {
-            status = error.localizedDescription
-            statusIsError = true
-        }
-    }
-
-    private func importLocal() async {
-        status = "Importing local memories to \(selectedRemote)…"
-        statusIsError = false
-        do {
-            let result = try await model.importLocalToRemote(selectedRemote)
-            status = "Imported \(result.created) new, updated \(result.updated), skipped \(result.skipped)."
-            statusIsError = false
-        } catch {
-            status = error.localizedDescription
-            statusIsError = true
-        }
-    }
-
-    private func removeRemote() async {
-        error = nil
-        do {
-            try await model.removeRemote(selectedRemote)
-            await model.refreshSettings()
-            selectedRemote = remotes.first?.name ?? ""
-            populateForm()
-            status = "Removed remote."
-            statusIsError = false
-        } catch {
-            self.error = error.localizedDescription
-        }
-    }
-}
-
-/// A selectable backend-mode card.
-struct ModeCard: View {
-    let title: String
-    let subtitle: String
-    let active: Bool
-    var disabled: Bool = false
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text(title).font(.headline)
-                    Spacer()
-                    if active { Image(systemName: "checkmark.circle.fill").foregroundStyle(Brand.sage) }
-                }
-                Text(subtitle).font(.caption).foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .padding(16)
-            .frame(maxWidth: .infinity)
-            .glassSurfaceInteractive(cornerRadius: Metric.radiusCard, tint: active ? Brand.gold : nil)
-            .overlay(
-                RoundedRectangle(cornerRadius: Metric.radiusCard, style: .continuous)
-                    .strokeBorder(active ? Brand.gold : Color.clear, lineWidth: active ? 1.5 : 0)
-            )
-        }
-        .buttonStyle(.plain)
-        .disabled(disabled)
-        .opacity(disabled ? 0.55 : 1)
     }
 }

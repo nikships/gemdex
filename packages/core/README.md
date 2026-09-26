@@ -1,50 +1,64 @@
 # gemdex-core
 
-Memory-layer engine for [Gemdex](https://github.com/nikships/gemdex) — a global,
-persistent memory store for AI coding agents, powered by Gemini embeddings and
-embedded LanceDB hybrid retrieval.
+The shared engine for [Gemdex](https://github.com/nikships/gemdex): local
+LanceDB text storage, parent-document retrieval, embedding providers, shared
+HTTP data routes, session parsing/digestion, and memory hygiene.
 
-```bash
-npm install gemdex-core
-```
+## Local library use
+
+Install the package with `npm install gemdex-core`. Local MLX inference requires
+native arm64 macOS 14+ and an explicitly installed runtime/model. The
+`npx gemdex-mcp install` command manages that installation; normal inference
+never downloads anything.
 
 ```ts
-import { MemoryStore, LanceDBVectorDatabase, GeminiEmbedding } from 'gemdex-core';
+import {
+  MemoryStore,
+  LanceDBVectorDatabase,
+  MlxEmbedding,
+  LEGACY_GEMINI_COLLECTION,
+} from 'gemdex-core';
 
 const memory = new MemoryStore({
-  embedding: new GeminiEmbedding({ apiKey: process.env.GEMINI_API_KEY! }),
-  // No daemon required. By default LanceDB persists under ~/.gemdex/lance.
+  embedding: new MlxEmbedding(),
   vectorDatabase: new LanceDBVectorDatabase(),
+  legacyCollectionName: LEGACY_GEMINI_COLLECTION,
 });
 
-const { id } = await memory.save({ content: 'how we deploy: …', title: 'Deploy' });
+await memory.save({ content: 'How we deploy: …', title: 'Deploy' });
 const hits = await memory.recall('how do we deploy', 5);
-console.log(hits[0].content); // full memory, never a fragment
+console.log(hits[0]?.content); // whole parent, never a fragment
 ```
 
-`MemoryStore` uses parent-document chunking: long memories are split into
-retrieval chunks for sharp hybrid (dense + BM25) matching, but `recall` always
-resolves matches back to the complete parent memory, deduped by id.
+`MemoryStore` indexes chunks in `memories_mlx_bge_m3_8bit` and resolves
+hybrid dense + BM25 matches to full parents. Its attachments are non-embedded
+text-file blobs; media queries and new media attachments are unsupported.
 
-To use a self-hosted Gemdex Server, swap in the HTTP backend. The server owns
-embedding execution, so remote clients do not need `GEMINI_API_KEY`:
+### Upgrade from Gemini-based releases
 
-```ts
-import { RemoteMemoryBackend } from 'gemdex-core';
+Pass `legacyCollectionName: LEGACY_GEMINI_COLLECTION` to access the older
+`memories` table. List/get/update/delete/export can access legacy parents;
+recall and hygiene reject a populated legacy table. `memory.migrateLegacy()`
+re-embeds text (or the title of a media-only parent), preserving timestamps,
+metadata and blob bytes. Legacy media remains readable, not media-searchable.
+Back up the store before migration.
 
-const memory = new RemoteMemoryBackend({
-  url: process.env.GEMDEX_REMOTE_URL!,
-  token: process.env.GEMDEX_REMOTE_TOKEN!,
-});
+## Shared server functionality
 
-await memory.save({ content: 'stored and embedded by my server' });
-const hits = await memory.recall('stored by my server');
-```
+`MemoryBackend` defines the storage boundary; `LocalMemoryBackend` adapts
+`MemoryStore`. The self-hosted server supplies `PostgresMemoryBackend` and
+uses core's `GeminiEmbedding` for multimodal embedding. The
+`handleMemoryApiRequest` router serves both sidecar and server with the same
+data-route shapes, while each shell owns authentication and setup.
 
-`RemoteMemoryBackend` accepts inline base64 attachments only. Resolve local file
-paths in the calling integration before invoking it.
+Local inference uses `ClaudeCodeDigester` and `ClusterJudge` through isolated
+Claude Code Haiku calls. The server's uploaded-session path uses
+`SessionDigester` with its server-owned Gemini key. Both share session parsing,
+digest rendering and deterministic memory ids.
 
-See the [main repo](https://github.com/nikships/gemdex) for full documentation.
+For self-hosted agents, use [HTTP MCP](../mcp-http/README.md); for direct HTTP
+integrations, see the [/v1 contract](../../docs/BYOI_REMOTE_MODE.md).
+See [MLX runtime details](../../docs/MLX_MODELS.md) for platform and model limits.
 
 ## License
 
