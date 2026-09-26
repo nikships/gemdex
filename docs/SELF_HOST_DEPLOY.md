@@ -68,9 +68,10 @@ the UI unable to delete.
 ## Why `deploy/` and not `packages/server/docker-compose.yml`
 
 The existing `packages/server/docker-compose.yml` stays as-is: it is the
-**BYOI-only** stack, the thing `npm run init` sets up, and it is what the
-desktop app talks to on a single machine. `deploy/` is the **full remote-agent
-stack** — it adds the MCP surface and the public edge, and is a deployment
+**BYOI-only** stack, the thing `npm run init` sets up for private `/v1` clients.
+The desktop app uses its local MLX sidecar instead.
+`deploy/` is the **full remote-agent stack**, adding HTTP MCP and the web manager
+behind your configured public edge. It is a deployment
 concern spanning two packages rather than a property of either.
 
 They use different compose project names (`gemdex` vs `gemdex-deploy`), so both
@@ -444,30 +445,17 @@ allowlisted Google account, and it stores the token itself. No bearer to paste.
 }
 ```
 
-### Sync chat history from each machine
+### Import prepared chat records
 
-Agents read and write memories through `/mcp`. To also feed this deployment your
-**coding-agent chat history**, run `sync-history` on each machine you code on:
+Authorized OAuth clients can submit already-digested `chat:` records to
+`POST /mcp/sync/records`. The route uses the same verified-identity allowlist
+as the tools and is covered by the `/mcp` edge rule. It is not an MCP tool
+or an npx CLI command. See [request limits and ids](CHAT_HISTORY.md#oauth-record-import).
 
-```sh
-export GEMDEX_SYNC_URL=https://gemdex.example.com/mcp
-npx gemdex sync-history --source claude --dry-run   # scan + cost estimate
-npx gemdex sync-history --source claude
-```
+### Upload sessions from the browser
 
-It authorizes in the browser once (same allowlisted Google account), then posts
-each digest to `POST /mcp/sync/records` — under `/mcp`, so the edge rules you
-already wrote cover it, and it is authenticated by the same allowlist as the
-tools. Digests are generated on the client with that machine's `GEMINI_API_KEY`;
-session ids are deterministic, so running it repeatedly (or from five machines)
-upserts rather than duplicates.
-
-### Or upload sessions from the browser
-
-The web manager's **Upload sessions** page is the other half of the same
-feature, for the cases the CLI cannot cover: a machine where you will not install
-the CLI, a transcript someone exported and sent you, or a laptop with no Gemini
-key of its own.
+The web manager's **Upload sessions** page accepts transcripts from any machine.
+No local embedding runtime, inference CLI, or model API key is needed.
 
 Drop `.jsonl` transcripts (or a `.zip` of them) and **this deployment** does the
 cleaning and digesting, using the `GEMINI_API_KEY` you already set for
@@ -475,14 +463,15 @@ cleaning and digesting, using the `GEMINI_API_KEY` you already set for
 `gemdex-web`: it forwards the transcripts to `gemdex-server`, which is the only
 container that has the ingest pipeline, the key, and the database together.
 
-Both routes converge on the same `chat:<source>:<sessionId>` memory, so a session
-you upload after having synced it is **updated, not duplicated** — mixing the two
-paths is safe. If uploads answer `503`, `GEMINI_API_KEY` is missing from
-`gemdex-server`'s environment (recall and browsing keep working; only digesting
-needs it).
+Uploads derive `chat:<source>:<sessionId>` ids, so records with the same id
+are updated rather than duplicated. If uploads answer `503`, check the
+server's `GEMINI_API_KEY` and backend configuration. Browsing stored records
+does not embed; recall does need server embedding.
 
-For a side-by-side comparison of both paths (plus host-local `ingest-history`)
-and guidance on which to use, see [chat-history ingestion](CHAT_HISTORY.md).
+Host-local automation can send raw transcripts directly to the private
+`/v1/sessions/ingest` endpoint. Running `npx gemdex-mcp ingest-history` on a
+host writes only to its separate local LanceDB pool.
+See [chat-history ingestion](CHAT_HISTORY.md) for the distinction.
 
 ## 6. Verify the memory plane is NOT public
 

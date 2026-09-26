@@ -30,14 +30,14 @@ the stats ledger — is **re-implemented here and must be kept in sync by hand**
 | File | Role |
 |------|------|
 | `config.py` | `load_config()` — env → frozen `Config`. Fail-fast: raises `ConfigError` rather than booting broken. `EnvSource` mirrors core's `EnvManager` precedence (`process.env` → `~/.gemdex/.env`). |
-| `byoi.py` | `ByoiClient` — the async `/v1` client. **The only module that touches the network.** Python analogue of core's `RemoteMemoryBackend`. |
+| `byoi.py` | `ByoiClient`, the async `/v1` client. **The only module that touches the memory API network.** |
 | `formatting.py` | Pure render helpers ported 1:1 from TS `handlers.ts` (+ `apply_content_edits` from core's `content-edits.ts`). No I/O, no state. |
 | `stats.py` | `MemoryStatsStore` — the `~/.gemdex/stats.json` outcome ledger, same file/format as core's TS store. |
 | `tools.py` | `GemdexTools` — the six wrappers: validate args → call BYOI → render. Mirrors `handlers.ts`. |
 | `descriptions.py` | Tool descriptions copied from TS `index.ts`, with the attachment-path caveat swapped in. |
 | `auth.py` | `build_auth_provider()` — **the single auth seam.** Static bearer, or `SingleUserGoogleProvider` (OAuth 2.1 + email allowlist). |
 | `server.py` | `build_server()` + `main()`. Registers tools + `/healthz` + the sync route, runs `mcp.run(transport="http", …)`. |
-| `sync.py` | `POST /mcp/sync/records` — the chat-digest ingest route used by `gemdex sync-history`. Enforces auth itself (custom routes are auth-exempt), validates records, delegates to `ByoiClient.import_records`. **Not a tool.** |
+| `sync.py` | `POST /mcp/sync/records`, prepared chat-record import for authorized OAuth clients (or static bearer clients in static mode). Enforces auth itself because custom routes are auth-exempt; validates records and delegates to `ByoiClient.import_records`. **Not a tool or an npx CLI command.** |
 
 ## Three invariants that are easy to break
 
@@ -136,7 +136,7 @@ has no reason to have. `test_sync_route.py` asserts the tool list stays at six.
 
 ## Other gotchas
 
-- **Six tools, no delete on this HTTP surface** — stdio MCP now has
+- **Six tools, no delete on this HTTP surface**; stdio MCP has
   `delete_memory`; HTTP MCP deliberately still does not. `test_no_delete_tool`
   guards it. The sync route is not a tool and must not become one.
 - **`ToolError`, never a raw exception.** Matches the TS handlers' "never throw

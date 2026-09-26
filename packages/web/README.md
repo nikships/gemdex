@@ -140,20 +140,15 @@ omission.
 `.zip` of them — and turns each into a digested, recallable memory with the
 full cleaned transcript attached.
 
-This is the browser half of chat-history ingestion. There are two paths and
-they converge:
+This is the raw-transcript ingestion path for the self-hosted pool.
+The server generates digests with Gemini. An authorized OAuth client can also
+import prepared digest records through HTTP MCP's `/mcp/sync/records` route.
+The local npx `ingest-history` command uses Claude Code and writes to a
+separate local pool, not this deployment.
 
-| | Path A — `gemdex sync-history` | Path B — this page |
-|---|---|---|
-| Runs on | the developer's laptop | the deployment |
-| Needs a Gemini key on | the laptop | `gemdex-server` (already there) |
-| Reads sessions from | local `~/.claude`, `~/.codex`, `~/.factory` | whatever the human uploads |
-| Good for | your own machine, repeatable | a machine that never ran the CLI, an exported or shared transcript |
-
-Both produce the **same memory**: same cleaning, same digest prompt, and the
-same deterministic `chat:<source>:<sessionId>` id. That id is why re-uploading
-a session **updates** it rather than creating a duplicate, and why a session
-already synced from a laptop is upserted rather than doubled.
+Built-in ingestion derives `chat:<source>:<sessionId>` ids. Re-uploading a
+session updates that id rather than creating a duplicate. See
+[chat-history paths](../../docs/CHAT_HISTORY.md) for id and ledger semantics.
 
 ### Where the digesting happens
 
@@ -165,12 +160,12 @@ That is because the ingest pipeline is `gemdex-core` — TypeScript — and this
 service is Python and cannot import it. Porting it would mean two
 implementations of the same digest drifting apart; bundling Node here would put
 a second toolchain in a runtime image that deliberately drops it, and a Gemini
-key in a third container. **`GEMINI_API_KEY` therefore stays exactly where it
-already was: on `gemdex-server`.** This service never sees it.
+key in a third container. **Only `gemdex-server` holds `GEMINI_API_KEY`.**
+This service never sees it.
 
 If the BYOI has no key, an upload answers `503` naming `GEMINI_API_KEY` rather
-than a generic failure — recall and browsing keep working, only digesting is
-unavailable.
+than a generic failure. Browsing stored records needs no embedding call;
+recall and other embedding operations also need the server key.
 
 ### Limits
 
@@ -192,12 +187,10 @@ skipped rather than recursed.
 per agent and per repo.
 
 **It is derived from the pool, not from a ledger, because no host-side ledger
-exists.** `gemdex sync-history` keeps its ledger (`~/.gemdex/ingest.json`, keyed
-by absolute path + mtime) on each *laptop*; the host only ever received finished
-records. Web upload returns a per-request summary that the browser shows and
-discards. So the memories are the only durable record of what was ingested —
-which is also the record that cannot drift, needs no new schema, and describes
-both paths identically because both write the same kind of memory.
+exists for uploads.** Local `ingest-history` uses a path-based ledger on its
+own machine; the web service does not read it. Web upload returns a per-request
+summary, while the pool retains the digest memories. The history view covers
+uploads and prepared-record imports by reading those records.
 
 The deterministic `chat:<source>:<sessionId>` id makes this exact: filtering on
 that prefix yields precisely the ingested sessions, and the `<source>` segment is
@@ -222,24 +215,17 @@ Hygiene's phase 1 clusters near-duplicates from per-memory vectors via
 `MemoryStore.listParentsWithVectors()` — a method on the **local LanceDB** store.
 It is not on the `MemoryBackend` interface, `PostgresMemoryBackend` has no
 equivalent, and `/v1` exposes no vector-listing route. The `gemdex serve` sidecar
-that *does* expose hygiene routes rejects anything but local mode outright. So
+that exposes hygiene routes operates only on local LanceDB. So
 host-side hygiene needs a new `/v1` route plus a pgvector clustering
 implementation — new infrastructure, and its own decision.
 
-Rather than a control that always fails, the endpoint reports what actually
-protects the pool today:
+Deterministic chat ids make repeated imports upsert rather than duplicate.
+Deletion is a human action in the web manager. HTTP MCP omits delete; the
+separate local stdio surface includes `delete_memory`.
 
-- **Save-time similar-memory detection** (`GEMDEX_SIMILAR_THRESHOLD`, default
-  `0.90` — the same cosine scale hygiene clusters on). Duplicate *prevention*,
-  running automatically on every save.
-- **Ingested sessions cannot duplicate at all**, thanks to the deterministic id.
-  Since chat digests dominate a real pool, most of it is structurally
-  duplicate-free.
-- **Deletion stays a human action** — the same reason no agent tool can delete.
-
-…and the exact command for a real pass (`npx gemdex serve`, or the desktop app),
-with the caveat that a local run inspects *that machine's* `~/.gemdex` pool
-rather than this one.
+The local sidecar (`npx gemdex-mcp serve`, or the desktop app) inspects only
+that machine's `~/.gemdex` pool. Its save-time similarity and hygiene checks
+do not run against this deployment.
 
 ## Not in scope here
 

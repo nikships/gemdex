@@ -6,9 +6,12 @@ import SwiftUI
 /// terminal state after finish so the user always knows what happened.
 struct ActivityRail: View {
     @EnvironmentObject var model: AppModel
+    /// The job whose own panel is on screen; that panel already shows its
+    /// progress and Cancel, so repeating it here would only duplicate controls.
+    var hiding: JobKind? = nil
 
     var body: some View {
-        let jobs = model.activityList
+        let jobs = model.activityList.filter { $0.kind != hiding }
         if !jobs.isEmpty {
             VStack(spacing: 0) {
                 ForEach(jobs) { job in
@@ -18,7 +21,9 @@ struct ActivityRail: View {
                     }
                 }
             }
-            .overlay(alignment: .bottom) { Divider() }
+            .clipShape(RoundedRectangle(cornerRadius: Metric.radiusCard, style: .continuous))
+            .glassSurface(cornerRadius: Metric.radiusCard)
+            .frame(maxWidth: 620)
         }
     }
 }
@@ -86,9 +91,6 @@ private struct ActivityRow: View {
         case .running:
             Image(systemName: job.kind.systemImage)
                 .foregroundStyle(accent)
-        case .batchPending:
-            Image(systemName: "clock.arrow.circlepath")
-                .foregroundStyle(Brand.gold)
         case .cancelling:
             ProgressView()
                 .controlSize(.small)
@@ -107,15 +109,6 @@ private struct ActivityRow: View {
     @ViewBuilder
     private var actionButtons: some View {
         HStack(spacing: 6) {
-            if job.phase == .batchPending {
-                Button("Collect") {
-                    model.openActivity(.ingest)
-                }
-                .controlSize(.small)
-                .buttonStyle(.borderedProminent)
-                .tint(Brand.gold)
-            }
-
             if job.canCancel, job.isActive {
                 Button("Cancel") {
                     model.cancelActivity(job.kind)
@@ -124,8 +117,8 @@ private struct ActivityRow: View {
                 .help(cancelHelp)
             }
 
-            if job.canOpen, job.isActive || job.phase == .batchPending {
-                Button(job.phase == .batchPending ? "Open" : "Show") {
+            if job.canOpen, job.isActive {
+                Button("Show") {
                     model.openActivity(job.kind)
                 }
                 .controlSize(.small)
@@ -157,7 +150,6 @@ private struct ActivityRow: View {
         case .ingest: return Brand.gold
         case .hygiene: return Brand.sage
         case .importFile: return Brand.gold
-        case .migration: return Brand.sage
         case .embedding: return Brand.sage
         }
     }
@@ -167,7 +159,7 @@ private struct ActivityRow: View {
         case .failed: return Brand.terracotta
         case .completed: return Brand.sage
         case .cancelled: return Color.secondary
-        case .batchPending, .running, .cancelling: return accent
+        case .running, .cancelling: return accent
         }
     }
 
@@ -179,7 +171,7 @@ private struct ActivityRow: View {
             return "Stop analysis. Partial findings are kept so you can review what finished."
         case .importFile:
             return "Stop after the current batch. Already-imported memories stay."
-        case .migration, .embedding:
+        case .embedding:
             return "This job cannot be cancelled mid-flight."
         }
     }

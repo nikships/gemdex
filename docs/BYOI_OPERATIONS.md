@@ -1,7 +1,8 @@
 # Self-Hosting Gemdex (BYOI)
 
-Gemdex BYOI mode runs one user-owned Gemdex Server for MCP, CLI, and desktop
-clients. Gemdex does not provide a hosted control plane, account system, or
+Gemdex BYOI runs one user-owned Gemdex Server for HTTP MCP and the web manager.
+The npx package and desktop sidecar manage a separate local pool.
+Gemdex does not provide a hosted control plane, account system, or
 custody service. You operate the server, bearer token, Gemini key, Postgres
 database, and attachment storage.
 
@@ -16,7 +17,7 @@ setting and endpoint.
 - A DNS name if clients connect over a network.
 - A Google AI Studio API key for `gemini-embedding-2`.
 - TLS termination, normally Caddy, nginx, Traefik, or a private-network ingress.
-- Node.js 20 or newer on each machine that runs `gemdex-mcp`.
+- An MCP client with Streamable HTTP support on each agent machine.
 
 The Compose port binds to `127.0.0.1` by default. That is intentional: put a
 TLS reverse proxy on the same host, or keep the service reachable only through
@@ -24,9 +25,9 @@ a trusted private network.
 
 ## End-to-End Quickstart
 
-The fast path is two commands: `npm run init` on the server host, then
-`gemdex init-remote` on each client. The manual equivalents are documented after
-each, so you can see exactly what the helpers do.
+For the complete stack, use [the deployment guide](SELF_HOST_DEPLOY.md).
+The server-only Compose setup below provides private `/v1` access; agents
+connect through the separate HTTP MCP service, not through the npx package.
 
 ### 1. Start the Server
 
@@ -39,7 +40,7 @@ npm run init
 `npm run init` checks Docker is running, generates the bearer token and Postgres
 password, writes `.env` (mode `0600`), prompts for your `GEMINI_API_KEY` (or
 reads it from the environment), builds and starts the Compose stack, waits for
-health, and prints the **bearer token** plus the client command to run next. The
+health, and prints connection details including the **bearer token**. The
 first start creates Postgres, enables pgvector, applies all schema migrations,
 and creates the file-backed attachment volume.
 
@@ -89,51 +90,23 @@ been deliberately redesigned and isolated.
 
 ### 3. Configure the MCP Client
 
-On each client machine, one command stores the remote, verifies the server, and
-switches to remote mode:
+Deploy [HTTP MCP](../packages/mcp-http/README.md) with access to the private
+BYOI URL and bearer token. For public agents, follow the
+[Google OAuth and HTTPS setup](SELF_HOST_DEPLOY.md#5-connect-a-client):
 
-```sh
-npx -y gemdex-mcp@latest init-remote production https://memory.example.com
-# paste the bearer token from step 1 when prompted
+```json
+{
+  "mcpServers": {
+    "gemdex": {
+      "type": "http",
+      "url": "https://gemdex.example.com/mcp"
+    }
+  }
+}
 ```
 
-`init-remote` adds the named remote, checks the server is reachable and
-version-compatible, confirms the token authenticates, switches Gemdex into
-remote mode, and prints the agent command to run. Add `--import-local` to also
-copy this machine's existing local memories into the server in the same step.
-For automation, pipe the token with `--token-stdin`; to manage the secret
-externally, use `--token-env MY_TOKEN_VAR`.
-
-Named remote metadata is stored in `~/.gemdex/config.json`; its token is stored
-separately in `~/.gemdex/.env` with user-only permissions and is never printed.
-Remote clients do not need `GEMINI_API_KEY`: embedding runs on your server.
-
-<details>
-<summary>Manual equivalent (individual commands)</summary>
-
-```sh
-read -rsp "Gemdex bearer token: " GEMDEX_TOKEN; echo
-printf %s "$GEMDEX_TOKEN" |
-  npx -y gemdex-mcp@latest remote add production \
-    https://memory.example.com --token-stdin
-
-npx -y gemdex-mcp@latest mode remote production
-npx -y gemdex-mcp@latest status
-unset GEMDEX_TOKEN
-```
-
-`status` should report both `Reachable: yes` and `Authenticated: yes`.
-</details>
-
-Add the MCP process to the client. For Claude Code:
-
-```sh
-claude mcp add gemdex -- npx -y gemdex-mcp@latest
-```
-
-For another MCP client, configure `npx` with
-`["-y", "gemdex-mcp@latest"]`. The process reads the selected remote from the
-same `~/.gemdex` configuration.
+The client owns its OAuth login; it needs neither the BYOI bearer nor the
+server's `GEMINI_API_KEY`.
 
 Start a new agent session and exercise both directions:
 
@@ -147,40 +120,17 @@ Then:
 Recall the BYOI smoke-test phrase from memory.
 ```
 
-That verifies MCP stdio, bearer authentication, server-owned Gemini embedding,
+That verifies HTTP MCP, authentication, server-owned Gemini embedding,
 Postgres/pgvector storage, and remote recall.
 
 ## Running Local and Remote Side by Side
 
-Mode is resolved per process from `GEMDEX_MODE`, so one machine can run two
-independent memory pools at once: the embedded local store **and** a remote
-server. They never merge — each MCP server queries only its own backend.
-
-Register two MCP servers with explicit env (process env overrides the
-`~/.gemdex` config, so this does not disturb the CLI's selected mode). For
-Claude Code:
-
-```sh
-# Pool 1 — embedded local store on this machine (needs a Gemini key)
-claude mcp add gemdex-local \
-  -e GEMDEX_MODE=local \
-  -e GEMINI_API_KEY=your-google-ai-key \
-  -- npx -y gemdex-mcp@latest
-
-# Pool 2 — the remote BYOI server (no Gemini key on the client)
-claude mcp add gemdex-remote \
-  -e GEMDEX_MODE=remote \
-  -e GEMDEX_REMOTE_URL=https://memory.example.com \
-  -e GEMDEX_REMOTE_TOKEN=your-server-token \
-  -- npx -y gemdex-mcp@latest
-```
-
-The agent then sees both tool sets, namespaced by server (`gemdex-local` and
-`gemdex-remote`). Tell it which pool is which — for example, remote for shared
-cross-machine knowledge and local for machine-private scratch. Do not use
-`gemdex mode local|remote` for this: that flag stores one shared mode in
-`~/.gemdex` and is one-at-a-time by design; pass `GEMDEX_MODE` per server
-instead.
+Register the local npx stdio server and the self-hosted HTTP MCP URL under
+different names in your client. Each queries only its own pool. The local
+package requires its explicit MLX installation on Apple Silicon; HTTP clients
+need no local embedding runtime. Tell the agent which pool to use.
+For data transfer, export portable records and import through the destination
+manager or authenticated API. This is an explicit copy, not shared storage.
 
 ## Security and Custody
 
@@ -225,41 +175,19 @@ such as `chat:factory:<sessionId>` import and persist as-is; real UUID strings
 remain valid. Attachment kind also allows `file` for non-embedded source blobs
 (full chat transcripts).
 
-### Option C — chat digests + transcript attachments (redeploy / re-import)
+### Chat digests and transcript attachments
 
-After deploying a build that includes migration `003` and the transcript
-attachment path:
+Use the web manager to upload raw transcripts; the server digests with Gemini
+and stores cleaned transcript blobs. Authorized OAuth clients can also import
+prepared `chat:` records through `POST /mcp/sync/records`. See
+[chat-history paths](CHAT_HISTORY.md) for request limits and idempotence.
 
-1. **Rebuild and restart the server** so migrations apply:
-
-   ```sh
-   cd packages/server
-   docker compose up -d --build
-   # or: docker compose run --rm gemdex-server migrate
-   curl --fail http://127.0.0.1:8765/v1/health
-   ```
-
-2. **Import / re-import local digests with transcript blobs**. Prefer attaching
-   transcripts during import (parses each digest’s `Full transcript: <path>`
-   footer; missing files are skipped with a message, not a hard failure):
-
-   ```sh
-   # From a machine that still has ~/.gemdex Lance data + the transcript files:
-   gemdex import-local-to-remote production --attach-transcripts
-
-   # Or re-attach on the active backend (local or remote):
-   gemdex backfill-transcripts --dry-run
-   gemdex backfill-transcripts          # active backend
-   gemdex backfill-transcripts production
-   ```
-
-3. **MCP clients** pick up `read_attachment` automatically after upgrading
-   `gemdex-mcp`. No config change is required. Agents should use
-   `read_attachment` with the digest memory id to fetch the full transcript in
-   remote mode (no local path, no `GEMINI_API_KEY`).
-
-New `ingest-history` runs attach the transcript on first save. Re-ingest of
-already-ledgersed sessions remains intentionally disabled (new-sessions-only).
+For local digest records that reference only a path footer, the local
+`backfill-transcripts` command can attach the source file before export.
+It does not write to BYOI. Export and import the resulting records explicitly,
+or upload the original transcript through the web manager.
+HTTP MCP `read_attachment` fetches stored bytes without client filesystem
+access or a client embedding key.
 
 ### File Attachment Storage
 
@@ -372,11 +300,11 @@ the matching pre-upgrade backup when rollback is required.
 
 ### Health Works but Authentication Fails
 
-- Run `npx -y gemdex-mcp@latest status`.
+- Check HTTP MCP and server logs; local npx status does not probe BYOI.
 - A `401` means the client token is absent or differs from
   `GEMDEX_SERVER_TOKEN`.
-- Update the named remote, restart the MCP client, and check that the reverse
-  proxy forwards the `Authorization` header.
+- Check the HTTP service's `GEMDEX_SERVER_TOKEN` and that the private proxy
+  forwards `Authorization`. Public clients authenticate separately to HTTP MCP.
 - A `403` in a browser can instead mean its exact origin is missing from
   `GEMDEX_SERVER_ALLOWED_ORIGINS`.
 
@@ -398,7 +326,7 @@ For an optional real-Gemini smoke test after deterministic CI passes, create a
 throwaway memory and recall it using the authenticated curl commands in
 [`packages/server/README.md`](../packages/server/README.md#server-owned-embeddings).
 Use a real image for media testing; tiny placeholder images are rejected by
-Gemini. Remove the throwaway memory afterward through the desktop app or the
+Gemini. Remove the throwaway memory afterward through the web manager or the
 authenticated `DELETE /v1/memories/:id` route.
 
 ### Database or Migration Failure
@@ -421,9 +349,9 @@ curl --fail https://memory.example.com/v1/version
 ```
 
 Compare `apiVersion`, `protocolVersion`, and `minClientVersion` with the client
-release in use. Upgrade `gemdex-mcp` with `@latest`, or deploy a server revision
-compatible with that client. After server upgrades, rerun `status` before
-reconnecting agent sessions.
+release in use. Upgrade the HTTP integration or deploy a compatible server.
+After server upgrades, verify authenticated save and recall through HTTP MCP
+before reconnecting agent sessions.
 
 ### Network or Proxy Failure
 

@@ -248,15 +248,6 @@ check_dependencies() {
     fi
 
     ok "docker $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo 'ok') with compose v2"
-
-    # Node is genuinely optional: the stack runs entirely in containers. It is
-    # only needed for the *stdio* MCP client option printed at the end.
-    if require_cmd node; then
-        ok "node $(node --version 2>/dev/null) (enables the stdio MCP option)"
-    else
-        dim 'node not found — optional. The HTTP MCP endpoint works without it;'
-        dim 'the stdio client option needs npx (install Node 24+ to use it).'
-    fi
 }
 
 # --- source resolution ------------------------------------------------------
@@ -785,26 +776,6 @@ print_summary() {
         "url": "http://${mcp_host}:${MCP_PORT}/mcp",
         "headers": {
           "Authorization": "Bearer ${mcp_token}"
-        }
-      }
-    }
-  }
-
-JSON
-
-    printf '  %sstdio%s — for clients without HTTP transport (needs Node 24+).\n' "$C_BOLD" "$C_RESET"
-    printf '  %sRun this on the machine hosting the stack%s — it talks to the memory API\n' "$C_DIM" "$C_RESET"
-    printf '  %sdirectly over loopback, which is not reachable from other devices.%s\n\n' "$C_DIM" "$C_RESET"
-    cat <<JSON
-  {
-    "mcpServers": {
-      "gemdex": {
-        "command": "npx",
-        "args": ["-y", "gemdex-mcp@latest"],
-        "env": {
-          "GEMDEX_MODE": "remote",
-          "GEMDEX_REMOTE_URL": "http://127.0.0.1:${BYOI_PORT}",
-          "GEMDEX_REMOTE_TOKEN": "$(env_value GEMDEX_SERVER_TOKEN "$ENV_FILE")"
         }
       }
     }

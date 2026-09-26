@@ -2,10 +2,10 @@ import SwiftUI
 import AppKit
 
 /// Ingest coding-agent chat history as memories. Four-step flow:
-/// pick sources → scan (buckets + cost estimate + model choice) → run with
-/// live progress (or submit a Batch API job) → done summary. The heavy lifting
-/// lives in gemdex-core's IngestManager behind the sidecar's `/ingest/*`
-/// routes; this view is a thin polling client.
+/// pick sources → scan (buckets + list-price estimate) → run with live
+/// progress → done summary. Digests are written by the local Claude Code CLI
+/// behind the sidecar's `/ingest/*` routes; this view is a thin client over
+/// the Activity Center's polled status.
 @MainActor
 struct IngestView: View {
     @EnvironmentObject var model: AppModel
@@ -16,7 +16,6 @@ struct IngestView: View {
         case sources
         case scanned
         case running
-        case batchSubmitted
         case done
     }
 
@@ -26,9 +25,7 @@ struct IngestView: View {
     @State private var selectedCustom: Set<String> = []
     @State private var scan: IngestScanSummary?
     @State private var selectedModel = ""
-    @State private var useBatch = false
     @State private var status: IngestStatus?
-    @State private var collectResult: IngestCollectResult?
     @State private var busy = false
     @State private var error: String?
 
@@ -97,21 +94,17 @@ struct IngestView: View {
     @ViewBuilder
     private var footer: some View {
         HStack {
-            if step == .sources, model.pendingIngestBatch != nil {
-                Button("Collect Pending Batch") { Task { await collect() } }
-                    .disabled(busy)
-            }
             Spacer()
             switch step {
             case .sources:
                 Button("Scan New Sessions") { Task { await runScan() } }
                     .buttonStyle(BrandButtonStyle())
-                    .disabled(busy || !hasSelection || !(sources?.ingestReady ?? false))
+                    .disabled(busy || !hasSelection || !ingestReady)
             case .scanned:
                 Button("Back") { step = .sources; scan = nil; error = nil }
-                Button(useBatch ? "Submit Batch Job" : "Start Ingestion") { Task { await start() } }
+                Button("Start Ingestion") { Task { await start() } }
                     .buttonStyle(BrandButtonStyle())
-                    .disabled(busy || (scan?.pendingCount ?? 0) == 0 || !(sources?.ingestReady ?? false))
+                    .disabled(busy || (scan?.pendingCount ?? 0) == 0 || !ingestReady)
             case .running:
                 Text(model.activities[.ingest]?.phase == .cancelling
                      ? "Cancelling… already-saved digests are kept"
@@ -121,16 +114,11 @@ struct IngestView: View {
                 Spacer(minLength: 8)
                 Button("Cancel") { model.cancelActivity(.ingest) }
                     .disabled(busy || model.activities[.ingest]?.phase == .cancelling)
-            case .batchSubmitted:
-                Button("Collect Results") { Task { await collect() } }
-                    .buttonStyle(BrandButtonStyle())
-                    .disabled(busy)
             case .done:
                 Button("Ingest more") {
                     step = .sources
                     scan = nil
                     status = nil
-                    collectResult = nil
                     error = nil
                 }
                 Button("Done") { close() }
@@ -148,7 +136,6 @@ struct IngestView: View {
         case .sources: sourcesStep
         case .scanned: scannedStep
         case .running: runningStep
-        case .batchSubmitted: batchSubmittedStep
         case .done: doneStep
         }
     }
@@ -157,17 +144,10 @@ struct IngestView: View {
     private var sourcesStep: some View {
         if let sources {
             VStack(alignment: .leading, spacing: 14) {
-                if !sources.ingestReady {
-                    VStack(alignment: .leading, spacing: 10) {
-                        GeminiReadinessAlert(readiness: sources.gemini, compact: true)
-                        Text("Scanning and ingestion are disabled. Chat-history digestion always runs locally, even when memories are stored on a remote Gemdex Server.")
-                            .font(.caption).foregroundStyle(.secondary)
-                        Button("Open Storage & Gemini settings") {
-                            model.showIngest = false
-                            model.showSettings = true
-                        }
-                        .brandPrimary()
-                    }
+                if !ingestReady {
+                    ClaudeCodeReadinessAlert(
+                        blockedFeature: "Scanning and ingestion are disabled. Digests are written by your local Claude Code CLI."
+                    )
                 }
                 Text("Session folders").font(.headline)
                 ForEach(sources.presets) { preset in
@@ -175,24 +155,21 @@ struct IngestView: View {
                               checked: selectedPresets.contains(preset.source),
                               toggle: { togglePreset(preset) },
                               removable: false,
-                              enabled: sources.ingestReady)
+                              enabled: ingestReady)
                 }
                 ForEach(sources.customFolders) { folder in
                     folderRow(folder,
                               checked: selectedCustom.contains(folder.path),
                               toggle: { toggleCustom(folder) },
                               removable: true,
-                              enabled: sources.ingestReady)
+                              enabled: ingestReady)
                 }
                 Button {
                     addFolder()
                 } label: {
                     Label("Add Folder…", systemImage: "plus")
                 }
-                .disabled(busy || !sources.ingestReady)
-                if let pending = model.pendingIngestBatch {
-                    pendingBatchCard(pending)
-                }
+                .disabled(busy || !ingestReady)
             }
         } else {
             ProgressView("Loading sources…")
@@ -288,43 +265,14 @@ struct IngestView: View {
                     Text("Model & cost").font(.headline)
                     Text("≈ \(formatTokens(scan.estimatedInputTokens)) input tokens across \(scan.pendingCount) new sessions. Pricing as of \(sources?.pricingAsOf ?? "—").")
                         .font(.caption).foregroundStyle(.secondary)
-                    Picker("Model", selection: $selectedModel) {
-                        ForEach(sources?.models ?? []) { info in
-                            Text("\(info.model) — \(info.description)").tag(info.model)
-                        }
-                    }
-                    costTable(scan.estimates)
-                    Toggle(isOn: $useBatch) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Use Batch API (half price)")
-                            Text("Submits an async job; results are collected later (usually well under 24 h).")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
+                    ClaudeModelCostSummary(
+                        models: sources?.models ?? [],
+                        estimates: scan.estimates,
+                        selectedModel: $selectedModel
+                    )
                 }
             }
         }
-    }
-
-    private func costTable(_ estimates: [IngestCostEstimate]) -> some View {
-        Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 4) {
-            GridRow {
-                Text("Model").font(.caption.bold())
-                Text("Standard").font(.caption.bold())
-                Text("Batch").font(.caption.bold())
-            }
-            ForEach(estimates) { estimate in
-                GridRow {
-                    Text(estimate.model)
-                        .font(.caption.monospaced())
-                        .fontWeight(estimate.model == selectedModel ? .bold : .regular)
-                    Text(formatUsd(estimate.standardUsd)).font(.caption.monospaced())
-                    Text(formatUsd(estimate.batchUsd)).font(.caption.monospaced())
-                }
-            }
-        }
-        .padding(10)
-        .glassSurface(cornerRadius: Metric.radiusCard)
     }
 
     private var runningStep: some View {
@@ -351,42 +299,12 @@ struct IngestView: View {
         }
     }
 
-    private var batchSubmittedStep: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Label("Batch job submitted", systemImage: "paperplane")
-                .font(.headline)
-            if let pending = liveStatus?.pendingBatch ?? model.pendingIngestBatch {
-                pendingBatchCard(pending)
-            }
-            Text("Safe to leave this panel — the job runs on Google's side and stays in the activity bar. Collect results any time from here, the activity bar, or the sources screen.")
-                .font(.callout).foregroundStyle(.secondary)
-            if let collectResult, collectResult.state == "pending" {
-                Label("Still processing (\(collectResult.jobState ?? "running")). Try again later.",
-                      systemImage: "clock")
-                    .font(.callout)
-            }
-        }
-    }
-
-    private func pendingBatchCard(_ pending: IngestStatus.PendingBatch) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Pending batch job").font(.callout.bold())
-            Text("\(pending.jobName) · \(pending.requestCount) sessions · \(pending.model)")
-                .font(.caption.monospaced()).foregroundStyle(.secondary)
-            Text("Submitted \(Date(timeIntervalSince1970: pending.submittedAt / 1000).formatted(date: .abbreviated, time: .shortened))")
-                .font(.caption).foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(10)
-        .glassSurface(cornerRadius: Metric.radiusCard, tint: Brand.gold)
-    }
-
     private var doneStep: some View {
         let s = liveStatus
         let phase = model.activities[.ingest]?.phase
-        let failed = collectResult?.failed ?? s?.failed ?? 0
+        let failed = s?.failed ?? 0
         let wasCancelled = phase == .cancelled || s?.state == "cancelled"
-        let ingested = collectResult?.ingested ?? s?.processed ?? 0
+        let ingested = s?.processed ?? 0
         let headline: String = {
             if wasCancelled { return "Ingestion cancelled" }
             if failed == 0 { return "Ingestion complete" }
@@ -412,7 +330,7 @@ struct IngestView: View {
                 Text("Already-saved digests stay in your store. Scan again to continue with sessions that were not yet processed.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            if let err = collectResult?.error ?? s?.error {
+            if let err = s?.error {
                 Text(err).font(.caption).foregroundStyle(Brand.terracotta).textSelection(.enabled)
             }
             Text("Each memory ends with a provenance line pointing at the raw transcript on disk, so agents can recall the digest and open the full session when needed.")
@@ -423,6 +341,10 @@ struct IngestView: View {
     // MARK: - Selection helpers
 
     private var hasSelection: Bool { !selectedPresets.isEmpty || !selectedCustom.isEmpty }
+
+    /// Read from `AppModel` rather than `sources.ingestReady` so "Check again"
+    /// unlocks the panel without reloading sources.
+    private var ingestReady: Bool { model.ingestionIsReady }
 
     private var selectedSourcePayload: [[String: Any]] {
         var payload: [[String: Any]] = selectedPresets.sorted().map { ["source": $0] }
@@ -467,17 +389,14 @@ struct IngestView: View {
             }
             await model.refreshActivityStatus()
             // Resume whatever the Activity Center / sidecar already knows.
-            if !resumeFromActivity() {
-                await model.refreshPendingIngestBatch()
-            }
+            resumeFromActivity()
         } catch {
-            let message = (error as? APIError)?.message ?? error.localizedDescription
-            if model.handlePossibleInvalidIngestionKey(message) { return }
-            self.error = message
+            if model.handleNeedsInstall(error) { return }
+            self.error = (error as? APIError)?.message ?? error.localizedDescription
         }
     }
 
-    /// Jump to running / batch / done when reopening mid-flight. Returns true
+    /// Jump to running / done when reopening mid-flight. Returns true
     /// when the panel was rehydrated from live activity (so callers skip the
     /// default sources layout).
     @discardableResult
@@ -497,25 +416,17 @@ struct IngestView: View {
             if step != .running { step = .running }
             status = model.ingestStatus ?? status
             return true
-        case "batchPending":
-            if step != .batchSubmitted { step = .batchSubmitted }
-            status = model.ingestStatus ?? status
-            return true
         case "done", "failed", "cancelled":
             // Only jump to done if we were already on a run step (or the
             // activity chip is still visible) — don't override a fresh sources
             // visit after a long-finished prior run.
-            if step == .running || step == .batchSubmitted || model.activities[.ingest] != nil {
+            if step == .running || model.activities[.ingest] != nil {
                 if step != .done { step = .done }
                 status = model.ingestStatus ?? status
                 return true
             }
             return false
         default:
-            if model.pendingIngestBatch != nil, step == .sources {
-                // Soft signal only — stay on sources where Collect is available.
-                return false
-            }
             return false
         }
     }
@@ -523,7 +434,6 @@ struct IngestView: View {
     private func activityState(_ phase: JobPhase) -> String {
         switch phase {
         case .running, .cancelling: return "running"
-        case .batchPending: return "batchPending"
         case .completed: return "done"
         case .failed: return "failed"
         case .cancelled: return "cancelled"
@@ -532,6 +442,7 @@ struct IngestView: View {
 
     private func apply(sources loaded: IngestSources) {
         sources = loaded
+        model.noteClaudeCode(loaded.claudeCode)
         if selectedModel.isEmpty {
             selectedModel = loaded.models.first(where: { $0.isDefault })?.model
                 ?? loaded.models.first?.model ?? ""
@@ -578,41 +489,11 @@ struct IngestView: View {
     private func start() async {
         await withBusy {
             guard let api = model.api else { return }
-            try await api.ingestStart(
-                sources: selectedSourcePayload,
-                model: selectedModel,
-                mode: useBatch ? "batch" : "standard"
-            )
+            try await api.ingestStart(sources: selectedSourcePayload, model: selectedModel)
             status = nil
             // Hand ownership to the Activity Center so leaving the panel is safe.
             model.noteIngestStarted(total: scan?.pendingCount ?? 0)
             step = .running
-        }
-    }
-
-    private func finishRun() async {
-        step = .done
-        await model.refreshList()
-        await model.refreshActivityStatus()
-    }
-
-    private func collect() async {
-        await withBusy {
-            guard let api = model.api else { return }
-            let result = try await api.ingestCollect()
-            collectResult = result
-            switch result.state {
-            case "collected", "failed":
-                await finishRun()
-            case "pending":
-                step = .batchSubmitted
-                await model.refreshActivityStatus()
-            case "none":
-                model.pendingIngestBatch = nil
-                model.dismissActivity(.ingest)
-            default:
-                break
-            }
         }
     }
 
@@ -623,9 +504,8 @@ struct IngestView: View {
         do {
             try await work()
         } catch {
-            let message = (error as? APIError)?.message ?? error.localizedDescription
-            if model.handlePossibleInvalidIngestionKey(message) { return }
-            self.error = message
+            if model.handleNeedsInstall(error) { return }
+            self.error = (error as? APIError)?.message ?? error.localizedDescription
         }
     }
 
@@ -635,9 +515,5 @@ struct IngestView: View {
         if tokens >= 1_000_000 { return String(format: "%.1fM", Double(tokens) / 1_000_000) }
         if tokens >= 1_000 { return String(format: "%.0fk", Double(tokens) / 1_000) }
         return "\(tokens)"
-    }
-
-    private func formatUsd(_ value: Double) -> String {
-        value < 0.01 && value > 0 ? "<$0.01" : String(format: "$%.2f", value)
     }
 }

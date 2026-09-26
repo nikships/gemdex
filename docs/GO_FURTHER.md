@@ -31,9 +31,10 @@ Even with a fully hosted stack, some work stays on your machines:
 |---------|---------------|-----|
 | Memory storage, embedding, recall | Host | The whole point of BYOI |
 | Agent tool calls | Your machine → host over `/mcp` | Agents are wherever you code |
-| **Chat-history digestion (path A)** | **Each laptop** | `gemdex sync-history` reads that laptop's disk and uses its own Gemini key — the host never sees your filesystem. See [chat history](CHAT_HISTORY.md) |
-| Chat-history digestion (path B) | Host | Browser upload; the host digests |
-| `report_outcome` stats | Each client | The ledger is per-client (`~/.gemdex/stats.json`) in v1 |
+| Local chat-history digestion | Each Apple Silicon Mac | `ingest-history` uses Claude Code Haiku and writes to that Mac's local pool, not BYOI. See [chat history](CHAT_HISTORY.md) |
+| Self-hosted chat-history digestion | Host | Browser upload or private `/v1/sessions/ingest`; the server uses Gemini |
+| Prepared chat-record import | Client → host | An authorized OAuth client can post digested records to `/mcp/sync/records` |
+| `report_outcome` stats | MCP process | Separate ledger: local for stdio, service-side for HTTP MCP |
 | Desktop app | Your Mac | Local sidecar over `~/.gemdex`; **not** a manager for your remote pool |
 
 That last row surprises people: the macOS app manages a *local* pool. For a
@@ -198,9 +199,10 @@ not by storage:
 
 Storage math: memory text plus chunks is small, but each embedding is 3072
 dimensions by default (`gemini-embedding-2`). A few thousand memories is still
-well under a gigabyte. Bulk chat-history ingestion is the one operation that
-costs real money — use `--dry-run` for an estimate first and `--batch` for 50%
-off ([chat history](CHAT_HISTORY.md#a--gemdex-sync-history-the-normal-path)).
+well under a gigabyte. Server-side uploaded-session digestion also uses the
+server's paid model account. Local `ingest-history --dry-run` estimates Haiku
+API list-price equivalents, not server upload costs; a Claude subscription
+counts local ingestion usage against plan limits. See [chat history](CHAT_HISTORY.md).
 
 A self-hosted stack is always-on compute: on a VPS that's one small instance; on
 a PaaS it's one paid instance per public service plus a database.

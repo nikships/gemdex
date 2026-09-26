@@ -2,9 +2,9 @@
 
 ## Decision
 
-The user explicitly selected **[`mlx-community/bge-m3-mlx-8bit`](https://huggingface.co/mlx-community/bge-m3-mlx-8bit)**,
-superseding issue #119's original Qwen candidate. This is a user selection, **not
-a claim that BGE-M3 won an M5 benchmark**. It is text-only, XLM-RoBERTa, MIT
+The local package uses **[`mlx-community/bge-m3-mlx-8bit`](https://huggingface.co/mlx-community/bge-m3-mlx-8bit)**.
+This is **not a claim that BGE-M3 won an M5 benchmark**.
+It is text-only, XLM-RoBERTa, MIT
 licensed, 1024 dimensions, with 603,620,090 bytes of quantized weights.
 Gemdex uses its dense vectors only; BGE's sparse and ColBERT outputs are not used.
 
@@ -58,7 +58,7 @@ The conversion README's example uses **mean pooling**, and mlx-embeddings
 retrieval contract**: FlagEmbedding defaults to `pooling_method="cls"`.
 The worker takes `last_hidden_state[0, 0, :]`, casts to float32, and L2-normalizes.
 It does not use the transformed `pooler_output`. It sends the same unprefixed
-text for queries and documents; no Qwen instruction survives the model switch.
+text for queries and documents, without a query instruction.
 
 The pinned `tokenizer.json` contains XLM-R special-token processing. We use the
 Rust `Tokenizer.from_file` directly, add special tokens, assert CLS=0 and SEP=2,
@@ -108,12 +108,22 @@ directory retains only useful completed downloads for interrupted retry.
 any crash-left partial. An exclusive PID lock rejects concurrent installers;
 dead-owner locks can be recovered. The installed marker appears only after
 all download hashes, installed-runtime inventory, and a real 1024d normalized
-embedding smoke test pass. The core installer does not change settings or banks;
-the CLI/sidecar wrapper activates MLX text after successful installation by
-writing `GEMINI_API_KEY=local` (exact lowercase). That sentinel is the only
-activation path for managed local text; `GEMDEX_EMBEDDING_PROVIDER` alone does
-not enable it, and a missing key does not fall through to MLX. Moving
-existing text requires the separate explicit migration action.
+embedding smoke test pass. The installer does not change settings or index
+tables. The local package
+always uses MLX when installed; it has no API-key sentinel or provider switch.
+`npx gemdex-mcp install` is the explicit download action.
+
+### Upgrade from Gemini-based releases
+
+`npx gemdex-mcp migrate` moves legacy parents from `memories` into
+`memories_mlx_bge_m3_8bit`. Recall and hygiene refuse to run while legacy rows
+remain; list/get/update/delete/export stay available after installation.
+Migration preserves metadata and attachment blobs, embeds text or a title
+for attachment-only parents, and commits destination rows before deleting
+source rows. It is rerunnable. Legacy media remains readable but is not
+media-searchable.
+
+### Inference lifecycle
 
 Status is synchronous and cheap (marker only). Before first inference per
 provider instance, the engine verifies artifact hashes, the exact worker source,

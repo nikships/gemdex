@@ -1,48 +1,57 @@
-import { test, before, after } from "node:test";
+import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AddressInfo } from "node:net";
-import type { Server } from "node:http";
-import type {
+import {
+    Embedding,
+    EmbeddingVector,
+    FileBlobStore,
     HygieneManager,
+    HygieneReportStore,
+    INFERENCE_PRICING_AS_OF,
+    LanceDBVectorDatabase,
+    LocalMemoryBackend,
+} from "gemdex-core";
+import type {
+    ClaudeCodeReadiness,
+    HygieneFinding,
     HygieneProgress,
+    HygieneReport,
+    HygieneRunOptions,
     HygieneScanResult,
+    Judge,
+    JudgeMemberInput,
     MemoryBackend,
     MemoryStore,
 } from "gemdex-core";
-import { LocalMemoryBackend } from "gemdex-core";
 import { ClientConfigStore } from "./cli-config.js";
+import { createConfig } from "./config.js";
+import { INSTALL_HINT } from "./memory.js";
 import { createServer, ServeContext } from "./serve.js";
 
 const TOKEN = "hygiene-test-token";
-
-function validGeminiReadiness(apiKey: string) {
-    return {
-        status: "valid" as const,
-        validatedAt: Date.now(),
-        keyFingerprint: crypto.createHash("sha256").update(apiKey).digest("hex"),
-    };
-}
-
-let tmpDir: string;
-let server: Server;
-let base: string;
-let ctx: ServeContext;
+const READY: ClaudeCodeReadiness = { status: "ready", version: "2.1.0", checkedAt: 1 };
 
 interface FakeManagerCalls {
-    scans: Array<{ store: unknown; threshold: unknown }>;
-    runs: Array<{ options: unknown; store: unknown }>;
-    applies: Array<{ ids: string[]; backend: unknown }>;
+    scans: Array<{ store: MemoryStore; threshold: number | undefined }>;
+    runs: Array<{ options: HygieneRunOptions; store: MemoryStore }>;
+    applies: Array<{ ids: string[]; backend: MemoryBackend }>;
     dismissals: string[][];
     cancels: number;
 }
 
-const calls: FakeManagerCalls = { scans: [], runs: [], applies: [], dismissals: [], cancels: 0 };
-let running = false;
-let progress: HygieneProgress = { state: "idle", judged: 0, failed: 0, total: 0 };
+let calls: FakeManagerCalls;
+let running: boolean;
+let progress: HygieneProgress;
+
+function resetFake(): void {
+    calls = { scans: [], runs: [], applies: [], dismissals: [], cancels: 0 };
+    running = false;
+    progress = { state: "idle", judged: 0, failed: 0, total: 0 };
+}
+resetFake();
 
 const scanResult: HygieneScanResult = {
     scannedAt: 123,
@@ -52,39 +61,33 @@ const scanResult: HygieneScanResult = {
     dismissedCount: 0,
     estimatedInputTokens: 10,
     estimatedOutputTokens: 20,
-    estimates: [],
+    estimates: [{ model: "haiku", usd: 0 }],
 };
 
-const fakeManager = {
-    getReport(): null {
-        return null;
-    },
-    async scan(store: MemoryStore, threshold?: number): Promise<HygieneScanResult> {
+const fakeManager: Pick<HygieneManager, "getReport" | "scan" | "run" | "getProgress" | "isRunning" | "cancel" | "apply" | "dismiss"> = {
+    getReport: () => null,
+    async scan(store, threshold) {
         calls.scans.push({ store, threshold });
         return scanResult;
     },
-    async run(options: unknown, store: MemoryStore): Promise<HygieneProgress> {
+    async run(options, store) {
         calls.runs.push({ options, store });
         progress = { state: "done", judged: 3, failed: 0, total: 3 };
         return progress;
     },
-    getProgress(): HygieneProgress {
-        return progress;
-    },
-    isRunning(): boolean {
-        return running;
-    },
-    cancel(): void {
+    getProgress: () => progress,
+    isRunning: () => running,
+    cancel() {
         calls.cancels += 1;
     },
-    async apply(ids: string[], backend: MemoryBackend): Promise<{ deleted: number }> {
+    async apply(ids, backend) {
         calls.applies.push({ ids, backend });
         return { deleted: ids.length };
     },
-    dismiss(clusterIds: string[]): void {
+    dismiss(clusterIds) {
         calls.dismissals.push(clusterIds);
     },
-} as unknown as HygieneManager;
+};
 
 const fakeMemoryStore = {} as unknown as MemoryStore;
 
@@ -93,6 +96,11 @@ const fakeMemoryStore = {} as unknown as MemoryStore;
 const fakeStore = Object.create(LocalMemoryBackend.prototype) as LocalMemoryBackend;
 Object.assign(fakeStore, { getStore: () => fakeMemoryStore });
 
+let tmpDir: string;
+let base: string;
+let ctx: ServeContext;
+let closeServer: () => Promise<void>;
+
 function authed(input: string, init: RequestInit = {}): Promise<Response> {
     return fetch(input, {
         ...init,
@@ -100,92 +108,152 @@ function authed(input: string, init: RequestInit = {}): Promise<Response> {
     });
 }
 
-before(async () => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gemdex-serve-hygiene-"));
-    ctx = {
-        config: {
-            name: "test",
-            version: "1",
-            embeddingModel: "fake",
-            geminiApiKey: "local-key",
-            mode: "local",
-        } as ServeContext["config"],
+function postJson(url: string, body: unknown = {}): Promise<Response> {
+    return authed(url, { method: "POST", body: JSON.stringify(body) });
+}
+
+async function startServer(overrides: Partial<ServeContext> = {}): Promise<{ base: string; ctx: ServeContext; close: () => Promise<void> }> {
+    const serverCtx: ServeContext = {
+        config: createConfig(() => undefined),
         store: fakeStore,
         token: TOKEN,
-        clientConfigStore: new ClientConfigStore({ rootDir: tmpDir }),
-        hygieneManager: fakeManager,
-        // Matches config.geminiApiKey so the key-staleness check keeps the fake.
-        hygieneManagerKey: "local-key",
-        geminiReadiness: validGeminiReadiness("local-key"),
+        clientConfigStore: new ClientConfigStore({ rootDir: path.join(tmpDir, "gemdex") }),
+        isModelInstalled: () => true,
+        hygieneManager: fakeManager as HygieneManager,
+        claudeCode: READY,
+        checkClaudeCode: async () => READY,
+        ...overrides,
     };
-    server = createServer(ctx);
+    const server = createServer(serverCtx);
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const addr = server.address() as AddressInfo;
-    base = `http://127.0.0.1:${addr.port}`;
+    return {
+        base: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+        ctx: serverCtx,
+        close: async () => {
+            server.closeAllConnections();
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+        },
+    };
+}
+
+before(async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gemdex-serve-hygiene-"));
+    const started = await startServer();
+    base = started.base;
+    ctx = started.ctx;
+    closeServer = started.close;
 });
 
 after(async () => {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await closeServer();
     fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-test("hygiene routes require the token", async () => {
-    const res = await fetch(`${base}/hygiene/status`);
-    assert.equal(res.status, 401);
+beforeEach(() => {
+    resetFake();
+    ctx.claudeCode = READY;
 });
 
-test("GET /hygiene/report returns the persisted report, models, and readiness", async () => {
+test("hygiene routes require the token", async () => {
+    for (const [method, route] of [
+        ["GET", "/hygiene/report"],
+        ["POST", "/hygiene/scan"],
+        ["POST", "/hygiene/start"],
+        ["GET", "/hygiene/status"],
+        ["POST", "/hygiene/cancel"],
+        ["POST", "/hygiene/apply"],
+        ["POST", "/hygiene/dismiss"],
+    ]) {
+        assert.equal((await fetch(`${base}${route}`, { method })).status, 401, `${method} ${route}`);
+    }
+    assert.equal(calls.runs.length + calls.applies.length + calls.dismissals.length, 0);
+});
+
+test("GET /hygiene/report returns the persisted report, the Haiku model, pricing and readiness", async () => {
     const res = await authed(`${base}/hygiene/report`);
     assert.equal(res.status, 200);
-    const body = (await res.json()) as any;
-    assert.equal(body.report, null);
-    assert.equal(body.hygieneReady, true);
-    assert.ok(Array.isArray(body.models));
-    assert.ok(body.models.some((m: any) => m.isDefault));
-    assert.ok(body.pricingAsOf);
+    assert.deepEqual(await res.json(), {
+        report: null,
+        models: [{
+            model: "haiku",
+            description: "Claude Haiku via your Claude Code login",
+            inputUsdPerMTok: 1,
+            outputUsdPerMTok: 5,
+            isDefault: true,
+        }],
+        pricingAsOf: INFERENCE_PRICING_AS_OF,
+        hygieneReady: true,
+    });
 });
 
-test("POST /hygiene/scan delegates to the manager with the store and threshold", async () => {
-    const res = await authed(`${base}/hygiene/scan`, {
-        method: "POST",
-        body: JSON.stringify({ threshold: 0.9 }),
-    });
+test("GET /hygiene/report still serves the report when Claude Code is not ready", async () => {
+    ctx.claudeCode = { status: "missing", message: "Claude Code CLI not found.", checkedAt: 1 };
+    const res = await authed(`${base}/hygiene/report`);
     assert.equal(res.status, 200);
-    const body = (await res.json()) as HygieneScanResult;
-    assert.equal(body.memoryCount, 4);
-    const call = calls.scans.at(-1)!;
-    assert.equal(call.store, fakeMemoryStore);
-    assert.equal(call.threshold, 0.9);
+    assert.equal(((await res.json()) as { hygieneReady: boolean }).hygieneReady, false);
+});
+
+test("POST /hygiene/scan delegates with the local store and threshold, without needing Claude Code", async () => {
+    ctx.claudeCode = { status: "unauthenticated", message: "Not logged in.", checkedAt: 1 };
+    const res = await postJson(`${base}/hygiene/scan`, { threshold: 0.9 });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), scanResult);
+    assert.equal(calls.scans[0].store, fakeMemoryStore);
+    assert.equal(calls.scans[0].threshold, 0.9);
+
+    await postJson(`${base}/hygiene/scan`, { threshold: "0.5" });
+    assert.equal(calls.scans[1].threshold, undefined, "a non-numeric threshold is ignored");
 });
 
 test("POST /hygiene/start kicks off a run and /hygiene/status reports it", async () => {
-    const res = await authed(`${base}/hygiene/start`, {
-        method: "POST",
-        body: JSON.stringify({ model: "gemini-3.5-flash-lite", threshold: 0.8 }),
-    });
+    const res = await postJson(`${base}/hygiene/start`, { model: "haiku", threshold: 0.8 });
     assert.equal(res.status, 200);
     assert.deepEqual(await res.json(), { started: true });
-    // run() is fired asynchronously; give it a tick.
     await new Promise((resolve) => setTimeout(resolve, 10));
-    const call = calls.runs.at(-1)!;
-    assert.deepEqual(call.options, { model: "gemini-3.5-flash-lite", threshold: 0.8 });
-    assert.equal(call.store, fakeMemoryStore);
+    assert.deepEqual(calls.runs[0].options, { model: "haiku", threshold: 0.8 });
+    assert.equal(calls.runs[0].store, fakeMemoryStore);
 
     const status = await authed(`${base}/hygiene/status`);
     assert.equal(status.status, 200);
-    const statusBody = (await status.json()) as HygieneProgress;
-    assert.equal(statusBody.state, "done");
-    assert.equal(statusBody.judged, 3);
+    assert.deepEqual(await status.json(), { state: "done", judged: 3, failed: 0, total: 3 });
+});
+
+for (const state of [
+    { status: "missing" as const, message: "Claude Code CLI not found.", checkedAt: 1 },
+    { status: "unauthenticated" as const, message: "Claude Code is not logged in.", checkedAt: 1 },
+    { status: "error" as const, checkedAt: 1 },
+]) {
+    test(`POST /hygiene/start answers 400 when Claude Code is ${state.status}`, async () => {
+        ctx.claudeCode = state;
+        const res = await postJson(`${base}/hygiene/start`);
+        assert.equal(res.status, 400);
+        const { error } = (await res.json()) as { error: string };
+        assert.match(error, /^Memory hygiene needs Claude Code\. /);
+        assert.ok(error.includes(state.message ?? `Claude Code status: ${state.status}.`), error);
+        assert.equal(calls.runs.length, 0);
+    });
+}
+
+test("POST /hygiene/start answers 400 while the Claude Code check is still running", async () => {
+    ctx.claudeCode = { status: "checking" };
+    const res = await postJson(`${base}/hygiene/start`);
+    assert.equal(res.status, 400);
+    assert.match(((await res.json()) as { error: string }).error, /Memory hygiene is waiting for the Claude Code check/);
+    assert.equal(calls.runs.length, 0);
 });
 
 test("POST /hygiene/start returns 409 while a run is in progress", async () => {
     running = true;
-    try {
-        const res = await authed(`${base}/hygiene/start`, { method: "POST", body: JSON.stringify({}) });
-        assert.equal(res.status, 409);
-    } finally {
-        running = false;
-    }
+    const res = await postJson(`${base}/hygiene/start`);
+    assert.equal(res.status, 409);
+    assert.deepEqual(await res.json(), { error: "A hygiene run is already in progress." });
+    assert.equal(calls.runs.length, 0);
+});
+
+test("Claude Code readiness is checked before the in-progress 409", async () => {
+    running = true;
+    ctx.claudeCode = { status: "missing", message: "Claude Code CLI not found.", checkedAt: 1 };
+    assert.equal((await postJson(`${base}/hygiene/start`)).status, 400);
 });
 
 test("POST /hygiene/cancel cancels only a live run", async () => {
@@ -195,121 +263,172 @@ test("POST /hygiene/cancel cancels only a live run", async () => {
     assert.equal(calls.cancels, 0);
 
     running = true;
-    try {
-        const live = await authed(`${base}/hygiene/cancel`, { method: "POST" });
-        assert.equal(live.status, 200);
-        assert.deepEqual(await live.json(), { cancelled: true });
-        assert.equal(calls.cancels, 1);
-    } finally {
-        running = false;
-    }
+    const live = await authed(`${base}/hygiene/cancel`, { method: "POST" });
+    assert.deepEqual(await live.json(), { cancelled: true });
+    assert.equal(calls.cancels, 1);
 });
 
-test("POST /hygiene/apply deletes the given ids via the backend", async () => {
-    const res = await authed(`${base}/hygiene/apply`, {
-        method: "POST",
-        body: JSON.stringify({ ids: ["a", "b"] }),
-    });
+test("POST /hygiene/apply deletes the given ids via the backend and validates the body", async () => {
+    const res = await postJson(`${base}/hygiene/apply`, { ids: ["a", "b"] });
     assert.equal(res.status, 200);
     assert.deepEqual(await res.json(), { deleted: 2 });
-    const call = calls.applies.at(-1)!;
-    assert.deepEqual(call.ids, ["a", "b"]);
-    assert.equal(call.backend, fakeStore);
+    assert.deepEqual(calls.applies[0].ids, ["a", "b"]);
+    assert.equal(calls.applies[0].backend, fakeStore);
 
-    const missing = await authed(`${base}/hygiene/apply`, { method: "POST", body: JSON.stringify({}) });
-    assert.equal(missing.status, 400);
-
-    const empty = await authed(`${base}/hygiene/apply`, { method: "POST", body: JSON.stringify({ ids: [] }) });
-    assert.equal(empty.status, 400);
+    for (const body of [{}, { ids: [] }, { ids: ["a", ""] }, { ids: "a" }, { ids: [1] }]) {
+        const bad = await postJson(`${base}/hygiene/apply`, body);
+        assert.equal(bad.status, 400, JSON.stringify(body));
+        assert.deepEqual(await bad.json(), { error: "'ids' must be a non-empty array of strings." });
+    }
+    assert.equal(calls.applies.length, 1);
 });
 
-test("POST /hygiene/dismiss records dismissals", async () => {
-    const res = await authed(`${base}/hygiene/dismiss`, {
-        method: "POST",
-        body: JSON.stringify({ clusterIds: ["c1", "c2", "c3"] }),
-    });
+test("POST /hygiene/apply works while Claude Code is not ready (it is a human-approved delete)", async () => {
+    ctx.claudeCode = { status: "missing", checkedAt: 1 };
+    assert.equal((await postJson(`${base}/hygiene/apply`, { ids: ["x"] })).status, 200);
+});
+
+test("POST /hygiene/dismiss records dismissals and validates the body", async () => {
+    const res = await postJson(`${base}/hygiene/dismiss`, { clusterIds: ["c1", "c2", "c3"] });
     assert.equal(res.status, 200);
     assert.deepEqual(await res.json(), { dismissed: 3 });
-    assert.deepEqual(calls.dismissals.at(-1), ["c1", "c2", "c3"]);
+    assert.deepEqual(calls.dismissals[0], ["c1", "c2", "c3"]);
 
-    const empty = await authed(`${base}/hygiene/dismiss`, { method: "POST", body: JSON.stringify({ clusterIds: [] }) });
+    const empty = await postJson(`${base}/hygiene/dismiss`, { clusterIds: [] });
     assert.equal(empty.status, 400);
+    assert.deepEqual(await empty.json(), { error: "'clusterIds' must be a non-empty array of strings." });
 });
 
-test("remote storage mode blocks hygiene", async () => {
-    const remote = createServer({
-        config: {
-            name: "test",
-            version: "1",
-            embeddingModel: "fake",
-            geminiApiKey: "local-key",
-            mode: "remote",
-            remote: { url: "https://memory.example.test", token: "remote-token" },
-        } as ServeContext["config"],
-        store: { importRecords: async () => ({ imported: 0 }) } as unknown as MemoryBackend,
-        token: TOKEN,
-        clientConfigStore: new ClientConfigStore({ rootDir: tmpDir }),
-        hygieneManager: fakeManager,
-        hygieneManagerKey: "local-key",
-        geminiReadiness: validGeminiReadiness("local-key"),
+test("scan and start answer 400 when the store is not the local LanceDB store", async () => {
+    const other = await startServer({
+        store: { importRecords: async () => ({ imported: 0, failed: 0, errors: [] }) } as unknown as MemoryBackend,
     });
-    await new Promise<void>((resolve) => remote.listen(0, "127.0.0.1", resolve));
-    const addr = remote.address() as AddressInfo;
-    const remoteBase = `http://127.0.0.1:${addr.port}`;
     try {
-        const res = await authed(`${remoteBase}/hygiene/scan`, { method: "POST", body: JSON.stringify({}) });
-        assert.equal(res.status, 400);
-        assert.match(((await res.json()) as { error: string }).error, /local storage/i);
+        for (const route of ["/hygiene/scan", "/hygiene/start"]) {
+            const res = await postJson(`${other.base}${route}`);
+            assert.equal(res.status, 400, route);
+            assert.deepEqual(await res.json(), { error: "Memory hygiene needs the local memory store." });
+        }
+        assert.equal(calls.scans.length + calls.runs.length, 0);
     } finally {
-        await new Promise<void>((resolve) => remote.close(() => resolve()));
+        await other.close();
     }
 });
 
-test("missing local key blocks judging but still serves the report", async () => {
-    const remote = createServer({
-        config: {
-            name: "test",
-            version: "1",
-            embeddingModel: "fake",
-            mode: "remote",
-            remote: { url: "https://memory.example.test", token: "remote-token" },
-        } as ServeContext["config"],
-        store: { importRecords: async () => ({ imported: 0 }) } as unknown as MemoryBackend,
-        token: TOKEN,
-        clientConfigStore: new ClientConfigStore({ rootDir: tmpDir }),
-    });
-    await new Promise<void>((resolve) => remote.listen(0, "127.0.0.1", resolve));
-    const addr = remote.address() as AddressInfo;
-    const remoteBase = `http://127.0.0.1:${addr.port}`;
+test("hygiene routes answer 503 needsInstall when no store is mounted", async () => {
+    const bare = await startServer({ store: null, isModelInstalled: () => false });
     try {
-        const started = await authed(`${remoteBase}/hygiene/start`, { method: "POST", body: JSON.stringify({}) });
-        assert.equal(started.status, 400);
-        assert.match(((await started.json()) as { error: string }).error, /GEMINI_API_KEY/);
-
-        const report = await authed(`${remoteBase}/hygiene/report`);
-        assert.equal(report.status, 200);
-        const reportBody = (await report.json()) as any;
-        assert.equal(reportBody.hygieneReady, false);
-        assert.ok(Array.isArray(reportBody.models));
-
-        const status = await authed(`${remoteBase}/hygiene/status`);
-        assert.equal(status.status, 200);
-        assert.deepEqual(await status.json(), { state: "idle", judged: 0, failed: 0, total: 0 });
+        for (const [method, route] of [["GET", "/hygiene/report"], ["POST", "/hygiene/start"], ["POST", "/hygiene/apply"]]) {
+            const res = await authed(`${bare.base}${route}`, { method, ...(method === "POST" && { body: "{}" }) });
+            assert.equal(res.status, 503, route);
+            assert.deepEqual(await res.json(), { error: INSTALL_HINT, needsInstall: true });
+        }
     } finally {
-        await new Promise<void>((resolve) => remote.close(() => resolve()));
+        await bare.close();
     }
 });
 
-test("hygiene routes answer 503 needsKey when the store is missing", async () => {
-    const bare = createServer({ config: { mode: "local" } as ServeContext["config"], store: null });
-    await new Promise<void>((resolve) => bare.listen(0, "127.0.0.1", resolve));
-    const addr = bare.address() as AddressInfo;
+// ---------------------------------------------------------------------------
+// End to end with a real HygieneManager, a real local store and a fake judge
+// ---------------------------------------------------------------------------
+
+const DIM = 16;
+
+function vectorize(text: string): number[] {
+    const vec: number[] = new Array(DIM).fill(0);
+    for (const token of text.toLowerCase().split(/\W+/).filter(Boolean)) {
+        let hash = 0;
+        for (let i = 0; i < token.length; i++) hash = (hash * 31 + token.charCodeAt(i)) >>> 0;
+        vec[hash % DIM] += 1;
+    }
+    return vec;
+}
+
+class FakeEmbedding extends Embedding {
+    protected maxTokens = 8192;
+    async detectDimension(): Promise<number> { return DIM; }
+    getDimension(): number { return DIM; }
+    getProvider(): string { return "Fake"; }
+    async embed(text: string): Promise<EmbeddingVector> {
+        return { vector: vectorize(text), dimension: DIM };
+    }
+    async embedBatch(texts: string[]): Promise<EmbeddingVector[]> {
+        return texts.map((text) => ({ vector: vectorize(text), dimension: DIM }));
+    }
+}
+
+class FakeJudge implements Judge {
+    readonly model = "haiku";
+    clusters: JudgeMemberInput[][] = [];
+    async judge(members: JudgeMemberInput[]): Promise<HygieneFinding[]> {
+        this.clusters.push(members);
+        const [newest, ...older] = [...members].sort((a, b) => b.updatedAt - a.updatedAt);
+        return [
+            { memoryId: newest.memoryId, verdict: "keep", confidence: "high" },
+            ...older.map((member): HygieneFinding => ({
+                memoryId: member.memoryId,
+                verdict: "duplicate",
+                supersededBy: newest.memoryId,
+                confidence: "high",
+            })),
+        ];
+    }
+}
+
+test("hygiene end to end: scan, judge, report, apply and dismiss through the sidecar", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gemdex-hygiene-e2e-"));
+    const backend = new LocalMemoryBackend({
+        embedding: new FakeEmbedding(),
+        vectorDatabase: new LanceDBVectorDatabase({ uri: path.join(dir, "lance") }),
+        blobStore: new FileBlobStore(path.join(dir, "blobs")),
+    });
+    const older = await backend.save({ content: "release signing uses the developer id certificate in the keychain" });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const newer = await backend.save({ content: "release signing uses the developer id certificate in the keychain" });
+    await backend.save({ content: "postgres backups run nightly at two via cron on the database host" });
+
+    const judge = new FakeJudge();
+    const models: Array<string | undefined> = [];
+    const manager = new HygieneManager({
+        reportStore: new HygieneReportStore({ rootDir: dir }),
+        createJudge: (model) => { models.push(model); return judge; },
+    });
+    const real = await startServer({ store: backend, hygieneManager: manager });
     try {
-        const res = await fetch(`http://127.0.0.1:${addr.port}/hygiene/report`);
-        assert.equal(res.status, 503);
-        const body = (await res.json()) as { needsKey?: boolean };
-        assert.equal(body.needsKey, true);
+        const scan = (await (await postJson(`${real.base}/hygiene/scan`, { threshold: 0.95 })).json()) as HygieneScanResult;
+        assert.equal(scan.memoryCount, 3);
+        assert.equal(scan.clusters.length, 1);
+        assert.deepEqual(scan.clusters[0].members.map((m) => m.memoryId).sort(), [older.id, newer.id].sort());
+        assert.deepEqual(scan.estimates.map((e) => e.model), ["haiku"]);
+        assert.equal(judge.clusters.length, 0, "scanning makes no model calls");
+
+        assert.equal((await postJson(`${real.base}/hygiene/start`, { threshold: 0.95 })).status, 200);
+        let status: HygieneProgress | undefined;
+        for (let i = 0; i < 100; i++) {
+            status = (await (await authed(`${real.base}/hygiene/status`)).json()) as HygieneProgress;
+            if (status.state === "done" || status.state === "failed") break;
+            await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        assert.deepEqual(status, { state: "done", judged: 1, failed: 0, total: 1 });
+        assert.deepEqual(models, [undefined]);
+
+        const { report } = (await (await authed(`${real.base}/hygiene/report`)).json()) as { report: HygieneReport };
+        assert.equal(report.model, "haiku");
+        const finding = report.clusters[0].findings!.find((f) => f.memoryId === older.id)!;
+        assert.equal(finding.verdict, "duplicate");
+        assert.equal(finding.supersededBy, newer.id);
+
+        const applied = await postJson(`${real.base}/hygiene/apply`, { ids: [older.id] });
+        assert.deepEqual(await applied.json(), { deleted: 1 });
+        assert.equal(await backend.get(older.id), null);
+        assert.notEqual(await backend.get(newer.id), null);
+        const afterApply = (await (await authed(`${real.base}/hygiene/report`)).json()) as { report: HygieneReport };
+        assert.deepEqual(afterApply.report.deletedIds, [older.id]);
+
+        const clusterId = report.clusters[0].clusterId;
+        assert.deepEqual(await (await postJson(`${real.base}/hygiene/dismiss`, { clusterIds: [clusterId] })).json(), { dismissed: 1 });
     } finally {
-        await new Promise<void>((resolve) => bare.close(() => resolve()));
+        await real.close();
+        fs.rmSync(dir, { recursive: true, force: true });
     }
 });

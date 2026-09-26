@@ -111,10 +111,8 @@ The server binds to 127.0.0.1 only. To reach it from other machines, put it on
 a private network (e.g. Tailscale) or a TLS reverse proxy — never publish the
 raw port. See docs/BYOI_OPERATIONS.md.
 
-Connect a client (any machine that can reach the URL above), then point your
-agent at it — no GEMINI_API_KEY needed on the client:
-
-  npx -y gemdex-mcp@latest init-remote myserver <URL>
-  # paste the bearer token above when prompted
+Agents connect through the Streamable HTTP MCP endpoint (gemdex-mcp-http),
+which calls this server's /v1 API with the bearer token above. The reference
+stack in deploy/ wires that up; see deploy/README.md.
 
 EOF

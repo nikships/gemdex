@@ -1,16 +1,11 @@
 import * as crypto from 'node:crypto';
-import * as fs from 'node:fs';
-import * as os from 'node:os';
-import * as path from 'node:path';
+import { estimateCost, estimateTokensForChars } from '../inference/claude-code';
 import type { MemoryExportRecord } from '../memory/types';
 import {
-    SessionDigester,
+    ClaudeCodeDigester,
+    Digester,
     buildDigestPrompt,
-    digestBatchRequest,
-    estimateCost,
-    estimateTokensForChars,
     memoryIdForSession,
-    parseDigestResponse,
     renderDigestMemory,
     ESTIMATED_OUTPUT_TOKENS_PER_SESSION,
 } from './digester';
@@ -30,40 +25,27 @@ import {
     IngestSourceFolder,
     IngestTarget,
     ParsedSession,
-    PendingBatchJob,
-    PendingBatchRequest,
     SessionDigest,
     SessionFile,
+    SessionMeta,
 } from './types';
-
-export type IngestMode = 'standard' | 'batch';
 
 export interface IngestRunOptions {
     folders: IngestSourceFolder[];
     model?: string;
-    mode?: IngestMode;
 }
 
 export interface IngestManagerConfig {
-    apiKey: string;
-    geminiBaseUrl?: string;
     ledger?: IngestLedgerStore;
-    /** Injectable for tests. */
-    createDigester?: (model: string | undefined) => SessionDigester;
+    /** Injectable for tests. Defaults to a Claude Code {@link ClaudeCodeDigester}. */
+    createDigester?: (model: string | undefined) => Digester;
 }
 
-/** Concurrent digest requests in standard mode. */
-const STANDARD_CONCURRENCY = 4;
-/** Retry attempts per session in standard mode. */
+/** Concurrent digest requests (each is one `claude -p` child process). */
+const CONCURRENCY = 4;
+/** Retry attempts per session. */
 const MAX_ATTEMPTS = 3;
 const RETRY_BASE_DELAY_MS = 2_000;
-
-const BATCH_TERMINAL_STATES = new Set([
-    'JOB_STATE_SUCCEEDED',
-    'JOB_STATE_FAILED',
-    'JOB_STATE_CANCELLED',
-    'JOB_STATE_EXPIRED',
-]);
 
 function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -80,17 +62,18 @@ function hashDigestPrompt(prompt: string): string {
     return crypto.createHash('sha256').update(prompt, 'utf8').digest('hex');
 }
 
-export interface CollectResult {
-    state: 'none' | 'pending' | 'collected' | 'failed';
-    jobState?: string;
-    ingested?: number;
-    failed?: number;
-    error?: string;
+/** What a saved digest needs to know about the session file it came from. */
+interface DigestSource {
+    filePath: string;
+    mtimeMs: number;
+    size: number;
+    promptHash: string;
+    sessionMeta: SessionMeta;
 }
 
 /**
  * Orchestrates chat-history ingestion: scan source folders against the
- * ledger, digest each pending session via Gemini (standard or Batch API),
+ * ledger, digest each pending session through the local Claude Code CLI,
  * and upsert one memory per session into the destination IngestTarget with the
  * deterministic id `chat:<source>:<sessionId>`.
  *
@@ -103,25 +86,12 @@ export class IngestManager {
     private cancelRequested = false;
     private running = false;
 
-    constructor(config: IngestManagerConfig) {
+    constructor(config: IngestManagerConfig = {}) {
         this.config = config;
         this.ledger = config.ledger ?? new IngestLedgerStore();
     }
 
     getProgress(): IngestProgress {
-        const pending = this.ledger.getPendingBatch();
-        if (!this.running && pending) {
-            return {
-                ...this.progress,
-                state: 'batchPending',
-                pendingBatch: {
-                    jobName: pending.jobName,
-                    model: pending.model,
-                    submittedAt: pending.submittedAt,
-                    requestCount: Object.keys(pending.requests).length,
-                },
-            };
-        }
         return { ...this.progress };
     }
 
@@ -199,15 +169,9 @@ export class IngestManager {
         };
     }
 
-    /**
-     * Run ingestion over the pending files in `folders`. Resolves when the
-     * run completes (standard) or the batch job has been submitted (batch).
-     */
+    /** Run ingestion over the pending files in `folders`; resolves when the run completes. */
     async run(options: IngestRunOptions, backend: IngestTarget): Promise<IngestProgress> {
         if (this.running) throw new Error('An ingestion run is already in progress.');
-        if (this.ledger.getPendingBatch()) {
-            throw new Error('A batch ingestion job is pending. Collect or cancel it first.');
-        }
         this.running = true;
         this.cancelRequested = false;
         try {
@@ -242,11 +206,7 @@ export class IngestManager {
                 return this.getProgress();
             }
 
-            if ((options.mode ?? 'standard') === 'batch') {
-                await this.submitBatch(sessions, options.model);
-            } else {
-                await this.runStandard(sessions, options.model, backend);
-            }
+            await this.digestAll(sessions, options.model, backend);
             return this.getProgress();
         } catch (error) {
             this.progress = {
@@ -260,109 +220,9 @@ export class IngestManager {
         }
     }
 
-    /**
-     * Poll a pending batch job and, when complete, download its results and
-     * save the digests. Safe to call repeatedly; returns `pending` until the
-     * job reaches a terminal state.
-     */
-    async collect(backend: IngestTarget): Promise<CollectResult> {
-        const pending = this.ledger.getPendingBatch();
-        if (!pending) return { state: 'none' };
-
-        const digester = this.createDigester(pending.model);
-        const client = digester.getClient();
-        const job = await client.batches.get({ name: pending.jobName });
-        const jobState = String(job.state ?? 'JOB_STATE_PENDING');
-        if (!BATCH_TERMINAL_STATES.has(jobState)) {
-            return { state: 'pending', jobState };
-        }
-        if (jobState !== 'JOB_STATE_SUCCEEDED') {
-            this.ledger.setPendingBatch(undefined);
-            return {
-                state: 'failed',
-                jobState,
-                error: job.error ? JSON.stringify(job.error) : `Batch job ended in ${jobState}`,
-            };
-        }
-
-        const resultFileName = job.dest?.fileName;
-        if (!resultFileName) {
-            this.ledger.setPendingBatch(undefined);
-            return { state: 'failed', jobState, error: 'Batch job succeeded but returned no result file.' };
-        }
-
-        const downloadPath = path.join(os.tmpdir(), `gemdex-batch-results-${process.pid}-${Math.random().toString(36).slice(2)}.jsonl`);
-        let content: string;
-        try {
-            await client.files.download({ file: resultFileName, downloadPath });
-            content = fs.readFileSync(downloadPath, 'utf8');
-        } finally {
-            fs.rmSync(downloadPath, { force: true });
-        }
-
-        let ingested = 0;
-        let failed = 0;
-        for (const line of content.split('\n')) {
-            const trimmed = line.trim();
-            if (!trimmed) continue;
-            let parsed: any;
-            try {
-                parsed = JSON.parse(trimmed);
-            } catch {
-                failed += 1;
-                continue;
-            }
-            const key = typeof parsed?.key === 'string' ? parsed.key : undefined;
-            const request = key ? pending.requests[key] : undefined;
-            if (!request) {
-                failed += 1;
-                continue;
-            }
-            const text = extractResponseText(parsed?.response);
-            if (!text) {
-                failed += 1;
-                continue;
-            }
-            try {
-                const digest = parseDigestResponse(text);
-                await this.saveDigest(digest, request, backend, pending.model);
-                ingested += 1;
-            } catch {
-                failed += 1;
-            }
-        }
-        this.ledger.setPendingBatch(undefined);
-        this.progress = {
-            state: 'done',
-            processed: ingested,
-            failed,
-            skipped: 0,
-            total: Object.keys(pending.requests).length,
-        };
-        return { state: 'collected', jobState, ingested, failed };
-    }
-
-    /** Cancel a pending batch job (best-effort server-side) and clear it locally. */
-    async cancelBatch(): Promise<boolean> {
-        const pending = this.ledger.getPendingBatch();
-        if (!pending) return false;
-        try {
-            const digester = this.createDigester(pending.model);
-            await digester.getClient().batches.cancel({ name: pending.jobName });
-        } catch {
-            // Job may already be terminal; clearing the local record is what matters.
-        }
-        this.ledger.setPendingBatch(undefined);
-        return true;
-    }
-
-    private createDigester(model: string | undefined): SessionDigester {
+    private createDigester(model: string | undefined): Digester {
         if (this.config.createDigester) return this.config.createDigester(model);
-        return new SessionDigester({
-            apiKey: this.config.apiKey,
-            model,
-            baseURL: this.config.geminiBaseUrl,
-        });
+        return new ClaudeCodeDigester({ model });
     }
 
     private tryParse(file: SessionFile): ParsedSession | null {
@@ -373,14 +233,14 @@ export class IngestManager {
         }
     }
 
-    private async runStandard(
+    private async digestAll(
         sessions: PendingSession[],
         model: string | undefined,
         backend: IngestTarget,
     ): Promise<void> {
         const digester = this.createDigester(model);
         const queue = [...sessions];
-        const workers = Array.from({ length: Math.min(STANDARD_CONCURRENCY, queue.length) }, async () => {
+        const workers = Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
             for (;;) {
                 if (this.cancelRequested) return;
                 const item = queue.shift();
@@ -389,11 +249,9 @@ export class IngestManager {
                 try {
                     const digest = await this.digestWithRetry(digester, item.session);
                     await this.saveDigest(digest, {
-                        source: item.file.source,
                         filePath: item.file.filePath,
                         mtimeMs: item.file.mtimeMs,
                         size: item.file.size,
-                        sessionId: item.session.sessionId,
                         promptHash: item.promptHash,
                         sessionMeta: toSessionMeta(item.session),
                     }, backend, digester.model);
@@ -412,7 +270,7 @@ export class IngestManager {
         this.progress.state = this.cancelRequested ? 'cancelled' : 'done';
     }
 
-    private async digestWithRetry(digester: SessionDigester, session: ParsedSession): Promise<SessionDigest> {
+    private async digestWithRetry(digester: Digester, session: ParsedSession): Promise<SessionDigest> {
         let lastError: unknown;
         for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             if (this.cancelRequested) {
@@ -432,7 +290,7 @@ export class IngestManager {
 
     private async saveDigest(
         digest: SessionDigest,
-        request: PendingBatchRequest,
+        request: DigestSource,
         backend: IngestTarget,
         model: string,
     ): Promise<void> {
@@ -480,94 +338,12 @@ export class IngestManager {
             memoryId,
             model,
             ingestedAt: now,
-            ...(request.promptHash !== undefined ? { promptHash: request.promptHash } : {}),
+            promptHash: request.promptHash,
         });
-    }
-
-    private async submitBatch(sessions: PendingSession[], model: string | undefined): Promise<void> {
-        const digester = this.createDigester(model);
-        const client = digester.getClient();
-
-        const requests: Record<string, PendingBatchRequest> = {};
-        const lines: string[] = [];
-        sessions.forEach((item, index) => {
-            const key = `session-${index}`;
-            requests[key] = {
-                source: item.file.source,
-                filePath: item.file.filePath,
-                mtimeMs: item.file.mtimeMs,
-                size: item.file.size,
-                sessionId: item.session.sessionId,
-                promptHash: item.promptHash,
-                sessionMeta: toSessionMeta(item.session),
-            };
-            lines.push(JSON.stringify({ key, request: digestBatchRequest(item.session) }));
-        });
-
-        const uploadPath = path.join(os.tmpdir(), `gemdex-batch-input-${process.pid}-${Math.random().toString(36).slice(2)}.jsonl`);
-        let uploadedName: string | undefined;
-        try {
-            fs.writeFileSync(uploadPath, `${lines.join('\n')}\n`, 'utf8');
-            const uploaded = await client.files.upload({
-                file: uploadPath,
-                config: { displayName: 'gemdex-chat-history-ingest', mimeType: 'jsonl' },
-            });
-            uploadedName = uploaded.name ?? undefined;
-        } finally {
-            fs.rmSync(uploadPath, { force: true });
-        }
-        if (!uploadedName) {
-            throw new Error('File upload for the batch job returned no file name.');
-        }
-
-        const job = await client.batches.create({
-            model: digester.model,
-            src: uploadedName,
-            config: { displayName: 'gemdex-chat-history-ingest' },
-        });
-        if (!job.name) {
-            throw new Error('Batch job creation returned no job name.');
-        }
-
-        const pending: PendingBatchJob = {
-            jobName: job.name,
-            model: digester.model,
-            submittedAt: Date.now(),
-            requests,
-        };
-        this.ledger.setPendingBatch(pending);
-        this.progress = {
-            state: 'batchPending',
-            processed: 0,
-            failed: 0,
-            skipped: this.progress.skipped,
-            total: sessions.length,
-            pendingBatch: {
-                jobName: pending.jobName,
-                model: pending.model,
-                submittedAt: pending.submittedAt,
-                requestCount: sessions.length,
-            },
-        };
     }
 }
 
 function toSessionMeta(session: ParsedSession) {
     const { turns: _turns, ...meta } = session;
     return meta;
-}
-
-/** Pull the text payload out of a (JSON-decoded) GenerateContentResponse. */
-export function extractResponseText(response: unknown): string | null {
-    if (!response || typeof response !== 'object') return null;
-    const candidates = (response as Record<string, unknown>).candidates;
-    if (!Array.isArray(candidates) || candidates.length === 0) return null;
-    const content = (candidates[0] as Record<string, unknown> | undefined)?.content;
-    const parts = (content as Record<string, unknown> | undefined)?.parts;
-    if (!Array.isArray(parts)) return null;
-    const text = parts
-        .map((part) => (part && typeof part === 'object' ? (part as Record<string, unknown>).text : undefined))
-        .filter((value): value is string => typeof value === 'string')
-        .join('');
-    return text || null;
 }

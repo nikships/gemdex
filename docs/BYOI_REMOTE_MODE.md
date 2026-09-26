@@ -1,11 +1,12 @@
-# BYOI Remote Mode Architecture and API Contract
+# BYOI HTTP Architecture and API Contract
 
 Status: implemented v1 contract
 
-Gemdex is local-first: the MCP server and desktop sidecar can use Gemini
-embeddings and an embedded LanceDB store on the user's machine. BYOI remote mode
-adds a user-owned Gemdex Server so multiple clients can connect to one durable
-memory backend without giving every client machine a Gemini API key. For
+The self-hosted stack serves agents through Streamable HTTP MCP and humans
+through the web manager. Both call a user-owned Gemdex Server, which owns
+Gemini embedding, Postgres/pgvector and attachment storage. Clients need no
+Gemini API key. The npx stdio package and desktop sidecar use a separate
+local MLX/LanceDB pool, not this HTTP backend. For
 deployment and operations, see [`BYOI_OPERATIONS.md`](BYOI_OPERATIONS.md).
 
 This document defines the implemented remote architecture and v1 HTTP API. It
@@ -14,54 +15,45 @@ save/recall/update, parent-document chunking, and relevance-only ranking.
 
 ## Goals
 
-- Define local mode versus remote mode behavior.
-- Specify the v1 HTTP API used by remote MCP clients, CLI clients, and the
-  desktop app.
-- Keep the MCP public tool surface exactly `save_memory`, `recall`, and
-  `update_memory`.
-- Define attachment handling for local clients and the remote server.
+- Specify the v1 HTTP API used by HTTP MCP, the web BFF and direct integrations.
+- Keep HTTP MCP at six tools: `save_memory`, `recall`, `get_memory`,
+  `update_memory`, `report_outcome`, `read_attachment`. Stdio also has delete.
+- Define inline attachment handling for the self-hosted server.
 - Define v1 auth as bearer-token-first, with reverse-proxy and OIDC-compatible
   extension points.
 - Define client/server version and compatibility checks.
 
-## Modes
+## Local and self-hosted pools
 
-### Local Mode
+### Local package
 
-Local mode remains the default.
-
-- The MCP stdio server builds a local `MemoryStore`.
-- Embedding execution happens on the client machine with `GEMINI_API_KEY`.
+- The MCP stdio server builds a local `MemoryStore` with on-device MLX embeddings.
 - The embedded LanceDB store persists under `~/.gemdex/lance` by default.
 - Blob attachments persist under `~/.gemdex/blobs` by default.
 - The desktop app starts a localhost sidecar bound to `127.0.0.1` only.
 - The memory pool is global on that machine: no scopes, tags, projects, or
   per-repo buckets.
 
-### Remote Mode
+### Self-hosted stack
 
-Remote mode points clients at a user-owned Gemdex Server.
+HTTP MCP and web connect to a user-owned Gemdex Server.
 
 - The Gemdex Server owns embedding execution, database access, and blob storage.
-- Client machines do not need `GEMINI_API_KEY` for remote mode.
+- Only the server needs `GEMINI_API_KEY`.
 - Clients send memory text and inline attachment payloads to the server.
 - The server stores one global memory pool per deployment.
-- The MCP server still exposes only `save_memory`, `recall`, and
-  `update_memory`; remote-only management actions stay outside MCP.
-- The desktop app and CLI may expose browse, create, edit, delete,
-  import/export, and connection-management workflows against the same server.
+- The HTTP MCP service exposes six tools; delete stays outside that surface.
+- The web manager exposes browse, create, edit, delete, import/export and
+  transcript upload against this pool.
 
-Remote mode is not a hosted Gemdex SaaS. The user supplies and operates the
+BYOI is not a hosted Gemdex SaaS. The user supplies and operates the
 server, token, Gemini key, Postgres/pgvector database, and blob storage.
 
 ## Components
 
-- **MCP stdio server**: Agent-facing process. It validates tool input, resolves
-  local attachment paths into inline base64 payloads, and calls either the local
-  backend or remote HTTP backend. It must not add remote-only tools.
-- **Desktop app sidecar**: Local management API used by the native app. In
-  remote mode it can act as a client to the Gemdex Server while keeping
-  long-lived secrets out of frontend JavaScript state.
+- **HTTP MCP service**: Agent-facing Python process at `/mcp`. Validates tool
+  inputs, accepts inline base64 attachments and calls the private `/v1` API.
+- **Web BFF**: Authenticates the browser and keeps the BYOI bearer server-side.
 - **Gemdex Server**: User-owned HTTP service exposing `/v1/*`. It embeds,
   chunks, ranks, stores, lists, deletes, imports, exports, and serves
   attachment bytes.
@@ -121,10 +113,10 @@ memory content, secrets, or database records.
 }
 ```
 
-Remote clients must call `/v1/version` before data routes. If the server is not
-compatible, the client must fail before sending memory data and show a message
-that includes the client version, server version, and required client/server
-range.
+`/v1/version` advertises compatibility metadata for HTTP integrations.
+`minClientVersion` is a protocol compatibility floor, not the server release
+version. Integrations should check compatibility before sending memory data;
+this endpoint does not configure an npx client.
 
 ### Memory Records
 
@@ -152,7 +144,7 @@ Canonical memory response shape:
 `createdAt` and `updatedAt` are epoch milliseconds, matching the local
 `Memory` and `MemorySummary` types. Attachment metadata uses `byteLength` for
 decoded bytes and `kind` for the media category (`image`, `audio`, `video`, or
-`pdf`).
+`pdf`, or non-embedded `file`).
 
 Attachment input uses inline base64 only:
 
@@ -164,20 +156,20 @@ Attachment input uses inline base64 only:
 }
 ```
 
-HTTP clients must not send local filesystem paths to the Gemdex Server. Path
-resolution lives in local client layers, especially MCP stdio handlers, before
-upload.
+HTTP clients must not send local filesystem paths to the Gemdex Server.
+Clients that read a local file must encode its bytes before upload; the
+HTTP MCP service rejects `path` inputs.
 
 ### Memory CRUD
 
 | Method | Path | Purpose |
 |---|---|---|
 | `POST` | `/v1/memories` | Create a memory from text and/or inline attachments. |
-| `GET` | `/v1/memories` | List memory summaries, suitable for the desktop app. |
+| `GET` | `/v1/memories` | List memory summaries for HTTP clients. |
 | `GET` | `/v1/memories/:id` | Read one full parent memory. |
 | `PUT` | `/v1/memories/:id` | Replace supplied mutable fields and re-embed affected content. |
 | `PATCH` | `/v1/memories/:id` | Partially update supplied fields and re-embed affected content. |
-| `DELETE` | `/v1/memories/:id` | Delete a memory. Available to human management clients, never MCP. |
+| `DELETE` | `/v1/memories/:id` | Delete a memory. Used by web management, not exposed as an HTTP MCP tool. |
 
 `POST /v1/memories` request:
 
@@ -304,14 +296,20 @@ parent memories.
 {
   "results": [
     {
-      "memory": {},
+      "id": "mem_...",
+      "title": "Deployment playbook",
+      "content": "Full parent memory content",
+      "attachments": [],
+      "createdAt": 1812144000000,
+      "updatedAt": 1812144000000,
       "score": 0.42
     }
   ]
 }
 ```
 
-Scores are for relative display/debugging only. Clients must not treat score
+Recall results are flat memory records with a `score`, not `{memory, score}`
+wrappers. Scores are for relative display/debugging only. Clients must not treat score
 values as stable across server versions or backends.
 
 ### Attachment Reads And Captions
@@ -406,7 +404,8 @@ The HTTP API exchanges JSON objects, not JSONL streams.
 
 ```json
 {
-  "imported": 1
+  "imported": 1,
+  "errors": []
 }
 ```
 
@@ -439,12 +438,10 @@ Remote recall must preserve Gemdex's current ranking semantics.
 ## Attachment Contract
 
 - The Gemdex Server accepts inline base64 attachment payloads only.
-- Local MCP handlers may accept `path` inputs from agents, but they must read the
-  file, infer or validate `mimeType`, enforce limits, and upload inline data.
 - The HTTP server must not resolve arbitrary client filesystem paths.
-- Supported attachment categories stay aligned with local mode: image, audio,
-  video, and PDF.
-- The per-attachment inline payload ceiling remains 20 MB unless a later API
+- Supported server categories are image, audio, video, PDF and non-embedded
+  text/JSON files. Local MLX supports only new text-file attachments.
+- The per-attachment inline payload ceiling is 20 MiB unless a later API
   version explicitly changes it.
 - Raw attachment bytes live in server-side blob storage and round-trip through
   export/import.
@@ -474,7 +471,7 @@ Future-compatible extension points:
 - The URL path carries the major API version: `/v1`.
 - Backward-compatible fields and capabilities may be added to v1 responses.
 - Breaking protocol changes require a new major path such as `/v2`.
-- Remote clients must check `/v1/version` before sending memory content.
+- HTTP integrations should check `/v1/version` before sending memory content.
 - Compatibility errors must tell the user what is installed and what is
   required, for example: "Gemdex client 0.3.7 requires Gemdex Server API v1 with
   protocolVersion 1; server returned API v1 protocolVersion 2."
@@ -487,4 +484,4 @@ Future-compatible extension points:
 - End-to-end encryption claims. BYOI users own their deployment security, but
   Gemdex v1 does not claim E2EE.
 - Background capture, automatic recall, or implicit session logging.
-- A delete tool in MCP.
+- A delete tool in HTTP MCP.

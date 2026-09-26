@@ -5,7 +5,7 @@ endpoint, and the browser manager UI — with only the MCP endpoint and the UI
 exposed publicly over HTTPS.
 
 **Just want it running?** [`scripts/install.sh`](../scripts/install.sh) automates
-everything below — secrets, build, health, and a printed MCP client config:
+secrets, build, health, and a printed Streamable HTTP MCP client config:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/nikships/gemdex/main/scripts/install.sh | bash
@@ -42,8 +42,9 @@ docker compose up -d --build
 
 ## How this differs from `packages/server/docker-compose.yml`
 
-That one is the **BYOI-only** stack — what `npm run init` sets up and what the
-desktop app talks to on a single machine. It stays as-is.
+That one is the **BYOI-only** stack, set up by `npm run init` for private `/v1`
+clients. The desktop app and npx package use their own local MLX/LanceDB pool,
+not that server.
 
 This one adds the MCP surface and is meant to sit behind a public edge. Separate
 project name (`gemdex-deploy` vs `gemdex`) so both can run on one host, which
@@ -60,17 +61,18 @@ gives you an empty pool until you migrate the data. See
 
 Both gate on the same single `GEMDEX_ALLOWED_EMAIL` and can share one Google
 OAuth client; each needs its own redirect URI registered. They are separate
-containers because they authenticate different *kinds* of caller: a browser
-cannot present a bearer token, and an agent should not be able to delete.
+containers because they authenticate different *kinds* of caller. HTTP MCP
+deliberately omits delete; local stdio MCP has `delete_memory`.
 
 `gemdex-web` holds the BYOI bearer server-side and never sends it to the page —
 that is what a backend-for-frontend is for. It is stateless (the session lives
 in the browser's cookie), so it runs read-only with no volume.
 
 It also has **no Gemini key**. Its session-upload page hands raw chat
-transcripts to `gemdex-server`, which cleans and digests them — that container is
-the only one holding the ingest pipeline, `GEMINI_API_KEY`, and the database at
-once, so the credential count is unchanged by the feature.
+transcripts to `gemdex-server`, which cleans and digests them with Gemini.
+That container holds the ingest pipeline, `GEMINI_API_KEY`, and database
+access. Agent clients connect to `/mcp`; the installer prints no stdio client
+configuration.
 
 ## The one invariant
 

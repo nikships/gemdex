@@ -19,7 +19,9 @@ You need:
 
 - Node.js ≥ 24
 - pnpm ≥ 10 (`corepack enable && corepack prepare pnpm@latest --activate`)
-- A Google AI Studio API key (free tier is fine for development)
+- Native arm64 macOS 14+ for real local MLX inference. Unit tests use fixtures.
+- Claude Code installed and logged in for real local ingestion/hygiene.
+- A server-owned Google AI Studio key only for real BYOI embedding/upload tests.
 
 ```bash
 git clone https://github.com/nikships/gemdex.git
@@ -31,13 +33,10 @@ pnpm build
 The memory store is embedded (LanceDB), so there's no daemon to start — it
 persists at `~/.gemdex/lance` by default.
 
-Set the env vars used by tests / dev runs:
-
-```bash
-export GEMINI_API_KEY=your-key
-# Optional: override the default LanceDB location
-# export LANCEDB_PATH=/tmp/gemdex-dev
-```
+Use disposable storage fixtures in tests, not your personal memory pool.
+`LANCEDB_PATH` overrides the local vector directory, not every blob/ledger path.
+Local model installation is explicit (`npx gemdex-mcp install`); inference
+does not download a runtime or model. Mock Claude Code in unit tests.
 
 ## Common commands
 
@@ -64,14 +63,15 @@ export GEMINI_API_KEY=your-key
 
 The monorepo is small — find the right layer before you change anything:
 
-- `packages/core` (`gemdex-core`) — the engine: `GeminiEmbedding`,
-  `LanceDBVectorDatabase` (hybrid dense + BM25 + RRF), and `memory/` (the
-  `MemoryStore` + parent-document chunker). Reuse these layers; don't reach
-  around `MemoryStore` for store access.
-- `packages/mcp` (`gemdex-mcp`) — the MCP stdio server (the three tools) plus
-  `serve.ts`, the localhost HTTP sidecar that backs the desktop app.
-- `packages/app` — the native SwiftUI macOS desktop manager (Apple Silicon).
-  No memory logic lives in the app.
+- `packages/core` (`gemdex-core`): local `MemoryStore`, `MlxEmbedding`,
+  LanceDB hybrid retrieval, shared HTTP router, and inference. Server-side
+  `GeminiEmbedding` and `SessionDigester` also live here.
+- `packages/mcp` (`gemdex-mcp`): seven local stdio tools, local CLI, and
+  `serve.ts`, the desktop's localhost sidecar.
+- `packages/server`: BYOI `/v1`, Postgres/pgvector and server-owned embedding.
+- `packages/mcp-http` and `packages/web`: Python HTTP clients for BYOI, serving
+  agents and browsers respectively. Neither is an npx remote backend.
+- `packages/app`: native SwiftUI local manager. No memory logic lives here.
 
 When adding behaviour, add a unit test next to the code it covers.
 
@@ -84,7 +84,16 @@ When adding behaviour, add a unit test next to the code it covers.
 
 ## Releasing (maintainers)
 
-See [`docs/RELEASE_CHECKLIST.md`](docs/RELEASE_CHECKLIST.md) for the full release flow.
+Release automation is in [`.github/workflows/release.yml`](.github/workflows/release.yml).
+
+## BYOI integration
+
+From the repository root, `pnpm test:byoi` runs
+`packages/server/integration/byoi.mjs` after packages are built. Set
+`BYOI_TEST_DATABASE_URL` to a dedicated disposable Postgres database with
+pgvector. The harness uses deterministic embeddings and exercises server
+`/v1` HTTP directly. CI calls it in **BYOI integration (Postgres + server)**.
+Do not point it at a valuable database.
 
 ## Questions?
 

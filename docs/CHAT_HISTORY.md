@@ -1,125 +1,120 @@
-# Chat-history ingestion — which path to use
+# Chat-history ingestion
 
-Gemdex can distill coding-agent chat transcripts into memories: **one memory per
-session**, holding a Gemini-written digest plus the full cleaned transcript as a
-non-embedded `file` attachment. There are three ways to get a session into the
-pool, and picking the wrong one is the most common source of confusion in a
-self-hosted setup.
+A chat memory contains a generated digest and a cleaned transcript as a
+non-embedded `file` attachment. Only the digest text is embedded.
 
-## The invariant that makes all three safe
+## Choose the destination first
 
-Every path writes the same deterministic id:
+| Path | Destination | Inference | Authentication |
+|------|-------------|-----------|----------------|
+| `npx gemdex-mcp ingest-history` or sidecar `/ingest/*` | This machine's LanceDB pool | Claude Code Haiku using the existing login | Local process or sidecar token |
+| Web manager upload | Self-hosted Postgres pool | Gemini on `gemdex-server` | Manager session |
+| `POST /mcp/sync/records` from an OAuth client | Self-hosted Postgres pool | Caller supplies already-digested records | HTTP MCP access token |
+| Host-local transcript submission to `/v1/sessions/ingest` | Self-hosted Postgres pool | Gemini on `gemdex-server` | BYOI bearer, private HTTP |
 
-```
-chat:<source>:<sessionId>
-```
+Running the npx CLI on a deployment host still writes to that host's **local**
+LanceDB pool. It does not select the self-hosted backend. For the self-hosted
+pool, use web upload or a client of the private ingestion API.
 
-That single fact is why the paths compose instead of colliding:
+## Local ingestion
 
-- Re-running any path **upserts** rather than duplicating.
-- A session already synced from a laptop is *updated*, not doubled, if it is
-  later uploaded through the browser.
-- The pool itself is the durable record of what has been ingested — filtering on
-  the `chat:` prefix yields exactly the ingested sessions, which is how the web
-  manager's ingest-history view works without any extra ledger or schema.
-
-All paths also share the same cleaning and the same digest prompt. The digest
-text is embedded; the transcript body is **not**.
-
-With local MLX enabled, local `ingest-history` writes digest text into the MLX
-bank through the same `MemoryStore` import path; transcript `file` blobs stay
-non-embedded and readable without Gemini. Digestion itself still uses Gemini
-and needs a key (`packages/mcp/src/cli.ts`, `serve.ts`). `migrate-text` moves only
-stored text rows, never re-digests sessions or embeds transcript blobs. The
-deterministic ids, ledger, remote sync, and new-sessions-only rules are unchanged.
-
-Ingestion is **new-sessions-only**. A session that was already ingested is never
-reprocessed, even if its transcript later changes.
-
-## Decision table
-
-| | **A — `gemdex sync-history`** | **B — web upload** | **Host-only — `ingest-history` on the host** |
-|---|---|---|---|
-| Run it from | Each coding machine | Any browser | The host itself |
-| Command / surface | `gemdex sync-history` | Manager → upload transcripts | `gemdex ingest-history` |
-| Reads transcripts from | That machine's disk | Files you hand it | The host's own disk |
-| Who digests (and pays) | That machine, with **its own** `GEMINI_API_KEY` | **`gemdex-server`** on the host | The host |
-| Auth | OAuth 2.1 to `/mcp`, browser once | Your manager session | None (local process) |
-| Needs a local Gemini key | Yes | No | Yes (on the host) |
-| Best for | The normal case: laptops that generate sessions | A machine that never ran the CLI; someone's exported session; a one-off | A stack where the agent runs *on* the host |
-
-### A — `gemdex sync-history` (the normal path)
-
-`ingest-history` pointed at a **remote** host instead of this machine's pool:
-same scan, digest, and ledger semantics, but each digest is upserted into the
-host's pool over its OAuth-protected `/mcp` endpoint.
+Install the local model with `npx gemdex-mcp install`, then install Claude Code
+and sign in with `claude auth login`.
 
 ```bash
-gemdex sync-history --url https://memory.example.com/mcp
+npx gemdex-mcp status
+npx gemdex-mcp ingest-history --source claude --dry-run
+npx gemdex-mcp ingest-history --source claude
 ```
 
-Run it on every coding machine. **The host never reads your laptop's disk** —
-the laptop does the work and pushes finished records. The first run opens a
-browser once to authorize as the host's allowlisted Google account; the refresh
-token is then stored in `~/.gemdex/sync-auth.json` (`0600`). `--logout` forgets
-it.
+Repeat `--source` for `claude`, `factory`, `codex`, `antigravity`, or a custom
+folder path. Without it, the CLI uses existing preset folders.
 
-Useful flags: `--dry-run` prints the scan plus a cost estimate; `--batch`
-submits a Gemini Batch API job (50% cost, results within ~24h) that you collect
-later with `--collect`; `--source` selects presets (`claude`, `factory`, `codex`,
-`antigravity`) or any folder of `.jsonl` sessions.
+`packages/core/src/ingest/ingest-manager.ts` scans against the local
+`~/.gemdex/ingest.json` ledger. Runs are permanently **new-sessions-only**:
+ledger-known sessions are skipped even if changed. Scan diagnostics may show
+those changes, but they are not eligible for digestion. Active and trivial
+sessions are skipped. A dry run scans and estimates without inference.
 
-Its ledger (`~/.gemdex/ingest.json`, keyed by absolute path + mtime) is
-inherently local — a per-path ledger is meaningless to a host that never had
-those paths.
+Local ingestion and memory hygiene use
+`packages/core/src/inference/claude-code.ts`: isolated
+`claude -p --model haiku` with structured JSON output, no tools, user settings,
+skills, MCP servers, hooks, CLAUDE.md or session persistence, and a temporary
+cwd. The existing Claude Code login is retained. `checkClaudeCode()` returns
+`ready | missing | unauthenticated | error` without a model call; the sidecar
+adds `checking` while probing. `GEMDEX_CLAUDE_PATH` can select the binary.
 
-### B — web upload (hand over raw transcripts)
+Concurrency is four, with at most three total attempts per session/cluster
+and a five-minute timeout per inference call. Cost estimates use Haiku API
+list prices ($1 input / $5 output per million tokens). A Claude subscription
+counts usage against plan limits rather than billing per token.
+There is no batch-submit/collect workflow.
 
-The human uploads transcripts in the manager and the **deployment** cleans and
-digests them. This is how a machine that never ran the CLI — or an exported
-session from somewhere else — still lands in the pool, with no local Gemini key
-and nothing installed.
+Sidecar `/ingest/start` and `/hygiene/start` return 400 until Claude Code is
+ready. Ordinary memory operations require MLX installation, not Claude login.
+See the [sidecar contract](../packages/mcp/AGENTS.md#sidecar-contract).
 
-The digesting happens on `gemdex-server`, the one process that already holds a
-Gemini key; the web BFF only decodes the form (expanding zips) and forwards to
-`POST /v1/sessions/ingest`. Limits: `.jsonl` transcripts or `.zip` archives, ≤25
-files, ≤24 MB per file, ≤64 MB per request. The response is always a per-file
-list — a corrupt transcript among ten good ones is that file's status, never a
-500 that discards the batch.
+### Upgrade from Gemini-based releases
 
-### Host-only sessions
+`npx gemdex-mcp migrate` re-embeds stored text into the MLX table; it does not
+re-digest sessions or embed transcript bytes. Legacy rows block recall and
+hygiene until migrated. To attach transcripts referenced only by a digest's
+path footer, use `npx gemdex-mcp backfill-transcripts --dry-run`, then omit
+`--dry-run` to write. Missing files are skipped with a message.
 
-If the agent runs on the host itself, that machine's transcripts are already
-local: use `gemdex ingest-history` there against the active backend. No OAuth, no
-upload. It needs a Gemini key on the host.
+## Self-hosted web upload
 
-## Practical guidance
+The manager accepts `.jsonl` transcripts or `.zip` archives: up to 25 files,
+24 MiB per file and 64 MiB per request. The web BFF decodes the form, expands
+archives, and forwards raw transcripts to `POST /v1/sessions/ingest`.
 
-- **Default to A on every machine that generates sessions.** It scales to many
-  laptops, keeps cost with whoever created the work, and needs no file shuffling.
-- **Use B for the exceptions**, not as the routine — someone else's export, a
-  machine you will not install the CLI on, a phone-to-browser handoff.
-- Mixing them is safe and expected. The deterministic id absorbs overlap.
-- One caveat when reading the manager's ingest view: a digest memory's
-  `createdAt` / `updatedAt` are the **session's** first and last activity
-  timestamps, not when it was ingested.
+`packages/server/src/session-ingest.ts` uses core's Gemini `SessionDigester`
+and `ingestUploadedSessions`. The server owns `GEMINI_API_KEY`; browsers and
+the web BFF do not. Uploaded files have no host path ledger. Each file returns
+`ingested`, `skipped` (`unparseable` or `trivial`), or `failed`, independently.
+Re-upload is allowed and upserts the same id.
 
-## Reading a transcript back
+For host-local automation, a private authenticated HTTP client can submit
+`{"files":[{"filename":"session.jsonl","content":"<raw JSONL>"}]}` to
+`/v1/sessions/ingest`. This endpoint accepts up to 25 files, with a
+`40 * 1024 * 1024`-character per-file limit and 100 MiB request-body cap.
+It does not scan folders itself.
 
-After `recall` surfaces a chat digest, the agent fetches the stored transcript
-with the `read_attachment` tool (works local and remote, no `GEMINI_API_KEY`):
+## OAuth record import
 
-```text
-read_attachment memory_id="chat:factory:<sessionId>"
-```
+`packages/mcp-http/src/gemdex_mcp_http/sync.py` exposes
+`POST /mcp/sync/records` for clients that already have digested records.
+Any authorized OAuth client can send `{"records":[...]}` with its HTTP MCP
+bearer token. This is an HTTP route, not an MCP tool, and not an npx command.
+In static-auth deployments it uses the configured static bearer instead.
 
-Omit `attachment_id` when the memory has a single transcript attachment.
+The route verifies the token itself because FastMCP custom routes are
+auth-exempt. It accepts at most 50 records per request, capped at 100 MiB;
+ids must start with `chat:`. Unknown fields are dropped. It forwards to
+BYOI `/v1/import`, which upserts by id. Keep it under `/mcp/` so the public
+edge routes it to the authenticated MCP service.
 
-## Setup pointers
+## Shared ids, different ledger rules
 
-- Per-machine sync against a public host:
-  [deploy guide → sync chat history](SELF_HOST_DEPLOY.md#sync-chat-history-from-each-machine)
-- Browser upload:
-  [deploy guide → upload sessions](SELF_HOST_DEPLOY.md#or-upload-sessions-from-the-browser)
-- Attachment/transcript storage behaviour:
-  [BYOI operations guide](BYOI_OPERATIONS.md)
+All built-in digest paths derive `chat:<source>:<sessionId>`, share transcript
+cleaning and digest rendering, and preserve source activity timestamps.
+An OAuth record producer should use that same id convention.
+
+Ids make repeated imports and uploads upsert rather than duplicate. They do
+not make generated text byte-identical across models, or make local ingestion
+reprocess ledger-known files. Upload uses a content-derived session id when
+available and the filename stem otherwise; preserve filenames when relying
+on the fallback.
+
+The web history view derives its records from `chat:` memories, not a laptop's
+ledger. `createdAt` and `updatedAt` mean session activity, not ingestion time.
+
+## Read the transcript
+
+Use `get_memory` to inspect attachments, then
+`read_attachment(memory_id="chat:factory:<sessionId>")`. Omit
+`attachment_id` when there is a single transcript. Both stdio and HTTP MCP
+offer this tool; reading stored bytes does not invoke an embedding model.
+
+For public setup, see [deployment](SELF_HOST_DEPLOY.md#upload-sessions-from-the-browser);
+for backups and custody, see [operations](BYOI_OPERATIONS.md).

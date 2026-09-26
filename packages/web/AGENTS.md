@@ -18,8 +18,9 @@ memory logic:
              session   (this package)            (BYOI, :8765)      (the engine)
 ```
 
-It is the *only* surface with delete, and the only one that authenticates a
-**person** rather than a **program**. It is also the only surface where a human
+It is the self-hosted human delete surface; local stdio also has
+`delete_memory`. It authenticates a **person** rather than a **program**.
+It is also the surface where a human
 can hand raw chat transcripts to the deployment to digest (see §7).
 
 ## The architectural idea: two credentials that never meet
@@ -105,8 +106,8 @@ address.
 
 ### 4. Delete lives here and must not migrate to MCP
 
-Root `AGENTS.md`: "six tools, no delete." Deletion is irreversible, so it is a
-deliberate human act behind an authenticated UI and a confirm dialog. Do not add
+HTTP MCP has six tools without delete; local stdio has seven including delete.
+Web deletion is a deliberate human act behind an authenticated UI and a confirm dialog. Do not add
 a delete tool to `packages/mcp-http` to make the surfaces symmetric — the
 asymmetry is the design.
 
@@ -152,19 +153,17 @@ tempting alternatives are all worse:
 - **The pipeline is `gemdex-core`, which is TypeScript.** This service is Python
   and structurally cannot import it — the same constraint that makes `mcp-http`
   a thin `/v1` wrapper.
-- **Reimplementing it here would fork the digest.** Path A (`gemdex sync-history`
-  on a laptop) and path B must produce byte-comparable memories: same cleaning,
-  same prompt, and above all the same deterministic
-  `chat:<source>:<sessionId>` id, which is what makes re-upload an *upsert*
-  rather than a duplicate. Two implementations of that would drift on the first
-  prompt tweak, and the failure mode is silent — duplicate memories with
-  different digests of the same session.
+- **Do not reimplement core's parser or id derivation in Python.**
+  Local Claude Code ingestion and server Gemini upload share cleaning,
+  digest rendering and deterministic `chat:<source>:<sessionId>` ids.
+  Generated prose need not be identical, but matching ids make imports
+  upsert rather than duplicate. The local npx CLI writes to its own pool.
 - **Bundling Node into this image was rejected.** The web Dockerfile builds the
   SPA in a Node stage and deliberately drops Node from the runtime image; adding
   it back plus a built copy of core would double the image's toolchain surface
   *and* require `GEMINI_API_KEY` in a third container.
 - **`POST /mcp/sync/records` alone is not enough.** That route (GEM2-6) takes
-  records that are *already digested* — it is path A's push endpoint. Path B's
+  records that are *already digested* from an authorized OAuth client. Upload's
   input is a raw transcript, so something has to do the digesting first.
 
 `gemdex-server` is the only process that already holds all three prerequisites
@@ -203,9 +202,8 @@ Two status surfaces (`ingest_history.py`, `hygiene.py`) that both had to answer
 guess. Both are pure — neither module imports the client.
 
 **Ingest history has no ledger to read.** The instinct is to look for one; there
-isn't one on the host. `gemdex sync-history` writes `~/.gemdex/ingest.json` on
-each **laptop**, keyed by absolute path + mtime — meaningless to a host that
-never had those paths, and never transmitted. Web upload (path B) returns a
+isn't one for uploaded files. Local `ingest-history` writes a path-based ledger
+for its own pool; it is not transmitted to BYOI. Web upload returns a
 per-request summary that the browser renders and drops. The memories are
 therefore the only durable host-side record, and the better one: it cannot drift
 from reality, and both ingest paths appear identically because both write the
@@ -232,15 +230,14 @@ and so survives into the 100-char `preview`. That is the reason the page is one
 **Hygiene cannot run here, and the endpoint says so.** Phase-1 clustering reads
 row vectors through `MemoryStore.listParentsWithVectors()` — a **local LanceDB**
 method, not on the `MemoryBackend` interface, with no `PostgresMemoryBackend`
-equivalent and no `/v1` route. `serve.ts`'s `localStore()` rejects hygiene in
-remote mode explicitly. Making it work host-side means a new vector-listing
+equivalent and no `/v1` route. `serve.ts`'s `localStore()` requires
+`LocalMemoryBackend`. Making it work host-side means a new vector-listing
 route plus pgvector clustering: real new infrastructure, its own decision.
 
-So don't add a scan button. The endpoint instead reports the protections that
-genuinely exist — save-time similar-memory detection at `GEMDEX_SIMILAR_THRESHOLD`
-(`0.90`, the *same cosine scale* hygiene clusters on), the deterministic id that
-makes chat digests structurally un-duplicatable, and human-only deletion — plus
-the command for a real pass and the caveat that it covers a **different** pool.
+Do not add a scan button without a server implementation. Deterministic chat
+ids make imports upsert, and web deletion requires human confirmation.
+Local save-time similarity and hygiene inspect a **different** pool; do not
+describe them as checks against this deployment.
 `hygiene/status` also takes **no** upstream call, so it keeps answering when the
 pool is down, same principle as `/api/status`.
 

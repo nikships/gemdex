@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Memory hygiene: find stale, duplicate, or contradicted memories. Four-step
 /// flow: intro (last report summary) → scan (local vector clustering + cost
-/// estimate + judge-model choice) → run LLM analysis with live progress →
+/// list-price estimate) → run Claude Code analysis with live progress →
 /// review clusters and delete human-approved memories. All clustering and
 /// judging happens in the sidecar behind `/hygiene/*`; this view is a thin
 /// polling client and only owns checkbox selection state.
@@ -182,20 +182,12 @@ struct HygieneView: View {
     private var introStep: some View {
         VStack(alignment: .leading, spacing: 14) {
             if !hygieneReady {
-                VStack(alignment: .leading, spacing: 10) {
-                    GeminiReadinessAlert(readiness: model.geminiReadiness, compact: true)
-                    Text("Hygiene analysis is disabled. Judging always runs locally with your Gemini key, even when memories are stored on a remote Gemdex Server.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Button("Open Storage & Gemini settings") {
-                        model.showHygiene = false
-                        model.showIngest = false
-                        model.showSettings = true
-                    }
-                    .brandPrimary()
-                }
+                ClaudeCodeReadinessAlert(
+                    blockedFeature: "Hygiene analysis is disabled. Clusters are judged by your local Claude Code CLI."
+                )
             }
             Text("How it works").font(.headline)
-            Text("A fast local scan clusters similar memories by embedding similarity — no LLM calls, no cost. You then pick a judge model and run an analysis that reads each cluster and marks every memory as keep, duplicate, superseded, or contradicted, with evidence. Finally you review the findings and choose exactly what to delete.")
+            Text("A fast local scan clusters similar memories by embedding similarity — no LLM calls, no cost. You then run an analysis with Claude Code that reads each cluster and marks every memory as keep, duplicate, superseded, or contradicted, with evidence. Finally you review the findings and choose exactly what to delete.")
                 .font(.callout).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if let report = envelope?.report {
@@ -280,36 +272,14 @@ struct HygieneView: View {
                     Text("Judge model & cost").font(.headline)
                     Text("≈ \(formatTokens(scan.estimatedInputTokens)) input / \(formatTokens(scan.estimatedOutputTokens)) output tokens across \(scan.clusters.count) clusters. Pricing as of \(envelope?.pricingAsOf ?? "—").")
                         .font(.caption).foregroundStyle(.secondary)
-                    Picker("Model", selection: $selectedModel) {
-                        ForEach(envelope?.models ?? []) { info in
-                            Text("\(info.model) — \(info.description)").tag(info.model)
-                        }
-                    }
-                    costTable(scan.estimates)
+                    ClaudeModelCostSummary(
+                        models: envelope?.models ?? [],
+                        estimates: scan.estimates,
+                        selectedModel: $selectedModel
+                    )
                 }
             }
         }
-    }
-
-    private func costTable(_ estimates: [IngestCostEstimate]) -> some View {
-        Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 4) {
-            GridRow {
-                Text("Model").font(.caption.bold())
-                Text("Standard").font(.caption.bold())
-                Text("Batch").font(.caption.bold())
-            }
-            ForEach(estimates) { estimate in
-                GridRow {
-                    Text(estimate.model)
-                        .font(.caption.monospaced())
-                        .fontWeight(estimate.model == selectedModel ? .bold : .regular)
-                    Text(formatUsd(estimate.standardUsd)).font(.caption.monospaced())
-                    Text(formatUsd(estimate.batchUsd)).font(.caption.monospaced())
-                }
-            }
-        }
-        .padding(10)
-        .glassSurface(cornerRadius: Metric.radiusCard)
     }
 
     private var runningStep: some View {
@@ -486,6 +456,8 @@ struct HygieneView: View {
 
     // MARK: - State helpers
 
+    /// Read from `AppModel` rather than `envelope.hygieneReady` so "Check
+    /// again" unlocks the panel without reloading the report.
     private var hygieneReady: Bool { model.hygieneIsReady }
 
     private var hasJudgedReport: Bool {
@@ -518,9 +490,8 @@ struct HygieneView: View {
                 }
             }
         } catch {
-            let message = (error as? APIError)?.message ?? error.localizedDescription
-            if model.handlePossibleInvalidIngestionKey(message) { return }
-            self.error = message
+            if model.handleNeedsInstall(error) { return }
+            self.error = (error as? APIError)?.message ?? error.localizedDescription
         }
     }
 
@@ -562,7 +533,6 @@ struct HygieneView: View {
     private func activityState(_ phase: JobPhase) -> String {
         switch phase {
         case .running, .cancelling: return "running"
-        case .batchPending: return "running"
         case .completed: return "done"
         case .failed: return "failed"
         case .cancelled: return "cancelled"
@@ -677,7 +647,6 @@ struct HygieneView: View {
             await model.refreshList()
         }
         if let failure {
-            if model.handlePossibleInvalidIngestionKey(failure) { return }
             error = failure
             return
         }
@@ -720,9 +689,8 @@ struct HygieneView: View {
         do {
             try await work()
         } catch {
-            let message = (error as? APIError)?.message ?? error.localizedDescription
-            if model.handlePossibleInvalidIngestionKey(message) { return }
-            self.error = message
+            if model.handleNeedsInstall(error) { return }
+            self.error = (error as? APIError)?.message ?? error.localizedDescription
         }
     }
 
@@ -736,10 +704,6 @@ struct HygieneView: View {
         if tokens >= 1_000_000 { return String(format: "%.1fM", Double(tokens) / 1_000_000) }
         if tokens >= 1_000 { return String(format: "%.0fk", Double(tokens) / 1_000) }
         return "\(tokens)"
-    }
-
-    private func formatUsd(_ value: Double) -> String {
-        value < 0.01 && value > 0 ? "<$0.01" : String(format: "$%.2f", value)
     }
 
     private func formatDate(_ ms: Double) -> String {

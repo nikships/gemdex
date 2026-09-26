@@ -1,55 +1,19 @@
-import { GoogleGenAI, Type } from '@google/genai';
-import { ModelCostEstimate, ParsedSession, SessionDigest, SessionMeta } from './types';
+import { GoogleGenAI } from '@google/genai';
+import { ClaudeCodeRunner, DEFAULT_CLAUDE_MODEL, assertSupportedModel } from '../inference/claude-code';
+import { ParsedSession, SessionDigest, SessionMeta } from './types';
 import { renderTranscript } from './transcript-parser';
 
-/** Default (and only) digest/judge model. */
-export const DEFAULT_DIGEST_MODEL = 'gemini-3.5-flash-lite';
-
-export interface DigestModelInfo {
-    /** USD per 1M input tokens (text), standard pricing. */
-    inputUsdPerMTok: number;
-    /** USD per 1M output tokens (including thinking), standard pricing. */
-    outputUsdPerMTok: number;
-    description: string;
-}
-
-/** Date the pricing constants below were last verified against ai.google.dev. */
-export const DIGEST_PRICING_AS_OF = '2026-06-10';
-
-/**
- * Models offered for session digestion and hygiene judging, with standard-tier
- * pricing. Batch API is 50% of these rates across the board.
- * Single model by design — no picker alternatives.
- */
-export const DIGEST_MODELS: Record<string, DigestModelInfo> = {
-    'gemini-3.5-flash-lite': {
-        inputUsdPerMTok: 0.25,
-        outputUsdPerMTok: 1.5,
-        description: 'Default for digest and hygiene',
-    },
-};
-
-/** Rough chars→tokens divisor for estimates. */
-const CHARS_PER_TOKEN = 4;
 /** Output budget assumed per digest for cost estimates. */
 export const ESTIMATED_OUTPUT_TOKENS_PER_SESSION = 800;
 
-export function estimateCost(
-    inputTokens: number,
-    outputTokens: number,
-): ModelCostEstimate[] {
-    return Object.entries(DIGEST_MODELS).map(([model, info]) => {
-        const standardUsd = (inputTokens * info.inputUsdPerMTok + outputTokens * info.outputUsdPerMTok) / 1_000_000;
-        return {
-            model,
-            standardUsd: Number(standardUsd.toFixed(2)),
-            batchUsd: Number((standardUsd / 2).toFixed(2)),
-        };
-    });
-}
-
-export function estimateTokensForChars(chars: number): number {
-    return Math.ceil(chars / CHARS_PER_TOKEN);
+/**
+ * Anything that turns one parsed session into a structured digest. Local
+ * Gemdex digests with {@link ClaudeCodeDigester}; the BYOI server digests
+ * uploaded sessions with the Gemini {@link SessionDigester}.
+ */
+export interface Digester {
+    readonly model: string;
+    digest(session: ParsedSession): Promise<SessionDigest>;
 }
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -67,47 +31,72 @@ names, where credentials/config live. Prefer concrete specifics over prose.
 Omit anything generic that any engineer would already know. If the session was
 trivial or exploratory, keep every field short rather than padding.`;
 
+/** Digest structured-output schema (JSON Schema; top level must be an object). */
 export const DIGEST_RESPONSE_SCHEMA = {
-    type: Type.OBJECT,
+    type: 'object',
     properties: {
         title: {
-            type: Type.STRING,
+            type: 'string',
             description: "Imperative, searchable title — e.g. 'Set up SSE chat streaming in agent frontend'",
         },
         what_was_done: {
-            type: Type.STRING,
+            type: 'string',
             description: '2-4 sentence narrative of the task and end state',
         },
         how_to_reproduce: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
+            type: 'array',
+            items: { type: 'string' },
             description: 'Ordered steps with exact commands, flags, file paths',
         },
         tools_and_services: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
+            type: 'array',
+            items: { type: 'string' },
             description: "Tools/CLIs/APIs/libraries used and what for — e.g. 'xcrun notarytool — Apple notarization'",
         },
         credentials_and_config: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
+            type: 'array',
+            items: { type: 'string' },
             description: 'Where keys/tokens/profiles/env vars live (names and locations)',
         },
         gotchas: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
+            type: 'array',
+            items: { type: 'string' },
             description: 'Errors hit plus the actual fix; non-obvious constraints',
         },
     },
     required: ['title', 'what_was_done'],
 } as const;
 
+/**
+ * Convert a JSON Schema subset (type/properties/items/required/description/enum)
+ * into Gemini's OpenAPI-style `responseSchema`, whose `type` values are the
+ * upper-case `Type` enum strings.
+ */
+export function toGeminiSchema(schema: unknown): Record<string, unknown> {
+    if (!schema || typeof schema !== 'object') return {};
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(schema as Record<string, unknown>)) {
+        if (key === 'type' && typeof value === 'string') {
+            out.type = value.toUpperCase();
+        } else if (key === 'properties' && value && typeof value === 'object') {
+            out.properties = Object.fromEntries(
+                Object.entries(value as Record<string, unknown>).map(([name, child]) => [name, toGeminiSchema(child)]),
+            );
+        } else if (key === 'items') {
+            out.items = toGeminiSchema(value);
+        } else {
+            out[key] = value;
+        }
+    }
+    return out;
+}
+
 function asStringArray(value: unknown): string[] {
     if (!Array.isArray(value)) return [];
     return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
 }
 
-/** Parse the model's structured-output JSON into a SessionDigest. */
+/** Parse the model's structured-output JSON text into a SessionDigest. */
 export function parseDigestResponse(text: string): SessionDigest {
     let parsed: unknown;
     try {
@@ -115,6 +104,11 @@ export function parseDigestResponse(text: string): SessionDigest {
     } catch {
         throw new Error('Digest model returned invalid JSON');
     }
+    return parseDigestOutput(parsed);
+}
+
+/** Validate an already-decoded structured output into a SessionDigest. */
+export function parseDigestOutput(parsed: unknown): SessionDigest {
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
         throw new Error('Digest model returned a non-object response');
     }
@@ -193,33 +187,9 @@ export function buildDigestPrompt(session: ParsedSession): string {
     return `${contextLines.join('\n')}\n\nTranscript:\n\n${renderTranscript(session.turns)}`;
 }
 
-/** Shared generation config for both standard and batch digest requests. */
-export function digestGenerationConfig(): Record<string, unknown> {
-    return {
-        responseMimeType: 'application/json',
-        responseSchema: DIGEST_RESPONSE_SCHEMA,
-        systemInstruction: DIGEST_SYSTEM_INSTRUCTION,
-        temperature: 0.2,
-    };
-}
-
-/**
- * One inlined `GenerateContentRequest` for a Batch API JSONL line. Unlike the
- * SDK's `config` object, the REST wire format wants `systemInstruction` as a
- * `Content` at the top level (a sibling of `contents`), with the remaining
- * generation settings under `generationConfig`.
- */
-export function digestBatchRequest(session: ParsedSession): Record<string, unknown> {
-    return {
-        contents: [{ role: 'user', parts: [{ text: buildDigestPrompt(session) }] }],
-        systemInstruction: { parts: [{ text: DIGEST_SYSTEM_INSTRUCTION }] },
-        generationConfig: {
-            responseMimeType: 'application/json',
-            responseSchema: DIGEST_RESPONSE_SCHEMA,
-            temperature: 0.2,
-        },
-    };
-}
+/** Default Gemini model for the BYOI server's uploaded-session digests. */
+export const GEMINI_DIGEST_MODEL = 'gemini-3.5-flash-lite';
+const GEMINI_DIGEST_MODELS = [GEMINI_DIGEST_MODEL];
 
 export interface DigesterConfig {
     apiKey: string;
@@ -227,16 +197,19 @@ export interface DigesterConfig {
     baseURL?: string;
 }
 
-/** Thin client that digests one parsed session via `generateContent`. */
-export class SessionDigester {
+/**
+ * Gemini digester used by the BYOI server (`POST /v1/sessions/ingest`), which
+ * holds the deployment's Gemini key. Local Gemdex uses {@link ClaudeCodeDigester}.
+ */
+export class SessionDigester implements Digester {
     private client: GoogleGenAI;
     readonly model: string;
 
     constructor(config: DigesterConfig) {
-        this.model = config.model ?? DEFAULT_DIGEST_MODEL;
-        if (!DIGEST_MODELS[this.model]) {
+        this.model = config.model ?? GEMINI_DIGEST_MODEL;
+        if (!GEMINI_DIGEST_MODELS.includes(this.model)) {
             throw new Error(
-                `Unsupported digest model "${this.model}". Supported: ${Object.keys(DIGEST_MODELS).join(', ')}`,
+                `Unsupported digest model "${this.model}". Supported: ${GEMINI_DIGEST_MODELS.join(', ')}`,
             );
         }
         this.client = new GoogleGenAI({
@@ -253,12 +226,44 @@ export class SessionDigester {
         const response = await this.client.models.generateContent({
             model: this.model,
             contents: buildDigestPrompt(session),
-            config: digestGenerationConfig(),
+            config: {
+                responseMimeType: 'application/json',
+                responseSchema: toGeminiSchema(DIGEST_RESPONSE_SCHEMA),
+                systemInstruction: DIGEST_SYSTEM_INSTRUCTION,
+                temperature: 0.2,
+            },
         });
         const text = response.text;
         if (!text) {
             throw new Error('Digest model returned an empty response');
         }
         return parseDigestResponse(text);
+    }
+}
+
+export interface ClaudeCodeDigesterConfig {
+    model?: string;
+    runner?: ClaudeCodeRunner;
+}
+
+/** Digests one session through the user's local Claude Code CLI. */
+export class ClaudeCodeDigester implements Digester {
+    readonly model: string;
+    private readonly runner: ClaudeCodeRunner;
+
+    constructor(config: ClaudeCodeDigesterConfig = {}) {
+        this.model = config.model ?? DEFAULT_CLAUDE_MODEL;
+        assertSupportedModel(this.model);
+        this.runner = config.runner ?? new ClaudeCodeRunner();
+    }
+
+    async digest(session: ParsedSession): Promise<SessionDigest> {
+        const { output } = await this.runner.runStructured({
+            model: this.model,
+            systemPrompt: DIGEST_SYSTEM_INSTRUCTION,
+            prompt: buildDigestPrompt(session),
+            schema: DIGEST_RESPONSE_SCHEMA,
+        });
+        return parseDigestOutput(output);
     }
 }

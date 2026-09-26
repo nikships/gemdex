@@ -1,7 +1,7 @@
 {
     "name": "gemdex",
     "version": "1.0.47",
-    "description": "A global, persistent memory layer for AI coding agents — Gemini embeddings + LanceDB + MCP",
+    "description": "A global, persistent memory layer for AI coding agents — on-device MLX embeddings + LanceDB + MCP",
     "private": true,
     "scripts": {
         "build": "pnpm -r build",
@@ -14,7 +14,7 @@
         "lint": "pnpm -r lint",
         "lint:fix": "pnpm -r run lint:fix",
         "typecheck": "pnpm -r run typecheck",
-        "test:byoi": "node packages/mcp/integration/byoi.mjs",
+        "test:byoi": "node packages/server/integration/byoi.mjs",
         "release:core": "pnpm --filter gemdex-core... run build && pnpm --filter gemdex-core publish --access public --no-git-checks",
         "release:mcp": "pnpm --filter gemdex-mcp... run build && pnpm --filter gemdex-mcp publish --access public --no-git-checks"
     },

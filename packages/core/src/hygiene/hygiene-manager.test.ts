@@ -6,13 +6,8 @@ import type { MemoryStore, ParentVectorData } from '../memory/memory-store';
 import { clusterIdFor } from './candidate-finder';
 import { HygieneReportStore } from './hygiene-report';
 import { HygieneManager } from './hygiene-manager';
-import type { ClusterJudge, JudgeMemberInput } from './judge';
+import type { Judge, JudgeMemberInput } from './judge';
 import { HygieneFinding } from './types';
-
-jest.mock('@google/genai', () => ({
-    GoogleGenAI: jest.fn().mockImplementation(() => ({})),
-    Type: { OBJECT: 'OBJECT', STRING: 'STRING', ARRAY: 'ARRAY' },
-}));
 
 const DIM = 4;
 
@@ -46,14 +41,14 @@ function fakeStore(parents: ParentVectorData[] = PARENTS): MemoryStore {
     } as unknown as MemoryStore;
 }
 
-function fakeJudge(judge?: jest.Mock): ClusterJudge {
+function fakeJudge(judge?: jest.Mock): Judge {
     return {
-        model: 'gemini-3.5-flash-lite',
+        model: 'haiku',
         judge: judge ?? jest.fn(async (members: JudgeMemberInput[]): Promise<HygieneFinding[]> =>
             members.map((m, index) => index === 0
                 ? { memoryId: m.memoryId, verdict: 'keep', confidence: 'high' }
                 : { memoryId: m.memoryId, verdict: 'duplicate', supersededBy: members[0].memoryId, confidence: 'high' })),
-    } as unknown as ClusterJudge;
+    };
 }
 
 function fakeBackend(overrides: { failOn?: string } = {}): MemoryBackend & { deleted: string[] } {
@@ -79,9 +74,8 @@ afterEach(() => {
     fs.rmSync(dir, { recursive: true, force: true });
 });
 
-function manager(judge: ClusterJudge = fakeJudge()): HygieneManager {
+function manager(judge: Judge = fakeJudge()): HygieneManager {
     return new HygieneManager({
-        apiKey: 'k',
         reportStore,
         createJudge: () => judge,
     });
@@ -97,8 +91,14 @@ describe('HygieneManager.scan', () => {
         expect(result.threshold).toBe(0.9);
         expect(result.estimatedInputTokens).toBeGreaterThan(0);
         expect(result.estimatedOutputTokens).toBe(400);
-        expect(result.estimates.length).toBeGreaterThan(0);
+        expect(result.estimates).toEqual([{ model: 'haiku', usd: expect.any(Number) }]);
         expect((judge.judge as jest.Mock)).not.toHaveBeenCalled();
+    });
+
+    it('can be constructed with no config', () => {
+        const mgr = new HygieneManager();
+        expect(mgr.getProgress()).toEqual({ state: 'idle', judged: 0, failed: 0, total: 0 });
+        expect(mgr.isRunning()).toBe(false);
     });
 
     it('filters dismissed clusters and counts them', async () => {
@@ -125,7 +125,7 @@ describe('HygieneManager.run', () => {
 
         const report = reportStore.getReport()!;
         expect(report.version).toBe(1);
-        expect(report.model).toBe('gemini-3.5-flash-lite');
+        expect(report.model).toBe('haiku');
         expect(report.memoryCount).toBe(3);
         expect(report.clusters).toHaveLength(1);
         expect(report.clusters[0].findings).toEqual([
@@ -173,7 +173,6 @@ describe('HygieneManager.run', () => {
             return members.map((m) => ({ memoryId: m.memoryId, verdict: 'keep', confidence: 'low' }));
         }));
         mgr = new HygieneManager({
-            apiKey: 'k',
             reportStore,
             createJudge: () => judge,
         });

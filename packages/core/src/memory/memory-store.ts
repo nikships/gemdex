@@ -12,8 +12,8 @@ import { chunkMemory, deriveTitle, ChunkOptions } from './chunker';
 import { BlobStore, FileBlobStore } from './blob-store';
 import {
     AttachmentLimits,
+    AttachmentValidationError,
     DEFAULT_ATTACHMENT_LIMITS,
-    ValidatedAttachment,
     isEmbeddableAttachmentKind,
     mimeToKind,
     validateAttachments,
@@ -38,12 +38,16 @@ import {
 } from './types';
 export type { AttachmentBytes } from './types';
 
-const DEFAULT_COLLECTION = 'memories';
+/** The local text index (BGE-M3 via MLX, 1024 dimensions). */
+export const LOCAL_TEXT_COLLECTION = 'memories_mlx_bge_m3_8bit';
+/** The index written by earlier Gemini-embedded releases (3072 dimensions). */
+export const LEGACY_GEMINI_COLLECTION = 'memories';
 const DEFAULT_PREVIEW_LENGTH = 200;
 const LIST_FETCH_LIMIT = 100000;
-/** Reciprocal Rank Fusion constant, shared by the hybrid text path and the
- *  cross-branch fusion used by recall-by-media. */
+/** Reciprocal Rank Fusion constant for the hybrid (dense + BM25) text path. */
 const RECALL_RRF_K = 100;
+/** Texts per embedding request; the MLX worker caps a batch at 16. */
+const EMBED_BATCH_SIZE = 16;
 /**
  * Save-time similar-memory detection: how many ANN candidates to pull for
  * discovery (cheap, approximate — only used to shortlist parent ids) and how
@@ -56,23 +60,23 @@ const SIMILAR_MAX_RESULTS = 3;
 
 /**
  * Internal mapping between the memory model and the generic hybrid vector
- * store. Each retrieval chunk OR attachment is one stored row. The generic
- * store's columns are reused as typed, filterable storage slots:
+ * store. Each retrieval chunk is one stored row. The generic store's columns
+ * are reused as typed, filterable storage slots:
  *
- *   id            -> `${parentId}::${chunkIndex}`        (text chunk row)
- *                 -> `${parentId}::att::${attachIndex}`  (attachment row)
- *   vector        -> chunk text embedding | attachment media embedding
- *   content       -> chunk text | attachment caption/title (the BM25 target)
+ *   id            -> `${parentId}::${chunkIndex}`
+ *                    (legacy media rows: `${parentId}::att::${attachIndex}`)
+ *   vector        -> chunk text embedding
+ *   content       -> chunk text (the BM25 target)
  *   relativePath  -> parentId        (filterable: get / list / delete grouping)
  *   startLine     -> chunk/attachment index
  *   endLine       -> chunk/attachment count
  *   fileExtension -> "" (unused)
  *   metadata.json -> { title, fullContent, createdAt, updatedAt, attachments }
  *
- * Recall ranks chunks/attachments then resolves + dedupes back to whole parent
- * memories, so the caller never receives a fragment (the "parent document
- * retriever" pattern). Media is one embedding unit — attachments bypass text
- * chunking (one row per attachment); only their caption/title feeds BM25.
+ * Recall ranks chunks then resolves + dedupes back to whole parent memories,
+ * so the caller never receives a fragment (the "parent document retriever"
+ * pattern). Attachments are never embedded: their bytes live in the BlobStore
+ * and only their metadata rides along in `metadata.attachments`.
  */
 interface StoredAttachment {
     /** Stable within the parent memory (the attachment's index as a string). */
@@ -109,15 +113,20 @@ export interface ParentVectorData {
 }
 
 export interface MemoryStoreConfig {
+    /** Text embedding for every write and query. */
     embedding: Embedding;
     vectorDatabase: VectorDatabase;
-    /** Optional local text space; media always uses embedding. */
-    textEmbedding?: Embedding;
-    textCollectionName?: string;
-    /** Evaluated once per write. Defaults to MLX when textEmbedding is supplied. */
-    textProvider?: () => 'mlx' | 'gemini';
-    /** Override the single global table name. Defaults to `memories`. */
+    /** Index table name. Defaults to {@link LOCAL_TEXT_COLLECTION}. */
     collectionName?: string;
+    /**
+     * An older index in a different embedding space (e.g. the Gemini
+     * `memories` table). Its memories stay listable, readable, updatable,
+     * deletable and exportable, and {@link MemoryStore.migrateLegacy} moves them
+     * into the main index. It is never searched: its vectors cannot be compared
+     * with the main embedding, so recall and hygiene refuse to run while it
+     * still holds rows rather than silently omitting those memories.
+     */
+    legacyCollectionName?: string;
     /** Chunking parameters; sensible defaults applied when omitted. */
     chunkOptions?: ChunkOptions;
     /** Where attachment bytes are stored. Defaults to `~/.gemdex/blobs`. */
@@ -130,23 +139,19 @@ export class MemoryStore {
     private embedding: Embedding;
     private db: VectorDatabase;
     private collectionName: string;
+    private legacyCollectionName?: string;
     private chunkOptions: ChunkOptions;
     private blobStore: BlobStore;
     private attachmentLimits: AttachmentLimits;
     private collectionReady?: Promise<void>;
-    private textEmbedding?: Embedding;
-    private textCollectionName: string;
-    private textProvider: () => 'mlx' | 'gemini';
 
     constructor(config: MemoryStoreConfig) {
         this.embedding = config.embedding;
         this.db = config.vectorDatabase;
-        this.collectionName = config.collectionName ?? DEFAULT_COLLECTION;
-        this.textEmbedding = config.textEmbedding;
-        this.textCollectionName = config.textCollectionName ?? 'memories_mlx_bge_m3_8bit';
-        this.textProvider = config.textProvider ?? (() => config.textEmbedding ? 'mlx' : 'gemini');
-        if (this.textEmbedding && this.textCollectionName === this.collectionName) {
-            throw new Error('Text and Gemini collections must have different names');
+        this.collectionName = config.collectionName ?? LOCAL_TEXT_COLLECTION;
+        this.legacyCollectionName = config.legacyCollectionName;
+        if (this.legacyCollectionName === this.collectionName) {
+            throw new Error('The legacy collection must differ from the main collection');
         }
         this.chunkOptions = config.chunkOptions ?? {};
         this.blobStore = config.blobStore ?? new FileBlobStore();
@@ -157,7 +162,7 @@ export class MemoryStore {
         return (envManager.get('HYBRID_MODE') ?? 'true').toLowerCase() === 'true';
     }
 
-    /** Ensure the single global collection exists (idempotent, deduped). */
+    /** Ensure the main collection exists (idempotent, deduped). */
     private async ensureCollection(): Promise<void> {
         if (!this.collectionReady) {
             this.collectionReady = (async () => {
@@ -173,19 +178,11 @@ export class MemoryStore {
     }
 
     private get banks(): string[] {
-        return this.textEmbedding ? [this.collectionName, this.textCollectionName] : [this.collectionName];
+        return this.legacyCollectionName ? [this.collectionName, this.legacyCollectionName] : [this.collectionName];
     }
 
     private withWriteLock<T>(operation: () => Promise<T>): Promise<T> {
         return this.db.withMemoryWriteLock ? this.db.withMemoryWriteLock(operation) : operation();
-    }
-
-    private textBank(): { collection: string; embedding: Embedding } {
-        if (this.textProvider() === 'mlx') {
-            if (!this.textEmbedding) throw new Error('MLX text embedding is not configured');
-            return { collection: this.textCollectionName, embedding: this.textEmbedding };
-        }
-        return { collection: this.collectionName, embedding: this.embedding };
     }
 
     private async queryBanks(filter: string, fields: string[]): Promise<Record<string, any>[]> {
@@ -203,10 +200,6 @@ export class MemoryStore {
 
     private static chunkRowId(parentId: string, chunkIndex: number): string {
         return `${parentId}::${chunkIndex}`;
-    }
-
-    private static attachmentRowId(parentId: string, attachmentIndex: number): string {
-        return `${parentId}::att::${attachmentIndex}`;
     }
 
     private static escapeLiteral(value: string): string {
@@ -242,59 +235,14 @@ export class MemoryStore {
         }));
     }
 
-    /**
-     * Build hybrid vector rows for embeddable media only. Blob-only `file`
-     * attachments live in parent metadata + BlobStore and must not enter the
-     * vector table (no dense/BM25 pollution from multi-MB transcripts).
-     */
-    private buildAttachmentRows(
-        parentId: string,
-        stored: StoredAttachment[],
-        vectorsByStoredIndex: Map<number, EmbeddingVector>,
-        meta: ParentMeta,
-    ): VectorDocument[] {
-        const record = this.metaToRecord(meta);
-        const rows: VectorDocument[] = [];
-        for (let index = 0; index < stored.length; index++) {
-            const vector = vectorsByStoredIndex.get(index);
-            if (!vector) continue;
-            const att = stored[index];
-            rows.push({
-                id: MemoryStore.attachmentRowId(parentId, index),
-                vector: vector.vector,
-                // BM25 text for a media row is its caption, falling back to the title.
-                content: att.caption ?? meta.title,
-                relativePath: parentId,
-                startLine: index,
-                endLine: stored.length,
-                fileExtension: '',
-                metadata: record,
-            });
+    private async embedChunks(chunks: string[]): Promise<EmbeddingVector[]> {
+        // A large parent can contain thousands of chunks. Keep each request
+        // bounded without imposing the provider's batch cap on parents.
+        const vectors: EmbeddingVector[] = [];
+        for (let offset = 0; offset < chunks.length; offset += EMBED_BATCH_SIZE) {
+            vectors.push(...await this.embedding.embedContentBatch(chunks.slice(offset, offset + EMBED_BATCH_SIZE)));
         }
-        return rows;
-    }
-
-    private async embedChunks(chunks: string[], embedding = this.embedding): Promise<EmbeddingVector[]> {
-        if (chunks.length === 0) return [];
-        if (embedding === this.textEmbedding) {
-            // A large parent can contain thousands of chunks. Keep each local
-            // request bounded without imposing the worker's batch cap on parents.
-            const vectors: EmbeddingVector[] = [];
-            for (let offset = 0; offset < chunks.length; offset += 16) {
-                vectors.push(...await embedding.embedContentBatch(chunks.slice(offset, offset + 16)));
-            }
-            return vectors;
-        }
-        return embedding.embedContentBatch(chunks);
-    }
-
-    private async embedAttachments(attachments: ValidatedAttachment[]): Promise<EmbeddingVector[]> {
-        if (attachments.length === 0) return [];
-        return this.embedding.embedContentBatch(
-            attachments.map((att) => ({
-                inlineData: { mimeType: att.mimeType, data: att.bytes.toString('base64') },
-            })),
-        );
+        return vectors;
     }
 
     private rowToParentMeta(metadata: Record<string, any>): ParentMeta {
@@ -358,14 +306,15 @@ export class MemoryStore {
 
     /**
      * The single write path shared by save/update/import. Overwrites any rows +
-     * blobs already under `id`, then persists the supplied text + attachments.
-     * Throws if attachments are supplied to a non-multimodal embedding model, or
-     * if the resulting memory would be completely empty.
+     * blobs already under `id` (in either index), then persists the supplied
+     * text + attachments into the main index. Attachments are stored as blobs
+     * and never embedded. Image/audio/video/PDF attachments are refused unless
+     * `preserveMedia` is set, which only the update-preserve and import paths
+     * use so media saved by earlier releases survives an edit or a restore.
+     * Throws if the resulting memory would be completely empty.
      *
-     * Also returns the vectors it just computed (`chunkVectors`,
-     * `attachmentVectors`) so `save` can reuse them for similar-memory
-     * detection with zero extra embedding calls; `update`/`importRecords`
-     * simply ignore them.
+     * Also returns the chunk vectors it just computed so `save` can reuse them
+     * for similar-memory detection with zero extra embedding calls.
      */
     private async writeMemory(
         id: string,
@@ -374,20 +323,21 @@ export class MemoryStore {
         attachmentsInput: MemoryAttachmentInput[],
         createdAt: number,
         updatedAt: number,
-    ): Promise<{ memory: Memory; chunkVectors: EmbeddingVector[]; attachmentVectors: EmbeddingVector[]; textCollection: string }> {
-        const textBank = this.textBank();
+        options: { preserveMedia?: boolean } = {},
+    ): Promise<{ memory: Memory; chunkVectors: EmbeddingVector[] }> {
         const text = content ?? '';
         const validated = attachmentsInput.length > 0
             ? await validateAttachments(attachmentsInput, this.attachmentLimits)
             : [];
 
-        // Only media kinds need a multimodal model; blob-only `file` attachments do not.
-        const embeddable = validated.filter((att) => isEmbeddableAttachmentKind(att.kind));
-        if (embeddable.length > 0 && !this.embedding.isMultimodal()) {
-            throw new Error(
-                'Attachments require a multimodal embedding model (e.g. gemini-embedding-2); ' +
-                `the current ${this.embedding.getProvider()} model does not accept inline media.`,
-            );
+        if (!options.preserveMedia) {
+            const media = validated.find((att) => isEmbeddableAttachmentKind(att.kind));
+            if (media) {
+                throw new AttachmentValidationError(
+                    `${media.mimeType} attachments are not supported: the local embedding model is text-only. ` +
+                    'Only text/JSON file attachments (e.g. transcripts) can be stored.',
+                );
+            }
         }
 
         // Guard BEFORE any destructive work: an empty payload must never wipe an
@@ -398,38 +348,20 @@ export class MemoryStore {
 
         const title = MemoryStore.resolveTitle(explicitTitle, text, validated);
 
-        // Embed FIRST — this is the failure-prone (network) step. Computing the
-        // vectors before deleting the prior rows/blobs means a failed
-        // update/import leaves the existing memory intact instead of destroying
-        // it. (Overwrite is still not fully atomic, but the failure window
-        // shrinks to the local LanceDB insert.) Blob-only `file` attachments
-        // are deliberately skipped so multi-MB transcripts never hit the API.
+        // Embed FIRST — the failure-prone step. Computing the vectors before
+        // deleting the prior rows/blobs means a failed update/import leaves the
+        // existing memory intact instead of destroying it.
         let chunks = text.trim().length > 0 ? chunkMemory(text, this.chunkOptions) : [];
-        // File-only memories (no text, no media) still need one parent vector
-        // row for get/list/delete grouping — index the title only, never the file body.
-        if (chunks.length === 0 && embeddable.length === 0 && validated.length > 0) {
-            chunks = [title];
-        }
-        const chunkVectors = await this.embedChunks(chunks, textBank.embedding);
-        const embeddableVectors = await this.embedAttachments(embeddable);
-        if (chunks.length > 0) {
-            await this.db.createHybridCollection(textBank.collection, textBank.embedding.getDimension(), 'Gemdex memory layer');
-        }
-        if (embeddable.length > 0) await this.ensureCollection();
-        const vectorsByStoredIndex = new Map<number, EmbeddingVector>();
-        let embeddableCursor = 0;
-        for (let i = 0; i < validated.length; i++) {
-            if (!isEmbeddableAttachmentKind(validated[i].kind)) continue;
-            vectorsByStoredIndex.set(i, embeddableVectors[embeddableCursor]);
-            embeddableCursor += 1;
-        }
-        // Returned to save-time similar-memory detection: only vectors that
-        // actually exist (text chunks + embeddable media).
-        const attachmentVectors = embeddableVectors;
+        // Attachment-only memories still need one row for get/list/delete
+        // grouping — index the title only, never the attachment body.
+        if (chunks.length === 0) chunks = [title];
+        const chunkVectors = await this.embedChunks(chunks);
+        await this.ensureCollection();
 
-        // Keep a rollback snapshot for a dual-bank write: neither table can
-        // transactionally commit the other table's rows or the blob store.
-        const previous = this.textEmbedding ? await this.queryBanks(
+        // Keep a rollback snapshot when the prior rows may live in the legacy
+        // index: neither table can transactionally commit the other's rows or
+        // the blob store.
+        const previous = this.legacyCollectionName ? await this.queryBanks(
             `relativePath == '${MemoryStore.escapeLiteral(id)}'`,
             ['id', 'vector', 'content', 'relativePath', 'startLine', 'endLine', 'fileExtension', 'metadata'],
         ) : [];
@@ -442,7 +374,6 @@ export class MemoryStore {
             // Embedding succeeded — only now clear prior state.
             await this.deleteChunkRows(id);
             await this.blobStore.deleteParent(id);
-            // Persist blob bytes so metadata can reference them (including non-embedded files).
             // Preserve caller-supplied attachment ids (e.g. "transcript") for idempotent re-import.
             const usedIds = new Set<string>();
             const stored: StoredAttachment[] = [];
@@ -466,15 +397,7 @@ export class MemoryStore {
             }
 
             const meta: ParentMeta = { title, fullContent: text, createdAt, updatedAt, attachments: stored };
-
-            const textRows = this.buildChunkRows(id, chunks, chunkVectors, meta);
-            const mediaRows = this.buildAttachmentRows(id, stored, vectorsByStoredIndex, meta);
-            if (textBank.collection === this.collectionName) {
-                await this.db.insertHybrid(this.collectionName, [...textRows, ...mediaRows]);
-            } else {
-                if (textRows.length) await this.db.insertHybrid(textBank.collection, textRows);
-                if (mediaRows.length) await this.db.insertHybrid(this.collectionName, mediaRows);
-            }
+            await this.db.insertHybrid(this.collectionName, this.buildChunkRows(id, chunks, chunkVectors, meta));
 
             return {
                 memory: {
@@ -486,8 +409,6 @@ export class MemoryStore {
                     updatedAt,
                 },
                 chunkVectors,
-                attachmentVectors,
-                textCollection: textBank.collection,
             };
         } catch (error) {
             // Don't leave orphan blobs behind if blob writes or the insert failed.
@@ -507,8 +428,8 @@ export class MemoryStore {
     }
 
     /**
-     * Persist a new memory. Text is chunked + embedded; each attachment is one
-     * media embedding stored as its own row with its bytes on disk. Returns the
+     * Persist a new memory. Text is chunked + embedded; attachments (text/JSON
+     * files only) are stored as blobs on disk. Returns the
      * created memory (including the resolved title + attachment metadata) plus
      * advisory `similar` candidates when save-time detection finds any.
      *
@@ -529,22 +450,11 @@ export class MemoryStore {
         }
         const id = MemoryStore.newId();
         const now = Date.now();
-        const { memory, chunkVectors, attachmentVectors, textCollection } =
-            await this.writeMemory(id, content, input.title, attachmentsInput, now, now);
+        const { memory, chunkVectors } = await this.writeMemory(id, content, input.title, attachmentsInput, now, now);
 
         let similar: SimilarMemoryRef[] = [];
         try {
-            if (textCollection === this.collectionName) {
-                similar = await this.findSimilarParents([...chunkVectors, ...attachmentVectors].map(v => v.vector), id);
-            } else {
-                const candidates = [
-                    ...await this.findSimilarParents(chunkVectors.map(v => v.vector), id, textCollection),
-                    ...await this.findSimilarParents(attachmentVectors.map(v => v.vector), id),
-                ];
-                similar = [...new Map(candidates.sort((a, b) => a.similarity - b.similarity)
-                    .map(candidate => [candidate.id, candidate])).values()]
-                    .sort((a, b) => b.similarity - a.similarity).slice(0, SIMILAR_MAX_RESULTS);
-            }
+            similar = await this.findSimilarParents(chunkVectors.map(v => v.vector), id);
         } catch (error) {
             // Advisory only — never let detection failure taint a successful save.
             console.error('[MemoryStore] Save-time similar-memory detection failed:', error);
@@ -581,11 +491,8 @@ export class MemoryStore {
      * never call this at all). `excludeId` drops the just-saved memory itself
      * out of its own candidate list.
      */
-    private async findSimilarParents(
-        newVectors: number[][],
-        excludeId: string,
-        collection = this.collectionName,
-    ): Promise<SimilarMemoryRef[]> {
+    private async findSimilarParents(newVectors: number[][], excludeId: string): Promise<SimilarMemoryRef[]> {
+        const collection = this.collectionName;
         const enabled = (envManager.get('GEMDEX_SIMILAR_ON_SAVE') ?? 'true').toLowerCase() !== 'false';
         if (!enabled || newVectors.length === 0) return [];
 
@@ -641,128 +548,74 @@ export class MemoryStore {
     }
 
     /**
-     * Retrieve memories by a natural-language query and/or inline media
-     * (image / audio / video / PDF). Each query signal becomes its own ranked
-     * branch — text takes the hybrid (dense + BM25) path; each query attachment
-     * is embedded with `embedContentBatch` and runs a dense branch in the same
-     * shared space. When more than one branch is present they are fused with
-     * RRF (the same scale-free fusion the hybrid text path uses), then resolved
-     * to full parent memories and deduped by parent id. Pure relevance ranking.
+     * Retrieve memories by a natural-language query: hybrid (dense + BM25)
+     * search over chunks, resolved to full parent memories and deduped by
+     * parent id. Pure relevance ranking.
      *
-     * `query` is optional when at least one query attachment is supplied
-     * (recall-by-media). Supplying attachments to a non-multimodal model throws.
+     * `queryAttachments` exists for {@link MemoryBackend} parity; the local
+     * text model cannot embed media, so supplying any throws. Throws while the
+     * legacy index still holds memories, because they cannot be searched and
+     * silently leaving them out of results would look like data loss.
      */
     async recall(
         query?: string,
         limit = 10,
         queryAttachments?: MemoryAttachmentInput[],
     ): Promise<MemoryRecallResult[]> {
+        if ((queryAttachments?.length ?? 0) > 0) {
+            throw new AttachmentValidationError('Recall by media is not supported: the local embedding model is text-only.');
+        }
         const trimmed = (query ?? '').trim();
-        const attachmentsInput = queryAttachments ?? [];
-        const hasText = trimmed.length > 0;
-        const hasAttachments = attachmentsInput.length > 0;
-        if (!hasText && !hasAttachments) return [];
+        if (trimmed.length === 0) return [];
+        await this.assertNoLegacyRows('search');
 
-        // Validate query media + assert multimodal support BEFORE the
-        // collection-existence shortcut, so a misused model fails fast (a clear
-        // programming error) rather than silently returning [] on an empty store.
-        const validatedQuery = hasAttachments
-            ? await validateAttachments(attachmentsInput, this.attachmentLimits)
-            : [];
-        if (validatedQuery.length > 0 && !this.embedding.isMultimodal()) {
-            throw new Error(
-                'Recall-by-media requires a multimodal embedding model (e.g. gemini-embedding-2); ' +
-                `the current ${this.embedding.getProvider()} model does not accept inline media.`,
-            );
-        }
-
-        const nonemptyBanks: string[] = [];
-        for (const bank of this.banks) {
-            if (await this.db.hasCollection(bank) &&
-                (await this.db.query(bank, '', ['id'], 1)).length > 0) nonemptyBanks.push(bank);
-        }
-        if (nonemptyBanks.length === 0) return [];
+        if (!await this.db.hasCollection(this.collectionName) ||
+            (await this.db.query(this.collectionName, '', ['id'], 1)).length === 0) return [];
 
         // Over-fetch chunks so that after dedupe-by-parent we still have enough
         // distinct memories to satisfy `limit`.
         const chunkLimit = Math.max(limit * 4, 20);
-
-        // Text-only fast path: preserve the exact prior behavior, including the
-        // per-branch subScores that callers surface beneath each hit.
-        if (hasText && !hasAttachments && !this.textEmbedding) {
-            const hits = await this.searchText(trimmed, chunkLimit);
-            return this.resolveHitsToParents(hits, limit);
-        }
-
-        // Otherwise build one ranked list per query signal and fuse with RRF.
-        const rankedLists: HybridSearchResult[][] = [];
-        if (hasText) {
-            for (const bank of nonemptyBanks) {
-                const embedding = bank === this.collectionName ? this.embedding : this.textEmbedding!;
-                // A populated bank must not silently disappear when its provider fails.
-                rankedLists.push(await this.searchText(trimmed, chunkLimit, bank, embedding));
-            }
-        }
-        if (validatedQuery.length > 0 && nonemptyBanks.includes(this.collectionName)) {
-            const vectors = await this.embedAttachments(validatedQuery);
-            for (const vec of vectors) {
-                const dense = await this.db.search(this.collectionName, vec.vector, { topK: chunkLimit });
-                rankedLists.push(dense.map((r) => ({ document: r.document, score: r.score })));
-            }
-        }
-
-        const fused = MemoryStore.fuseByRrf(rankedLists, RECALL_RRF_K, !!this.textEmbedding);
-        return this.resolveHitsToParents(fused, limit);
+        const hits = await this.searchText(trimmed, chunkLimit);
+        return this.resolveHitsToParents(hits, limit);
     }
 
     /** One text branch: hybrid (dense + BM25) when enabled, else dense-only. */
-    private async searchText(trimmed: string, chunkLimit: number,
-        collection = this.collectionName, embedding = this.embedding): Promise<HybridSearchResult[]> {
-        const queryEmbedding = await embedding.embedQuery(trimmed);
+    private async searchText(trimmed: string, chunkLimit: number): Promise<HybridSearchResult[]> {
+        const queryEmbedding = await this.embedding.embedQuery(trimmed);
         if (this.getIsHybrid()) {
             const requests: HybridSearchRequest[] = [
                 { data: queryEmbedding.vector, anns_field: 'vector', param: {}, limit: chunkLimit },
                 { data: trimmed, anns_field: 'sparse_vector', param: {}, limit: chunkLimit },
             ];
-            return this.db.hybridSearch(collection, requests, {
+            return this.db.hybridSearch(this.collectionName, requests, {
                 rerank: { strategy: 'rrf', params: { k: RECALL_RRF_K } },
                 limit: chunkLimit,
             });
         }
-        const dense = await this.db.search(collection, queryEmbedding.vector, { topK: chunkLimit });
+        const dense = await this.db.search(this.collectionName, queryEmbedding.vector, { topK: chunkLimit });
         return dense.map((r) => ({ document: r.document, score: r.score }));
     }
 
-    /**
-     * Reciprocal Rank Fusion across branch result lists. Each row's score is
-     * the sum of `1 / (k + rank)` over the lists that surfaced it (1-based
-     * rank), deduped at the row (`document.id`) level. Scale-free, so a dense
-     * media branch and a fused text branch combine without score normalization.
-     */
-    private static fuseByRrf(lists: HybridSearchResult[][], k = RECALL_RRF_K, parents = false): HybridSearchResult[] {
-        const byRow = new Map<string, HybridSearchResult>();
-        for (const list of lists) {
-            const seen = new Set<string>();
-            let rank = 0;
-            list.forEach((hit) => {
-                const rowId = parents ? hit.document.relativePath : hit.document.id;
-                if (!rowId) return;
-                if (seen.has(rowId)) return;
-                seen.add(rowId);
-                const contribution = 1 / (k + ++rank);
-                const existing = byRow.get(rowId);
-                if (existing) {
-                    existing.score += contribution;
-                } else {
-                    byRow.set(rowId, { document: hit.document, score: contribution });
-                }
-            });
-        }
-        return Array.from(byRow.values()).sort((a, b) => b.score - a.score);
+    /** Number of parent memories still stored only in the legacy index. */
+    async countLegacyMemories(): Promise<number> {
+        const legacy = this.legacyCollectionName;
+        if (!legacy || !await this.db.hasCollection(legacy)) return 0;
+        const rows = await this.db.query(legacy, '', ['relativePath'], LIST_FETCH_LIMIT);
+        return new Set(rows.map((row) => row.relativePath as string).filter(Boolean)).size;
+    }
+
+    private async assertNoLegacyRows(action: string): Promise<void> {
+        const legacy = this.legacyCollectionName;
+        if (!legacy || !await this.db.hasCollection(legacy)) return;
+        if ((await this.db.query(legacy, '', ['id'], 1)).length === 0) return;
+        throw new Error(
+            `Cannot ${action} yet: some memories are still in the legacy Gemini index. ` +
+            'Run `npx gemdex-mcp migrate` (or Settings → Migrate in the desktop app) to re-embed them locally.',
+        );
     }
 
     /**
-     * Resolve ranked chunk/attachment rows back to full parent memories,
+     * Resolve ranked chunk rows back to full parent memories,
      * keeping the best-scoring row per parent so a caller never receives a
      * fragment. Results stay ranked by fused relevance.
      */
@@ -795,8 +648,9 @@ export class MemoryStore {
     /**
      * Revise an existing memory in place under the same id. Omitted fields are
      * preserved: leaving out `content` keeps the prior text, leaving out
-     * `attachments` keeps the prior media. Bumps updatedAt, preserves createdAt.
-     * Throws if the id does not exist.
+     * `attachments` keeps the prior attachments (including media stored by
+     * earlier releases). Bumps updatedAt, preserves createdAt. Throws if the id
+     * does not exist.
      */
     async update(id: string, input: UpdateMemoryInput): Promise<Memory> {
         return this.withWriteLock(() => this.updateUnlocked(id, input));
@@ -809,6 +663,7 @@ export class MemoryStore {
         }
 
         const content = input.content ?? existing.fullContent;
+        const preserveMedia = input.attachments === undefined;
         const attachmentsInput = input.attachments ?? await this.attachmentsToInput(existing.attachments);
         const title = input.title ?? existing.title;
 
@@ -817,19 +672,18 @@ export class MemoryStore {
         }
 
         const now = Date.now();
-        const { memory } = await this.writeMemory(id, content, title, attachmentsInput, existing.createdAt, now);
+        const { memory } = await this.writeMemory(
+            id, content, title, attachmentsInput, existing.createdAt, now, { preserveMedia });
         return memory;
     }
 
     /**
-     * Update only attachment captions, reusing the EXISTING media vectors —
-     * the no-re-embed caption path. Editing a caption is pure metadata: the
-     * bytes are unchanged, so re-embedding each attachment (a network round-trip
-     * to the embedding model, per attachment) would be wasted work. Instead this
-     * reads every stored row for the memory back WITH its `vector` column,
-     * rewrites only the caption-derived fields (the BM25 `content` of attachment
-     * rows + the shared `attachments`/`updatedAt` metadata), and re-inserts the
-     * rows with their original vectors intact. Blobs are never touched.
+     * Update only attachment captions without re-embedding. Editing a caption
+     * is pure metadata, so this reads every stored row for the memory back WITH
+     * its `vector` column, rewrites only the caption-derived fields (the BM25
+     * `content` of legacy media rows + the shared `attachments`/`updatedAt`
+     * metadata), and re-inserts the rows with their original vectors intact.
+     * Blobs are never touched.
      *
      * Captions are matched by attachment id; an empty/whitespace caption clears
      * it (its BM25 text falls back to the title). Throws if the memory does not
@@ -884,9 +738,8 @@ export class MemoryStore {
                 ? (row.vector as number[])
                 : Array.from(row.vector as Iterable<number>);
             const isAttachmentRow = rowId.startsWith(`${id}::att::`);
-            // Attachment rows: BM25 text = new caption (resolved by the row's
-            // attachment index, which buildAttachmentRows stores in startLine)
-            // or the title. Chunk rows: preserve the stored chunk text verbatim.
+            // Legacy media rows: BM25 text = new caption (resolved by the row's
+            // attachment index, stored in startLine) or the title. Chunk rows: preserve the stored chunk text verbatim.
             const content = isAttachmentRow
                 ? attachments[Number(row.startLine)]?.caption ?? newMeta.title
                 : (row.content as string);
@@ -998,15 +851,14 @@ export class MemoryStore {
     }
 
     /**
-     * List every parent memory together with ALL of its stored row vectors
-     * (chunks + attachments). Reads straight from LanceDB — no embedding
-     * calls — so hygiene clustering can reuse the vectors already paid for.
+     * List every parent memory together with ALL of its stored row vectors.
+     * Reads straight from LanceDB — no embedding calls — so hygiene clustering
+     * can reuse the vectors already computed.
      */
     async listParentsWithVectors(): Promise<ParentVectorData[]> {
-        const rows = await this.queryBanks('', ['id', 'vector', 'relativePath', 'metadata']);
-        if (new Set(rows.map(row => row.bank)).size > 1) {
-            throw new Error('Hygiene requires a single embedding space; mixed Gemini/MLX banks cannot be clustered together');
-        }
+        await this.assertNoLegacyRows('check memory hygiene');
+        if (!await this.db.hasCollection(this.collectionName)) return [];
+        const rows = await this.db.query(this.collectionName, '', ['id', 'vector', 'relativePath', 'metadata'], LIST_FETCH_LIMIT);
 
         const byParent = new Map<string, ParentVectorData>();
         for (const row of rows) {
@@ -1034,7 +886,7 @@ export class MemoryStore {
         return Array.from(byParent.values());
     }
 
-    /** Delete a memory (all its chunk + attachment rows and its blobs). No-op if absent. */
+    /** Delete a memory (all its rows in either index and its blobs). No-op if absent. */
     async delete(id: string): Promise<void> {
         return this.withWriteLock(async () => {
             await this.deleteChunkRows(id);
@@ -1042,47 +894,81 @@ export class MemoryStore {
         });
     }
 
-    /** Move only text rows. Destination commits before source deletion; reruns
-     * upsert stable ids, including after a failed source delete. No blob/media
-     * read, write or embedding is performed. Progress counts text parents. */
-    async migrateTextToMlx(onProgress?: (completed: number, total: number) => void): Promise<void> {
-        if (!this.db.withMemoryWriteLock) throw new Error('Text migration requires cross-process write locking');
-        return this.withWriteLock(() => this.migrateTextToMlxUnlocked(onProgress));
+    /**
+     * Move every memory out of the legacy index into the main index. Text
+     * chunks are re-embedded with the main embedding; a parent with no text
+     * rows (media-only) gets a single title row. Legacy media rows are dropped
+     * — the media is no longer searchable — but parent metadata and blobs are
+     * kept byte-for-byte, so attachments stay readable. The destination commits
+     * before the source rows are deleted and stable row ids make reruns
+     * idempotent, including after a failed source delete. Progress counts
+     * legacy parents.
+     */
+    async migrateLegacy(onProgress?: (completed: number, total: number) => void): Promise<void> {
+        if (!this.db.withMemoryWriteLock) throw new Error('Migration requires cross-process write locking');
+        return this.withWriteLock(() => this.migrateLegacyUnlocked(onProgress));
     }
 
-    private async migrateTextToMlxUnlocked(onProgress?: (completed: number, total: number) => void): Promise<void> {
-        if (!this.textEmbedding) throw new Error('MLX text embedding is not configured');
-        if (!this.db.upsertHybrid) throw new Error('Text migration requires atomic vector upsert support');
-        const rows = await this.queryBanks('',
-            ['id', 'content', 'relativePath', 'startLine', 'endLine', 'fileExtension', 'metadata']);
-        const parents = new Map<string, Record<string, any>[]>();
-        for (const row of rows) {
-            const parentId = row.relativePath as string;
-            if ((row.id as string).startsWith(`${parentId}::att::`)) continue;
-            const parent = parents.get(parentId) ?? [];
-            parent.push(row);
-            parents.set(parentId, parent);
+    private async migrateLegacyUnlocked(onProgress?: (completed: number, total: number) => void): Promise<void> {
+        const legacy = this.legacyCollectionName;
+        if (!this.db.upsertHybrid) throw new Error('Migration requires atomic vector upsert support');
+        if (!legacy || !await this.db.hasCollection(legacy)) {
+            onProgress?.(0, 0);
+            return;
         }
-        onProgress?.(0, parents.size);
+        // Rows are read in capped pages; a parent split across a page boundary
+        // is finished on the next pass because its main-index rows already exist.
         let completed = 0;
-        for (const parent of parents.values()) {
-            const unique = [...new Map(parent.map(row => [row.id as string, row])).values()];
-            const vectors = await this.embedChunks(unique.map(row => row.content as string), this.textEmbedding);
-            const documents: VectorDocument[] = unique.map((row, index) => ({
-                id: row.id as string,
-                content: row.content as string,
-                vector: vectors[index].vector,
-                relativePath: row.relativePath as string,
-                startLine: Number(row.startLine),
-                endLine: Number(row.endLine),
-                fileExtension: row.fileExtension as string,
-                metadata: this.parseMetadata(row.metadata),
-            }));
-            await this.db.createHybridCollection(this.textCollectionName, this.textEmbedding.getDimension());
-            await this.db.upsertHybrid(this.textCollectionName, documents);
-            const legacyIds = parent.filter(row => row.bank === this.collectionName).map(row => row.id as string);
-            if (legacyIds.length) await this.db.delete(this.collectionName, legacyIds);
-            onProgress?.(++completed, parents.size);
+        let total = await this.countLegacyMemories();
+        onProgress?.(0, total);
+        for (;;) {
+            const rows = await this.db.query(legacy, '',
+                ['id', 'content', 'relativePath', 'startLine', 'endLine', 'fileExtension', 'metadata'], LIST_FETCH_LIMIT);
+            if (rows.length === 0) return;
+            const parents = new Map<string, Record<string, any>[]>();
+            for (const row of rows) {
+                const parentId = row.relativePath as string;
+                if (!parentId) continue;
+                const parent = parents.get(parentId) ?? [];
+                parent.push(row);
+                parents.set(parentId, parent);
+            }
+            if (parents.size === 0) return;
+            for (const [parentId, parentRows] of parents) {
+                const unique = [...new Map(parentRows.map(row => [row.id as string, row])).values()];
+                const textRows = unique.filter(row => !(row.id as string).startsWith(`${parentId}::att::`));
+                const metadata = this.parseMetadata(unique[0].metadata);
+                const inMain = await this.db.hasCollection(this.collectionName) && (await this.db.query(
+                    this.collectionName, `relativePath == '${MemoryStore.escapeLiteral(parentId)}'`, ['id'], 1)).length > 0;
+                const toEmbed = textRows.length > 0 || inMain ? textRows : [{
+                    id: MemoryStore.chunkRowId(parentId, 0),
+                    content: this.rowToParentMeta(metadata).title,
+                    relativePath: parentId,
+                    startLine: 0,
+                    endLine: 1,
+                    fileExtension: '',
+                    metadata,
+                }];
+                if (toEmbed.length > 0) {
+                    const vectors = await this.embedChunks(toEmbed.map(row => row.content as string));
+                    const documents: VectorDocument[] = toEmbed.map((row, index) => ({
+                        id: row.id as string,
+                        content: row.content as string,
+                        vector: vectors[index].vector,
+                        relativePath: parentId,
+                        startLine: Number(row.startLine),
+                        endLine: Number(row.endLine),
+                        fileExtension: typeof row.fileExtension === 'string' ? row.fileExtension : '',
+                        metadata: this.parseMetadata(row.metadata),
+                    }));
+                    await this.ensureCollection();
+                    await this.db.upsertHybrid(this.collectionName, documents);
+                }
+                await this.db.delete(legacy, unique.map(row => row.id as string));
+                completed += 1;
+                total = Math.max(total, completed);
+                onProgress?.(completed, total);
+            }
         }
     }
 
@@ -1109,7 +995,8 @@ export class MemoryStore {
     /**
      * Import memories from portable records. Upsert by id (default merge
      * policy, §7.5): an existing id is replaced; a new id is inserted.
-     * Re-embeds content + attachments via the configured embedding provider.
+     * Re-embeds content via the configured embedding. Media attachments in the
+     * records (from exports of earlier releases) are kept as blobs, unembedded.
      * Per-record fault-tolerant: a record that throws is collected into
      * `errors` and the loop continues, so one bad record can't abort a large
      * restore midway.
@@ -1138,7 +1025,8 @@ export class MemoryStore {
                 const id = record.id || MemoryStore.newId();
                 const createdAt = Number(record.createdAt) || Date.now();
                 const updatedAt = Number(record.updatedAt) || createdAt;
-                await this.writeMemory(id, content, record.title, attachmentsInput, createdAt, updatedAt);
+                await this.writeMemory(id, content, record.title, attachmentsInput, createdAt, updatedAt,
+                    { preserveMedia: true });
                 imported += 1;
             } catch (error) {
                 errors.push({
@@ -1151,7 +1039,7 @@ export class MemoryStore {
         return { imported, failed: errors.length, errors };
     }
 
-    /** Read stored attachments back into base64 inputs (for update preserve / re-embed). */
+    /** Read stored attachments back into base64 inputs (for update preserve). */
     private async attachmentsToInput(stored: StoredAttachment[]): Promise<MemoryAttachmentInput[]> {
         const out: MemoryAttachmentInput[] = [];
         for (const att of stored) {
@@ -1210,7 +1098,7 @@ export class MemoryStore {
         return {};
     }
 
-    /** List preview: text excerpt, or an attachment badge for media-only memories. */
+    /** List preview: text excerpt, or an attachment badge for attachment-only memories. */
     private previewFor(meta: ParentMeta): string {
         const text = this.makePreview(meta.fullContent);
         if (text.length > 0) return text;

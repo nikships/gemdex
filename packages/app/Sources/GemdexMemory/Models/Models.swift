@@ -1,38 +1,15 @@
 import Foundation
+import UniformTypeIdentifiers
 
-/// Media modalities `gemini-embedding-2` accepts. Mirrors `AttachmentKind` in
-/// gemdex-core. The sidecar always sends one of these in `kind`, but we infer
-/// from `mimeType` defensively when older payloads omit it.
-enum AttachmentKind: String, Codable, Sendable {
-    case image
-    case audio
-    case video
-    case pdf
-    /// Blob-only (non-embedded) source files such as full chat transcripts.
-    case file
-
-    static func from(mimeType: String) -> AttachmentKind? {
-        let m = mimeType.lowercased()
-        if m.hasPrefix("image/") { return .image }
-        if m.hasPrefix("audio/") { return .audio }
-        if m.hasPrefix("video/") { return .video }
-        if m == "application/pdf" || m.hasSuffix("/pdf") { return .pdf }
-        if m == "text/plain"
-            || m == "application/json"
-            || m == "application/jsonl"
-            || m == "application/x-ndjson"
-            || m == "text/x-jsonl" {
-            return .file
-        }
-        return nil
-    }
-}
-
-/// Stored-attachment metadata as seen by the manager UI. Raw bytes are fetched
-/// on demand from `GET /memories/:id/attachments/:attachmentId`.
+/// Stored-attachment metadata as seen by the manager UI. Attachments are
+/// read-only blobs (chat transcripts are `file` attachments with a text/plain
+/// or application/x-ndjson mime type). `kind` is kept as the raw string so
+/// legacy kinds (image/audio/video/pdf) and unknown future kinds still decode;
+/// the UI treats every kind as a generic downloadable file. Raw bytes are
+/// fetched on demand from `GET /memories/:id/attachments/:attachmentId`.
 struct Attachment: Codable, Identifiable, Hashable, Sendable {
     let id: String
-    let kind: AttachmentKind
+    let kind: String
     let mimeType: String
     let byteLength: Int
     var caption: String?
@@ -47,11 +24,27 @@ struct Attachment: Codable, Identifiable, Hashable, Sendable {
         mimeType = (try? c.decode(String.self, forKey: .mimeType)) ?? "application/octet-stream"
         byteLength = (try? c.decode(Int.self, forKey: .byteLength)) ?? 0
         caption = try? c.decode(String.self, forKey: .caption)
-        if let raw = try? c.decode(String.self, forKey: .kind), let k = AttachmentKind(rawValue: raw) {
-            kind = k
-        } else {
-            kind = AttachmentKind.from(mimeType: mimeType) ?? .image
+        let raw = (try? c.decode(String.self, forKey: .kind))?.trimmingCharacters(in: .whitespaces) ?? ""
+        kind = raw.isEmpty ? "file" : raw
+    }
+
+    /// File extension used when saving or opening the bytes locally.
+    var fileExtension: String {
+        switch mimeType.lowercased() {
+        case "text/plain": return "txt"
+        case "application/json": return "json"
+        case "application/jsonl", "application/x-ndjson", "text/x-jsonl": return "jsonl"
+        default: return UTType(mimeType: mimeType)?.preferredFilenameExtension ?? "bin"
         }
+    }
+
+    var isTranscript: Bool { fileExtension == "jsonl" }
+
+    /// Suggested local filename. Attachments carry no stored name, so derive a
+    /// stable one from the kind and id.
+    var suggestedFilename: String {
+        let base = isTranscript ? "transcript" : (kind == "file" ? "attachment" : kind)
+        return "\(base)-\(id.prefix(8)).\(fileExtension)"
     }
 }
 
@@ -83,8 +76,6 @@ struct MemorySummary: Codable, Identifiable, Hashable, Sendable {
         searchTitle = displayTitle.lowercased()
         updatedLabel = Self.formatDate(updatedAt)
     }
-
-    var firstImage: Attachment? { attachments.first { $0.kind == .image } }
 
     /// Precomputed once during JSON decoding. Sidebar rows reuse this while
     /// scrolling instead of formatting dates during every body recomputation.
@@ -143,77 +134,43 @@ struct RecallResult: Codable, Identifiable, Hashable, Sendable {
     var displayTitle: String { title.isEmpty ? "Untitled memory" : title }
 }
 
-/// Per-launch proof that the configured Gemini key can perform embedding work.
-struct GeminiReadiness: Codable, Sendable {
+/// Readiness of the user's local Claude Code CLI, which runs chat-history
+/// digestion and hygiene judging (`claude -p`, Haiku). Status is one of
+/// `checking | ready | missing | unauthenticated | error`.
+struct ClaudeCodeReadiness: Codable, Equatable, Sendable {
     let status: String
-    let message: String?
-    let validatedAt: Double?
+    var message: String? = nil
+    var version: String? = nil
+    var path: String? = nil
+    var checkedAt: Double? = nil
 
-    var isReady: Bool { status == "valid" }
-    var needsAttention: Bool { !isReady && status != "checking" }
+    var isReady: Bool { status == "ready" }
+    var isChecking: Bool { status == "checking" }
 }
 
-/// Active backend summary (`GET /config`).
-struct ConfigSummary: Codable, Sendable {
-    struct ActiveRemote: Codable, Sendable {
-        let name: String
-        let url: String?
-        let hasToken: Bool?
-    }
-    let configured: Bool
-    let mode: String
-    let needsKey: Bool
-    let gemini: GeminiReadiness
-    let activeRemote: ActiveRemote?
-    var embeddingProvider: String? = nil
-
-    var usesLocalMLX: Bool { mode == "local" && embeddingProvider == "mlx" }
-}
-
-/// One configured remote (`GET /settings`).
-struct RemoteSummary: Codable, Identifiable, Hashable, Sendable {
-    var id: String { name }
-    let name: String
-    let url: String
-    let hasToken: Bool
-}
-
-/// Storage settings summary (`GET /settings`).
-struct SettingsSummary: Codable, Sendable {
-    let mode: String
-    let activeRemote: String?
-    let configured: Bool
-    let localConfigured: Bool
-    let gemini: GeminiReadiness
-    let remotes: [RemoteSummary]
-    var embeddingProvider: String? = nil
-}
-
-/// Local embedding runtime and explicit install/migration job snapshot.
-struct EmbeddingStatus: Codable, Sendable {
-    let provider: String
+/// Local embedding model (BGE-M3 via MLX) and its explicit install/migrate job
+/// snapshot. Status is one of
+/// `not-installed | installed | installing | migrating | error`.
+struct EmbeddingStatus: Codable, Equatable, Sendable {
     let installed: Bool
     let model: String
     let status: String
     let message: String?
     let completed: Int?
     let total: Int?
+    /// Memories still in the legacy Gemini index that need re-embedding.
+    /// Present once the model is installed.
+    var legacyMemories: Int? = nil
 
     var isRunning: Bool { status == "installing" || status == "migrating" }
 }
 
-/// Remote connection test result (`POST /settings/test`).
-struct RemoteTestResult: Codable, Sendable {
-    let reachable: Bool
-    let authenticated: Bool
-    let detail: String?
-}
-
-/// Local→remote import result (`POST /settings/import-local`).
-struct MigrationResult: Codable, Sendable {
-    let created: Int
-    let updated: Int
-    let skipped: Int
+/// Store and inference readiness (`GET /config`, `POST /config/check`).
+/// `configured` means the local model is installed and the store is mounted.
+struct ConfigSummary: Codable, Sendable {
+    let configured: Bool
+    var embedding: EmbeddingStatus
+    var claudeCode: ClaudeCodeReadiness
 }
 
 /// One record that failed to import (`POST /import`).
@@ -260,7 +217,8 @@ struct IngestFolderSummary: Codable, Identifiable, Hashable, Sendable {
     let sessionCount: Int
 }
 
-/// A selectable digest model with its standard-tier pricing.
+/// A digest/judge model with its API list pricing (used only for the
+/// list-price estimate; Claude subscription logins are not billed per token).
 struct IngestModelInfo: Codable, Identifiable, Hashable, Sendable {
     var id: String { model }
     let model: String
@@ -277,15 +235,14 @@ struct IngestSources: Codable, Sendable {
     let models: [IngestModelInfo]
     let pricingAsOf: String
     let ingestReady: Bool
-    let gemini: GeminiReadiness
+    let claudeCode: ClaudeCodeReadiness
 }
 
-/// Per-model cost estimate (standard vs. Batch API pricing).
+/// Per-model cost estimate at API list price.
 struct IngestCostEstimate: Codable, Identifiable, Hashable, Sendable {
     var id: String { model }
     let model: String
-    let standardUsd: Double
-    let batchUsd: Double
+    let usd: Double
 }
 
 /// Pending count and cost estimates for one ingestion scope.
@@ -316,30 +273,15 @@ struct IngestSessionFile: Codable, Hashable, Sendable {
     let filePath: String
 }
 
-/// `GET /ingest/status` response.
+/// `GET /ingest/status` response. `state` is
+/// `idle | running | done | failed | cancelled`.
 struct IngestStatus: Codable, Sendable {
-    struct PendingBatch: Codable, Sendable {
-        let jobName: String
-        let model: String
-        let submittedAt: Double
-        let requestCount: Int
-    }
     let state: String
     let processed: Int
     let failed: Int
     let skipped: Int
     let total: Int
     let currentFile: String?
-    let error: String?
-    let pendingBatch: PendingBatch?
-}
-
-/// `POST /ingest/collect` response.
-struct IngestCollectResult: Codable, Sendable {
-    let state: String
-    let jobState: String?
-    let ingested: Int?
-    let failed: Int?
     let error: String?
 }
 
@@ -432,14 +374,7 @@ struct HygieneReportEnvelope: Codable, Sendable {
     let hygieneReady: Bool
 }
 
-/// Inline attachment payload for create/update (base64 `data`).
-struct AttachmentInput: Codable, Sendable {
-    let mimeType: String
-    let data: String
-    let caption: String?
-}
-
-/// Raw attachment bytes plus content type, for native rendering.
+/// Raw attachment bytes plus content type, for open/save.
 struct AttachmentBytes: Sendable {
     let data: Data
     let mimeType: String

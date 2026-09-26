@@ -4,60 +4,49 @@
 > memory layer. It manages a **local** `~/.gemdex` pool on a single Mac; the
 > [web manager](../web/README.md) is the surface for a self-hosted deployment —
 > any browser, behind your Google login, against the shared pool. The app still
-> works and still ships; expect bug fixes, not new features. It is not going
-> away, and nothing here has been removed.
+> works and still ships; expect bug fixes, not new features.
 
 A native, **manage-only** desktop app for the [Gemdex](https://github.com/nikships/gemdex)
 memory layer, built in **SwiftUI** for macOS (Apple Silicon). It opens straight
-into your memory layer to browse, create, edit, delete, export, and import
-memories.
+into your local memory layer to browse, create, edit, delete, search, export,
+and import memories.
 
-The Storage & Gemini panel can switch the sidecar between the embedded local
-backend and a named BYOI Gemdex Server. It also shows the per-launch Gemini
-readiness state and lets users validate, replace, or retry the local key. Remote
-bearer tokens are accepted by the UI only for the configuration request,
-persisted by the sidecar under `~/.gemdex/.env`, and never returned to the app.
-The same panel can test remote health/authentication and import local memories
-to the remote while preserving ids.
+## Local-only
 
-There is **no free-text search box** — recall is an agent/MCP capability. This
-app is a fast local manager. (It does offer recall-*by-example*: a "Find
-similar" action on any attachment, which runs media recall against the sidecar.)
+The app manages the local `~/.gemdex` store on this Mac. There is no remote or
+server mode and no API key.
 
-## Gemini readiness and ingestion safety
+- **Embeddings** run on this Mac with BGE-M3 on MLX (text only). On first run
+  the setup screen offers an explicit, confirmed install of the MLX runtime and
+  model (about 600 MB, Apple Silicon required). The memory manager unlocks once
+  the model is installed.
+- **Storage & Models** settings show the local model status and the install
+  control. When memories saved with the previous Gemini embedding model remain,
+  a notice offers a confirmed **Migrate N memories** action that re-embeds them
+  locally.
+- **Chat-history ingestion and memory hygiene** run on your local
+  [Claude Code](https://docs.claude.com/en/docs/claude-code) CLI
+  (`claude -p` with the Haiku model). Both stay disabled until Claude Code is
+  installed and signed in; the panels explain what is missing and offer
+  **Check again**. Set `GEMDEX_CLAUDE_PATH` if `claude` is not on your PATH.
+  Scan results show an estimate at API list price; a Claude subscription login
+  is not billed per token.
 
-Local mode is a **hard startup gate**. The sidecar performs a small real Gemini
-embedding request on every launch; the manager does not mount until the key is
-present and that request succeeds. Missing, rejected, and temporarily
-unverifiable keys render a high-contrast blocking screen. A newly entered key is
-validated before it is persisted, so a typo cannot replace a previously working
-key.
-
-Remote mode can open without a local key because the Gemdex Server owns memory
-embeddings. Chat-history digestion still happens client-side, so remote mode
-keeps a persistent red readiness warning and disables scan/start until a local
-Gemini key is verified.
+Pressing Return in the sidebar search box runs semantic free-text recall
+against the local store; typing alone filters loaded titles.
 
 History ingestion is **always new-sessions-only**. Scans report previously
 ingested sessions that later changed, but the UI exposes no override and the
-core engine never includes those sessions in a run. This prevents accidental
-re-digestion and overwrites across desktop, sidecar, and CLI entry points.
+core engine never includes those sessions in a run.
 
-## Multimodal memories
+## Attachments
 
-Memories can carry inline media (image / audio / video / PDF). In the editor you
-can drag-and-drop or pick files, give each a caption (which backs the BM25
-keyword branch on recall), and remove them. The detail view renders images, an
-audio player (AVKit), a video player (AVKit), and native inline PDF preview
-(PDFKit). Bytes are streamed from the sidecar's
-`GET /memories/:id/attachments/:attachmentId` route; "Find similar" posts the
-attachment to `POST /recall` for recall-by-media.
-
-Remote mode still talks only to the localhost sidecar. The app must never
-connect directly to a configured Gemdex Server — the sidecar owns outbound
-remote traffic because it can attach the stored bearer token without ever
-exposing it to the app. The app receives only the per-launch localhost base URL
-and request token via the sidecar handshake.
+Memories are text. Ingested digests keep the full session transcript as a
+read-only file attachment (`text/plain` or `application/x-ndjson`). The editor
+lists attachments with their kind and size and can open or save each one;
+bytes are streamed from `GET /memories/:id/attachments/:attachmentId`. The app
+does not add, caption, or preview media, and older memories with image, audio,
+video, or PDF attachments show those as plain downloadable files.
 
 ## Architecture
 
@@ -141,9 +130,9 @@ bundled sidecar is updated by shipping a new DMG.
   Xcode/`xcodebuild` install is not required.
 - A system Node (for `npx -y gemdex serve`), or set `GEMDEX_SERVE_CMD` to a
   local `gemdex-mcp` entry script for development.
-- `GEMINI_API_KEY` in the environment (the sidecar validates it on launch and
-  uses it for local embedding), or enter and validate it in the in-app setup
-  screen.
+- An Apple Silicon Mac for the local MLX embedding model.
+- Optionally, the Claude Code CLI (signed in) for chat-history ingestion and
+  memory hygiene.
 
 ## Commands
 
@@ -168,7 +157,6 @@ package or a bundled sidecar:
 
 ```sh
 GEMDEX_SERVE_CMD=/abs/path/to/gemdex/packages/mcp/dist/index.js \
-GEMINI_API_KEY=your-key \
 "build/Gemdex Memory.app/Contents/MacOS/GemdexMemory"
 ```
 

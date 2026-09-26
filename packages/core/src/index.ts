@@ -1,5 +1,6 @@
 export * from './config';
 export * from './embedding';
+export * from './inference';
 export * from './vectordb';
 export * from './memory';
 export * from './ingest';

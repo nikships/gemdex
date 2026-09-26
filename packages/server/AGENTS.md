@@ -1,7 +1,9 @@
 # AGENTS.md — gemdex-server
 
 `gemdex-server` is the self-hosted **BYOI** (Bring Your Own Infrastructure)
-remote backend Gemdex clients talk to in remote mode. It is a deliberately
+HTTP backend used by `mcp-http`, the web BFF and direct `/v1` integrations.
+The npx package and desktop sidecar are separate local clients, not BYOI callers.
+It is a deliberately
 **thin** wrapper over `gemdex-core` (`workspace:*`): a plain `node:http` server
 that owns only the edge concerns — the `/v1` prefix, bearer auth, CORS, config
 loading, migrations, and Postgres/blob wiring — and delegates **all** memory
@@ -59,9 +61,8 @@ The full argument, including the rejected alternatives, is in
 
 Note what it is *not*: it is **not** in core's `handleMemoryApiRequest` and so
 is **not** part of the shared HTTP API that `gemdex serve` also mounts. That is
-deliberate — the sidecar's users have core in-process and a local ingest CLI
-already; a session-upload endpoint there would be a second way to do what
-`gemdex sync-history` does.
+deliberate: sidecar ingestion scans local paths and uses Claude Code, whereas
+this route accepts uploaded bytes and uses core's Gemini `SessionDigester`.
 
 Route shape, and the reasons for it:
 
@@ -78,7 +79,8 @@ Route shape, and the reasons for it:
 - **Filenames are basename-stripped in `validateSessionFiles`.** Nothing here
   writes to disk, but a filename reaches the digest's provenance line and the
   session-id fallback.
-- Caps: 25 files per request, 40 MiB per file. The web BFF applies its own,
+- Caps: 25 files per request, `40 * 1024 * 1024` characters per file.
+  The web BFF applies its own,
   tighter limits; these are the backstop for any other caller.
 
 ## Server-side embedding (`embedding.ts`)
@@ -173,6 +175,12 @@ it is **not** the server version. The compose service binds `127.0.0.1` and
 uses the `pgvector/pgvector` image.
 
 ## Gotchas / invariants
+
+- **Integration harness:** `integration/byoi.mjs` runs from the repository root
+  via `pnpm test:byoi`, after packages are built. Supply
+  `BYOI_TEST_DATABASE_URL` for a dedicated disposable pgvector database.
+  It exercises `/v1` HTTP directly with deterministic embeddings. CI job:
+  `BYOI integration (Postgres + server)`. It does not start local MCP or MLX.
 
 - **`503` without a DB** — `/v1/*` data routes fail until `databaseUrl` is set;
   green `/v1/health` does **not** mean storage works.

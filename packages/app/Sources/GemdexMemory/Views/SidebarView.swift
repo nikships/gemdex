@@ -140,15 +140,15 @@ struct SidebarView: View {
     }
 }
 
-/// One row in the sidebar: optional image thumbnail, title, preview, date, and
-/// an attachment-count chip.
+/// One row in the sidebar: icon, title, preview, date, and an attachment-count
+/// chip (attachments are stored files such as chat transcripts).
 struct MemoryRow: View, Equatable {
     let memory: MemorySummary
     var isSelected: Bool = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 11) {
-            thumbnail
+            icon
             VStack(alignment: .leading, spacing: 3) {
                 Text(memory.displayTitle)
                     .font(.body.weight(.semibold))
@@ -165,6 +165,7 @@ struct MemoryRow: View, Equatable {
                         .foregroundStyle(.tertiary)
                     if !memory.attachments.isEmpty {
                         Label("\(memory.attachments.count)", systemImage: "paperclip")
+                            .help("\(memory.attachments.count) attached \(memory.attachments.count == 1 ? "file" : "files")")
                             .font(.caption2.weight(.medium))
                             .foregroundStyle(Brand.gold)
                             .labelStyle(.titleAndIcon)
@@ -180,26 +181,15 @@ struct MemoryRow: View, Equatable {
         .contentShape(RoundedRectangle(cornerRadius: Metric.radiusControl, style: .continuous))
     }
 
-    @ViewBuilder
-    private var thumbnail: some View {
-        if let image = memory.firstImage {
-            ThumbnailView(memoryID: memory.id, attachmentID: image.id)
-                .frame(width: 46, height: 46)
-                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .strokeBorder(Color.primary.opacity(0.08))
-                )
-        } else {
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .fill(Brand.warmGradient.opacity(0.16))
-                .frame(width: 46, height: 46)
-                .overlay(
-                    Image(systemName: "doc.text")
-                        .font(.system(size: 16, weight: .light))
-                        .foregroundStyle(Brand.gold)
-                )
-        }
+    private var icon: some View {
+        RoundedRectangle(cornerRadius: 9, style: .continuous)
+            .fill(Brand.warmGradient.opacity(0.16))
+            .frame(width: 46, height: 46)
+            .overlay(
+                Image(systemName: "doc.text")
+                    .font(.system(size: 16, weight: .light))
+                    .foregroundStyle(Brand.gold)
+            )
     }
 
     @ViewBuilder
@@ -207,36 +197,6 @@ struct MemoryRow: View, Equatable {
         if isSelected {
             RoundedRectangle(cornerRadius: Metric.radiusControl, style: .continuous)
                 .fill(Brand.gold.opacity(0.16))
-        }
-    }
-}
-
-/// Lazily fetches a small image attachment for a sidebar thumbnail. Renders
-/// synchronously from the shared `ThumbnailLoader` cache when possible, so
-/// recycled rows don't flash a placeholder or re-fetch on scroll-back.
-struct ThumbnailView: View {
-    @EnvironmentObject var model: AppModel
-    let memoryID: String
-    let attachmentID: String
-    @State private var loaded: NSImage?
-
-    private var image: NSImage? {
-        loaded ?? model.thumbnails.cached(memoryID: memoryID, attachmentID: attachmentID)
-    }
-
-    var body: some View {
-        Group {
-            if let image {
-                Image(nsImage: image).resizable().scaledToFill()
-            } else {
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(Color(nsColor: .controlColor))
-                    .overlay(Image(systemName: "photo").foregroundStyle(.secondary).font(.caption))
-            }
-        }
-        .task(id: attachmentID) {
-            guard image == nil else { return }
-            loaded = await model.thumbnails.thumbnail(memoryID: memoryID, attachmentID: attachmentID)
         }
     }
 }

@@ -14,8 +14,8 @@ import {
 } from './types';
 
 /**
- * Storage boundary used by MCP and app callers. Implementations may be the
- * embedded LanceDB/FileBlobStore path, or a future remote Gemdex service, but
+ * Storage boundary used by MCP, the desktop sidecar and the BYOI server.
+ * Implementations (the embedded LanceDB store, the server's Postgres store)
  * must preserve the public memory model: one global pool, parent-document
  * chunking with full-parent recall results, and attachment reads by memory id.
  */
@@ -33,8 +33,8 @@ export interface MemoryBackend {
 }
 
 /**
- * Local backend adapter for the existing embedded storage path:
- * Gemini embeddings + LanceDB hybrid vectors + FileBlobStore attachment blobs.
+ * Local backend adapter for the embedded storage path: local text embeddings +
+ * LanceDB hybrid vectors + FileBlobStore attachment blobs.
  */
 export class LocalMemoryBackend implements MemoryBackend {
     private store: MemoryStore;
@@ -48,8 +48,12 @@ export class LocalMemoryBackend implements MemoryBackend {
         return this.store;
     }
 
-    migrateTextToMlx(onProgress?: (completed: number, total: number) => void): Promise<void> {
-        return this.store.migrateTextToMlx(onProgress);
+    migrateLegacy(onProgress?: (completed: number, total: number) => void): Promise<void> {
+        return this.store.migrateLegacy(onProgress);
+    }
+
+    countLegacyMemories(): Promise<number> {
+        return this.store.countLegacyMemories();
     }
 
     save(input: SaveMemoryInput): Promise<SaveResult> {

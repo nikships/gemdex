@@ -1,118 +1,72 @@
 import * as fs from 'node:fs';
 import {
     attachTranscriptToRecord,
-    DEFAULT_DIGEST_MODEL,
-    DIGEST_MODELS,
-    DIGEST_PRICING_AS_OF,
+    checkClaudeCode,
+    ClaudeCodeReadiness,
+    DEFAULT_CLAUDE_MODEL,
     hasTranscriptAttachment,
+    INFERENCE_MODELS,
+    INFERENCE_PRICING_AS_OF,
     IngestManager,
     IngestSourceFolder,
-    IngestTarget,
     MemoryBackend,
-    MemoryExportRecord,
-    RemoteMemoryBackend,
-    ServerVersionInfo,
     antigravityPresetFolder,
-    checkServerCompatibility,
     claudePresetFolder,
     codexPresetFolder,
-    envManager,
     factoryPresetFolder,
 } from 'gemdex-core';
-import { ClientConfigStore, StoredRemote, tokenEnvVarForRemote } from './cli-config.js';
-import { createConfig, isLocalGeminiApiKey } from './config.js';
+import { ClientConfigStore } from './cli-config.js';
+import { createConfig } from './config.js';
 import { errorMessage } from './errors.js';
 import { createMemoryBackend } from './memory.js';
-import { authorizeSync } from './sync-auth.js';
-import { SyncCredentialStore } from './sync-config.js';
-import { RemoteSyncTarget } from './sync-target.js';
-import { chooseTextProvider, installLocalModel, localModelStatus, migrateLocalText } from './local-model.js';
-import { createEmbeddingInstance } from './embedding.js';
+import { installLocalModel, localModelStatusWithLegacy, migrateLegacyMemories } from './local-model.js';
 
 interface CliIo {
     stdout: (message: string) => void;
     stderr: (message: string) => void;
-    readSecret: (prompt: string, fromStdin: boolean) => Promise<string>;
 }
 
 interface CliDependencies {
     store?: ClientConfigStore;
     io?: CliIo;
-    fetch?: typeof fetch;
-    createLocalBackend?: () => MemoryBackend;
-    createRemoteBackend?: (remote: StoredRemote, token: string) => MemoryBackend;
-    /** Backend for the active mode (local or remote), used by ingest-history. */
-    createActiveBackend?: () => MemoryBackend;
+    /** Local backend, used by ingest-history and backfill-transcripts. */
+    createBackend?: () => MemoryBackend;
     createIngestManager?: () => IngestManager;
-    /** Destination for `sync-history` (the OAuth-authenticated remote host). */
-    createSyncTarget?: (mcpUrl: string) => IngestTarget;
-    /** Overridable so tests never spawn a browser. */
-    openBrowser?: (url: string) => void | Promise<void>;
-    /** Overridable so tests can use a temp dir for stored OAuth state. */
-    createSyncCredentialStore?: (mcpUrl: string) => SyncCredentialStore;
-    validateGeminiKey?: (key: string) => Promise<void>;
+    /** Overridable so tests never spawn the real Claude Code CLI. */
+    checkClaudeCode?: () => Promise<ClaudeCodeReadiness>;
 }
 
 const defaultIo: CliIo = {
     stdout: (message) => process.stdout.write(message),
     stderr: (message) => process.stderr.write(message),
-    readSecret,
 };
 
 function usage(): string {
-    return `Gemdex remote configuration
+    return `Gemdex local setup and maintenance
 
 Usage:
-  gemdex setup gemini [--key-stdin]
   gemdex install
-  gemdex migrate-text
-  gemdex embedding mlx|gemini
-  gemdex init-remote <name> <url> [--token-env VAR | --token-stdin] [--import-local] [--no-activate]
-  gemdex remote add <name> <url> [--token-env VAR | --token-stdin]
-  gemdex remote list
-  gemdex remote remove <name>
-  gemdex remote status [name]
-  gemdex mode local
-  gemdex mode remote <name>
+  gemdex migrate
   gemdex status
-  gemdex import-local-to-remote [name] [--attach-transcripts]
-  gemdex backfill-transcripts [remote-name] [--force] [--dry-run]
-  gemdex ingest-history [--source claude|factory|codex|antigravity|PATH]... [--model MODEL]
-                        [--batch] [--dry-run] [--collect]
-  gemdex sync-history [--url https://host/mcp] [--source ...]... [--model MODEL]
-                      [--batch] [--dry-run] [--collect] [--logout]
+  gemdex backfill-transcripts [--force] [--dry-run]
+  gemdex ingest-history [--source claude|factory|codex|antigravity|PATH]... [--model MODEL] [--dry-run]
 
-init-remote is the one-shot client setup for a BYOI server: it stores the
-remote + token, verifies the server is reachable, authenticated, and version-
-compatible, switches Gemdex into remote mode, optionally imports your local
-memories (--import-local), and prints the exact agent command to run.
+install downloads the managed Python/MLX runtime and the pinned BGE-M3 model
+(Apple Silicon only, ~600 MB). It is the only step that downloads anything.
 
-import-local-to-remote copies local Lance memories into a named remote. Pass
---attach-transcripts to parse each digest's "Full transcript: <path>" footer,
-read the file when present, and include it as a non-embedded file attachment
-(skipped with a message when the path is missing — does not fail the run).
+migrate re-embeds memories saved by earlier Gemini-based releases into the
+local model. Their text, titles, timestamps and attachment files are kept.
 
 backfill-transcripts re-imports digest memories that only have a path footer,
-attaching the full transcript blob. With no remote name, uses the active
-backend (local or remote). With a remote name, targets that remote. Missing
-files are skipped with a clear message.
+attaching the full transcript blob. Missing files are skipped with a message.
 
 ingest-history distills coding-agent chat transcripts (Claude Code, Factory
 CLI, Codex, Antigravity, or any folder of .jsonl sessions) into one memory per
-session (digest text + full transcript as a non-embedded attachment). Only
-never-before-ingested sessions are processed; previously ingested sessions are
-never reprocessed, even if their transcript later changes. Defaults to detected
-presets. --dry-run prints the scan + cost estimate; --batch submits a Gemini
-Batch API job (50% cost, results within ~24h) that you collect later with
---collect. Needs a local GEMINI_API_KEY.
-
-sync-history is ingest-history pointed at a REMOTE self-hosted host instead of
-this machine's pool: same scan/digest/ledger semantics, but each digest is
-upserted into the host's pool over its OAuth-protected /mcp endpoint. Run it on
-every coding machine — the host never reads your laptop's disk. The first run
-opens a browser once to authorize as the host's allowlisted Google account;
-the refresh token is then stored in ~/.gemdex/sync-auth.json (0600).
---url (or GEMDEX_SYNC_URL) is the host's /mcp URL; --logout forgets it.
+session (digest text + full transcript as a non-embedded attachment). Digests
+are written by your local Claude Code CLI (claude -p with Haiku), using the
+login Claude Code already has. Only never-before-ingested sessions are
+processed; previously ingested sessions are never reprocessed. Defaults to
+detected presets. --dry-run prints the scan + cost estimate.
 `;
 }
 
@@ -128,202 +82,12 @@ function optionValue(args: string[], name: string): string | undefined {
     return requireArg(args, index + 1, `${name} value`);
 }
 
-async function readSecret(prompt: string, fromStdin: boolean): Promise<string> {
-    if (fromStdin) {
-        let value = '';
-        for await (const chunk of process.stdin) value += chunk;
-        return value.replace(/\r?\n$/, '').trim();
-    }
-    if (!process.stdin.isTTY || !process.stdout.isTTY || !process.stdin.setRawMode) {
-        throw new Error('Interactive secret entry needs a terminal. For automation use setup gemini --key-stdin, or remote commands with --token-stdin/--token-env VAR.');
-    }
-
-    process.stdout.write(prompt);
-    process.stdin.setRawMode(true);
-    process.stdin.resume();
-    process.stdin.setEncoding('utf8');
-    return new Promise<string>((resolve, reject) => {
-        let value = '';
-        const cleanup = (): void => {
-            process.stdin.off('data', onData);
-            process.stdin.setRawMode?.(false);
-            process.stdin.pause();
-            process.stdout.write('\n');
-        };
-        const onData = (chunk: string): void => {
-            for (const character of chunk) {
-                if (character === '\u0003') {
-                    cleanup();
-                    reject(new Error('Token entry cancelled.'));
-                    return;
-                }
-                if (character === '\r' || character === '\n') {
-                    cleanup();
-                    resolve(value.trim());
-                    return;
-                }
-                if (character === '\u007f' || character === '\b') {
-                    value = value.slice(0, -1);
-                    continue;
-                }
-                value += character;
-            }
-        };
-        process.stdin.on('data', onData);
-    });
-}
-
-function resolveRemote(
-    store: ClientConfigStore,
-    requestedName?: string,
-): { name: string; remote: StoredRemote; token: string } {
-    const name = requestedName ?? store.getEnv('GEMDEX_REMOTE_NAME');
-    if (!name) throw new Error('No remote selected. Pass a remote name or run `gemdex mode remote <name>`.');
-    const remote = store.get(name);
-    if (!remote) throw new Error(`Remote "${name}" is not configured.`);
-    const token = store.getEnv(remote.tokenEnvVar)?.trim();
-    if (!token) {
-        throw new Error(`Token environment variable "${remote.tokenEnvVar}" is not configured.`);
-    }
-    return { name, remote, token };
-}
-
-async function remoteStatus(
-    name: string,
-    remote: StoredRemote,
-    token: string,
-    fetchImpl: typeof fetch,
-    createRemoteBackend: (remote: StoredRemote, token: string) => MemoryBackend,
-): Promise<{ reachable: boolean; authenticated: boolean; detail?: string }> {
-    try {
-        const response = await fetchImpl(`${remote.url}/v1/health`, {
-            signal: AbortSignal.timeout(5_000),
-        });
-        if (!response.ok) {
-            return { reachable: false, authenticated: false, detail: `health returned HTTP ${response.status}` };
-        }
-    } catch (error) {
-        return {
-            reachable: false,
-            authenticated: false,
-            detail: errorMessage(error),
-        };
-    }
-
-    try {
-        await createRemoteBackend(remote, token).list();
-        return { reachable: true, authenticated: true };
-    } catch (error) {
-        return { reachable: true, authenticated: false, detail: `${name}: ${errorMessage(error)}` };
-    }
-}
-
-interface MigrationResult {
-    created: number;
-    updated: number;
-    skipped: number;
-    /** Transcripts attached during migrate when --attach-transcripts is set. */
-    transcriptsAttached?: number;
-    transcriptsMissing?: number;
-}
-
 interface BackfillTranscriptsResult {
     attached: number;
     already: number;
     missing: number;
     noPath: number;
     failed: number;
-}
-
-/**
- * Optionally attach full-transcript blobs to digest export records by reading
- * the path footed in content. Missing files are counted and skipped.
- */
-function maybeAttachTranscripts(
-    records: MemoryExportRecord[],
-    attach: boolean,
-    io: CliIo,
-): { records: MemoryExportRecord[]; attached: number; missing: number } {
-    if (!attach) return { records, attached: 0, missing: 0 };
-    let attached = 0;
-    let missing = 0;
-    const out: MemoryExportRecord[] = [];
-    for (const record of records) {
-        const result = attachTranscriptToRecord(record, { force: false });
-        if (result.status === 'attached') {
-            attached += 1;
-            out.push(result.record);
-        } else if (result.status === 'missing') {
-            missing += 1;
-            io.stderr(
-                `Skipped transcript for ${record.id}: file not found` +
-                (result.filePath ? ` (${result.filePath})` : '') + `\n`,
-            );
-            out.push(record);
-        } else {
-            out.push(record);
-        }
-    }
-    return { records: out, attached, missing };
-}
-
-async function migrateLocalToRemote(
-    local: MemoryBackend,
-    remote: MemoryBackend,
-    io: CliIo,
-    options: { attachTranscripts?: boolean } = {},
-): Promise<MigrationResult> {
-    const exported = await local.exportAll();
-    const attach = options.attachTranscripts === true;
-    const result: MigrationResult = {
-        created: 0,
-        updated: 0,
-        skipped: 0,
-        ...(attach && { transcriptsAttached: 0, transcriptsMissing: 0 }),
-    };
-    // Attach + import one record at a time so multi-hundred-MB transcript
-    // backfills do not hold every base64 payload in memory at once.
-    let index = 0;
-    for (const raw of exported) {
-        index += 1;
-        let record = raw;
-        if (attach) {
-            const prepared = maybeAttachTranscripts([raw], true, io);
-            record = prepared.records[0] ?? raw;
-            result.transcriptsAttached = (result.transcriptsAttached ?? 0) + prepared.attached;
-            result.transcriptsMissing = (result.transcriptsMissing ?? 0) + prepared.missing;
-        }
-        try {
-            const existed = await remote.get(record.id) !== null;
-            const imported = await remote.importRecords([record]);
-            if (imported.imported !== 1) {
-                result.skipped += 1;
-                const detail = imported.errors[0]?.error;
-                if (detail) {
-                    io.stderr(`Skipped ${record.id}: ${detail}\n`);
-                }
-            } else if (existed) {
-                result.updated += 1;
-            } else {
-                result.created += 1;
-            }
-        } catch (error) {
-            result.skipped += 1;
-            io.stderr(`Skipped ${record.id}: ${errorMessage(error)}\n`);
-        }
-        if (index % 25 === 0 || index === exported.length) {
-            io.stdout(
-                `Progress ${index}/${exported.length} — ` +
-                `created ${result.created}, updated ${result.updated}, skipped ${result.skipped}` +
-                (attach
-                    ? `, transcripts ${result.transcriptsAttached ?? 0}` +
-                      ` (missing ${result.transcriptsMissing ?? 0})`
-                    : '') +
-                `\n`,
-            );
-        }
-    }
-    return result;
 }
 
 /**
@@ -335,7 +99,7 @@ async function backfillTranscripts(
     io: CliIo,
     options: { force?: boolean; dryRun?: boolean } = {},
 ): Promise<BackfillTranscriptsResult> {
-    // Never use exportAll() here — remote export embeds every transcript as
+    // Never use exportAll() here — export inlines every transcript as
     // base64 and multi-hundred-MB pools blow V8 string limits ("Invalid string
     // length"). List summaries + per-id get() only returns metadata + content.
     const summaries = await backend.list();
@@ -425,315 +189,61 @@ async function backfillTranscripts(
     return result;
 }
 
-/**
- * Verify a Gemdex Server is reachable AND speaks a compatible protocol version
- * before we commit a client to it. Throws a clear, actionable error otherwise.
- * Mirrors the version gate remote clients apply before sending memory data.
- */
-async function verifyServerCompatibility(url: string, fetchImpl: typeof fetch): Promise<void> {
-    let response: Response;
-    try {
-        response = await fetchImpl(`${url}/v1/version`, { signal: AbortSignal.timeout(5_000) });
-    } catch (error) {
-        throw new Error(`Could not reach ${url}/v1/version: ${errorMessage(error)}`);
+
+function describeClaude(readiness: ClaudeCodeReadiness): string {
+    if (readiness.status === 'ready') {
+        return `ready${readiness.version ? ` (${readiness.version})` : ''}${readiness.path ? ` at ${readiness.path}` : ''}`;
     }
-    if (!response.ok) {
-        throw new Error(`${url}/v1/version returned HTTP ${response.status}.`);
-    }
-    let info: ServerVersionInfo;
-    try {
-        info = await response.json() as ServerVersionInfo;
-    } catch {
-        throw new Error(`${url}/v1/version did not return valid JSON.`);
-    }
-    checkServerCompatibility(info);
+    return `${readiness.status}${readiness.message ? ` — ${readiness.message}` : ''}`;
 }
 
 export async function runCli(args: string[], dependencies: CliDependencies = {}): Promise<number | null> {
     const store = dependencies.store ?? new ClientConfigStore();
     const io = dependencies.io ?? defaultIo;
-    const fetchImpl = dependencies.fetch ?? fetch;
-    // Import/backfill of digests + multi-MB transcript blobs regularly exceeds
-    // the default 30s HTTP timeout; give remote migrations five minutes/request.
-    const createRemoteBackend = dependencies.createRemoteBackend ??
-        ((remote: StoredRemote, token: string) => new RemoteMemoryBackend({
-            url: remote.url,
-            token,
-            timeoutMs: 300_000,
-        }));
-    const createLocalBackend = dependencies.createLocalBackend ?? (() => {
-        const localConfig = createConfig((name) => name === 'GEMDEX_MODE' ? 'local' : store.getEnv(name));
-        return createMemoryBackend(localConfig);
-    });
-    const createActiveBackend = dependencies.createActiveBackend ?? (() => {
-        const mode = store.getEnv('GEMDEX_MODE')?.toLowerCase() === 'remote' ? 'remote' : 'local';
-        if (mode === 'remote') {
-            const selected = resolveRemote(store, undefined);
-            return createRemoteBackend(selected.remote, selected.token);
-        }
-        return createLocalBackend();
-    });
+    const createBackend = dependencies.createBackend
+        ?? (() => createMemoryBackend(createConfig((name) => store.getEnv(name)), store.rootDir));
 
-    const [command, subcommand] = args;
-    const CLI_COMMANDS = [
-        'setup', 'install', 'migrate-text', 'embedding',
-        'remote',
-        'mode',
-        'status',
-        'init-remote',
-        'import-local-to-remote',
-        'backfill-transcripts',
-        'ingest-history',
-        'sync-history',
-    ];
+    const [command] = args;
+    const CLI_COMMANDS = ['install', 'migrate', 'status', 'backfill-transcripts', 'ingest-history'];
     if (!CLI_COMMANDS.includes(command)) return null;
 
     try {
-        if (command === 'setup') {
-            if (subcommand !== 'gemini' || args.some((arg, index) => index > 1 && arg !== '--key-stdin')) {
-                throw new Error('Usage: npx gemdex-mcp setup gemini [--key-stdin]');
-            }
-            if (process.env.GEMDEX_MODE && process.env.GEMDEX_MODE !== 'local') {
-                throw new Error('Remove GEMDEX_MODE from the launch environment before selecting local storage.');
-            }
-            if (process.env.GEMDEX_EMBEDDING_PROVIDER && process.env.GEMDEX_EMBEDDING_PROVIDER !== 'gemini') {
-                throw new Error('Remove GEMDEX_EMBEDDING_PROVIDER from the launch environment before selecting Gemini.');
-            }
-            const key = await io.readSecret('Gemini API key (hidden): ', args.includes('--key-stdin'));
-            if (!key || /[\r\n]/.test(key)) throw new Error('A single non-empty Gemini API key is required.');
-            if (isLocalGeminiApiKey(key)) {
-                throw new Error('The literal value "local" activates managed MLX text, not Gemini. Run npx gemdex-mcp install, or enter a real Gemini API key.');
-            }
-            if (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== key) {
-                throw new Error('GEMINI_API_KEY in the launch environment would override this key. Remove it before setup.');
-            }
-            io.stderr('Validating Gemini key…\n');
-            try {
-                if (dependencies.validateGeminiKey) await dependencies.validateGeminiKey(key);
-                else {
-                    const config = createConfig((name) => name === 'GEMDEX_MODE' ? 'local' : name === 'GEMINI_API_KEY' ? key : store.getEnv(name));
-                    await createEmbeddingInstance(config).embed('Gemdex setup validation');
-                }
-            } catch {
-                throw new Error('Gemini validation failed; saved configuration was not changed. Check your key, network, API access and quota, then retry.');
-            }
-            store.setEnvValues({ GEMINI_API_KEY: key, GEMDEX_EMBEDDING_PROVIDER: 'gemini', GEMDEX_MODE: 'local' });
-            io.stdout('Gemini configured. Retry the Gemdex tool in Claude Code. Existing memories were not migrated.\n');
-            return 0;
-        }
-        if (command === 'install' || command === 'migrate-text' || command === 'embedding') {
-            if (store.getEnv('GEMDEX_MODE') === 'remote') throw new Error('This action is local-only. Run npx gemdex-mcp mode local first.');
-            if (command === 'embedding') {
-                if (args.length !== 2) throw new Error('Usage: npx gemdex-mcp embedding mlx|gemini');
-                chooseTextProvider(store, subcommand);
-                io.stdout(`Text provider: ${subcommand}. Historical banks remain searchable.\n`);
-            } else {
-                if (args.length !== 1) throw new Error(`Usage: npx gemdex-mcp ${command}`);
-                if (command === 'install') {
-                    await installLocalModel(store, (message) => io.stderr(`${message}\n`));
-                    io.stdout('Local MLX text is active (GEMINI_API_KEY=local). Existing memories were not migrated. Run npx gemdex-mcp migrate-text to move existing text; media needs a real Gemini key.\n');
-                } else {
-                    await migrateLocalText(store, (completed, total) => io.stderr(`Migrating text: ${completed}/${total}\n`));
-                    io.stdout('Text migration complete. Attachment rows and blobs remain on Gemini.\n');
-                }
-            }
-            return 0;
-        }
-        if (command === 'remote' && subcommand === 'add') {
-            const name = requireArg(args, 2, 'Remote name');
-            const url = requireArg(args, 3, 'Remote URL');
-            const explicitTokenEnvVar = optionValue(args, '--token-env');
-            const fromStdin = args.includes('--token-stdin');
-            if (explicitTokenEnvVar && fromStdin) {
-                throw new Error('Use either --token-env or --token-stdin, not both.');
-            }
-            const tokenEnvVar = explicitTokenEnvVar ?? tokenEnvVarForRemote(name);
-            if (!explicitTokenEnvVar) {
-                const token = await io.readSecret('Bearer token: ', fromStdin);
-                if (!token) throw new Error('Bearer token cannot be empty.');
-                store.setEnv(tokenEnvVar, token);
-            }
-            const remote = store.add(name, url, tokenEnvVar);
-            io.stdout(`Added remote "${name}" at ${remote.url}.\n`);
+        if (command === 'install') {
+            if (args.length !== 1) throw new Error('Usage: npx gemdex-mcp install');
+            await installLocalModel(store, (message) => io.stderr(`${message}\n`));
+            io.stdout('Local model installed. Run npx gemdex-mcp migrate if you have memories from a Gemini-based Gemdex release.\n');
             return 0;
         }
 
-        if (command === 'remote' && subcommand === 'list') {
-            const activeName = store.getEnv('GEMDEX_MODE') === 'remote'
-                ? store.getEnv('GEMDEX_REMOTE_NAME')
-                : undefined;
-            const remotes = store.list();
-            if (remotes.length === 0) {
-                io.stdout('No remotes configured.\n');
-                return 0;
-            }
-            for (const remote of remotes) {
-                io.stdout(`${remote.name === activeName ? '* ' : '  '}${remote.name}\t${remote.url}\n`);
-            }
+        if (command === 'migrate') {
+            if (args.length !== 1) throw new Error('Usage: npx gemdex-mcp migrate');
+            await migrateLegacyMemories(store, (completed, total) => io.stderr(`Migrating memories: ${completed}/${total}\n`));
+            io.stdout('Migration complete. Every memory is now searchable with the local model.\n');
             return 0;
         }
 
-        if (command === 'remote' && subcommand === 'remove') {
-            const name = requireArg(args, 2, 'Remote name');
-            if (!store.remove(name)) throw new Error(`Remote "${name}" is not configured.`);
-            io.stdout(`Removed remote "${name}".\n`);
-            return 0;
-        }
-
-        if (command === 'mode' && subcommand === 'local') {
-            store.activateLocal();
-            io.stdout('Gemdex mode is now local.\n');
-            return 0;
-        }
-
-        if (command === 'mode' && subcommand === 'remote') {
-            const name = requireArg(args, 2, 'Remote name');
-            const remote = store.activateRemote(name);
-            io.stdout(`Gemdex mode is now remote: ${name} (${remote.url}).\n`);
-            return 0;
-        }
-
-        if (command === 'status' || (command === 'remote' && subcommand === 'status')) {
-            const requestedName = command === 'remote' ? args[2] : undefined;
-            const mode = store.getEnv('GEMDEX_MODE')?.toLowerCase() === 'remote' ? 'remote' : 'local';
-            if (mode === 'local' && !requestedName) {
-                io.stdout('Mode: local\n');
-                io.stdout(`Store: ${store.getEnv('LANCEDB_PATH') ?? '~/.gemdex/lance'}\n`);
-                const model = localModelStatus(store);
-                io.stdout(`Text provider: ${model.provider}\nLocal model: ${model.status} (${model.model})\n`);
-                const rawKey = store.getEnv('GEMINI_API_KEY');
-                const keyStatus = isLocalGeminiApiKey(rawKey)
-                    ? 'local sentinel (MLX text)'
-                    : (rawKey ? 'configured (not validated by status)' : 'missing — run npx gemdex-mcp setup gemini or install');
-                io.stdout(`Gemini key: ${keyStatus}\n`);
-                return 0;
+        if (command === 'status') {
+            const model = await localModelStatusWithLegacy(store);
+            io.stdout(`Store: ${store.getEnv('LANCEDB_PATH') ?? '~/.gemdex/lance'}\n`);
+            io.stdout(`Local model: ${model.status} (${model.model})\n`);
+            if ((model.legacyMemories ?? 0) > 0) {
+                io.stdout(`Legacy memories awaiting migration: ${model.legacyMemories} — run npx gemdex-mcp migrate\n`);
             }
-            const selected = resolveRemote(store, requestedName);
-            const status = await remoteStatus(
-                selected.name,
-                selected.remote,
-                selected.token,
-                fetchImpl,
-                createRemoteBackend,
-            );
-            io.stdout(`Mode: ${mode}${mode === 'remote' ? ` (${selected.name})` : ''}\n`);
-            io.stdout(`Remote: ${selected.remote.url}\n`);
-            io.stdout(`Reachable: ${status.reachable ? 'yes' : 'no'}\n`);
-            io.stdout(`Authenticated: ${status.authenticated ? 'yes' : 'no'}\n`);
-            if (status.detail) io.stdout(`Detail: ${status.detail}\n`);
-            return status.reachable && status.authenticated ? 0 : 1;
-        }
-
-        if (command === 'init-remote') {
-            const name = requireArg(args, 1, 'Remote name');
-            const url = requireArg(args, 2, 'Remote URL');
-            const explicitTokenEnvVar = optionValue(args, '--token-env');
-            const fromStdin = args.includes('--token-stdin');
-            const importLocal = args.includes('--import-local');
-            const activate = !args.includes('--no-activate');
-            if (explicitTokenEnvVar && fromStdin) {
-                throw new Error('Use either --token-env or --token-stdin, not both.');
-            }
-
-            // 1. Store the named remote and its token (token kept out of config.json).
-            const tokenEnvVar = explicitTokenEnvVar ?? tokenEnvVarForRemote(name);
-            if (!explicitTokenEnvVar) {
-                const token = await io.readSecret('Bearer token: ', fromStdin);
-                if (!token) throw new Error('Bearer token cannot be empty.');
-                store.setEnv(tokenEnvVar, token);
-            }
-            const remoteRecord = store.add(name, url, tokenEnvVar);
-            io.stdout(`Added remote "${name}" at ${remoteRecord.url}.\n`);
-
-            const token = store.getEnv(tokenEnvVar)?.trim();
-            if (!token) {
-                throw new Error(`Token environment variable "${tokenEnvVar}" is not configured.`);
-            }
-
-            // 2. Fail fast if the server is unreachable or version-incompatible.
-            await verifyServerCompatibility(remoteRecord.url, fetchImpl);
-            io.stdout('Server reachable and version-compatible.\n');
-
-            // 3. Confirm the token actually authenticates against a data route.
-            const remote = createRemoteBackend(remoteRecord, token);
-            try {
-                await remote.list();
-            } catch (error) {
-                throw new Error(`Authentication check failed: ${errorMessage(error)}`);
-            }
-            io.stdout('Authenticated successfully.\n');
-
-            // 4. Optionally copy this machine's local memories into the remote.
-            if (importLocal) {
-                const local = createLocalBackend();
-                const migration = await migrateLocalToRemote(local, remote, io);
-                io.stdout(
-                    `Imported local memories — Created: ${migration.created}, ` +
-                    `Updated: ${migration.updated}, Skipped: ${migration.skipped}.\n`,
-                );
-                if (migration.skipped > 0) {
-                    io.stderr('Some local memories were skipped; see messages above.\n');
-                }
-            }
-
-            // 5. Switch this machine into remote mode unless told not to.
-            if (activate) {
-                store.activateRemote(name);
-                io.stdout(`Gemdex mode is now remote: ${name}.\n`);
-            }
-
-            io.stdout(
-                `\nDone. Point your agent at this remote — e.g. for Claude Code:\n` +
-                `  claude mcp add gemdex -- npx -y gemdex-mcp@latest\n` +
-                `The MCP process reads the selected remote from ~/.gemdex; ` +
-                `no GEMINI_API_KEY is needed on this machine.\n`,
-            );
+            const claude = await (dependencies.checkClaudeCode ?? (() => checkClaudeCode()))();
+            io.stdout(`Claude Code (ingestion + hygiene): ${describeClaude(claude)}\n`);
             return 0;
         }
 
         if (command === 'ingest-history') {
-            return await runIngestHistory(args.slice(1), io, dependencies);
-        }
-
-        if (command === 'sync-history') {
-            return await runSyncHistory(args.slice(1), io, store, dependencies);
-        }
-
-        if (command === 'import-local-to-remote') {
-            const attachTranscripts = args.includes('--attach-transcripts');
-            const nameArg = args.slice(1).find((a) => !a.startsWith('--'));
-            const selected = resolveRemote(store, nameArg);
-            const local = createLocalBackend();
-            const remote = createRemoteBackend(selected.remote, selected.token);
-            const result = await migrateLocalToRemote(local, remote, io, { attachTranscripts });
-            io.stdout(`Migration to "${selected.name}" complete.\n`);
-            io.stdout(`Created: ${result.created}\nUpdated: ${result.updated}\nSkipped: ${result.skipped}\n`);
-            if (attachTranscripts) {
-                io.stdout(
-                    `Transcripts attached: ${result.transcriptsAttached ?? 0}\n` +
-                    `Transcripts missing: ${result.transcriptsMissing ?? 0}\n`,
-                );
-            }
-            return result.skipped === 0 ? 0 : 1;
+            return await runIngestHistory(args.slice(1), io, createBackend, dependencies);
         }
 
         if (command === 'backfill-transcripts') {
             const force = args.includes('--force');
             const dryRun = args.includes('--dry-run');
-            const nameArg = args.slice(1).find((a) => !a.startsWith('--'));
-            let backend: MemoryBackend;
-            let targetLabel: string;
-            if (nameArg) {
-                const selected = resolveRemote(store, nameArg);
-                backend = createRemoteBackend(selected.remote, selected.token);
-                targetLabel = `remote "${selected.name}"`;
-            } else {
-                backend = createActiveBackend();
-                targetLabel = 'active backend';
-            }
-            const result = await backfillTranscripts(backend, io, { force, dryRun });
+            const result = await backfillTranscripts(createBackend(), io, { force, dryRun });
             io.stdout(
-                `Backfill transcripts on ${targetLabel}` +
+                'Backfill transcripts' +
                 (dryRun ? ' (dry-run)' : '') + `:\n` +
                 `  attached: ${result.attached}\n` +
                 `  already had transcript: ${result.already}\n` +
@@ -784,65 +294,19 @@ function formatUsd(value: number): string {
     return `$${value.toFixed(2)}`;
 }
 
-/**
- * The shared scan → estimate → digest → upsert pipeline behind both
- * `ingest-history` (local/BYOI backend) and `sync-history` (an
- * OAuth-authenticated remote host). The two verbs differ *only* in the
- * destination, so the destination is the parameter: digestion, cost estimates,
- * the permanently-new-sessions-only ledger semantics, and the progress/summary
- * output are identical by construction rather than by careful duplication.
- */
-interface HistoryPipelineOptions {
-    /** Verb name, for the `--collect` hint line. */
-    verb: 'ingest-history' | 'sync-history';
-    /** Built lazily so `--dry-run` never authorizes or touches the network. */
-    createTarget: () => Promise<IngestTarget> | IngestTarget;
-}
-
-async function runHistoryPipeline(
+/** Scan → estimate → digest (Claude Code) → upsert into the local store. */
+async function runIngestHistory(
     args: string[],
     io: CliIo,
+    createBackend: () => MemoryBackend,
     dependencies: CliDependencies,
-    options: HistoryPipelineOptions,
 ): Promise<number> {
-    const model = optionValue(args, '--model') ?? DEFAULT_DIGEST_MODEL;
-    if (!DIGEST_MODELS[model]) {
-        throw new Error(`Unsupported model "${model}". Supported: ${Object.keys(DIGEST_MODELS).join(', ')}`);
+    const model = optionValue(args, '--model') ?? DEFAULT_CLAUDE_MODEL;
+    if (!INFERENCE_MODELS[model]) {
+        throw new Error(`Unsupported model "${model}". Supported: ${Object.keys(INFERENCE_MODELS).join(', ')}`);
     }
-    const batch = args.includes('--batch');
     const dryRun = args.includes('--dry-run');
-    const collect = args.includes('--collect');
-
-    // Digests are generated client-side even when the destination is remote:
-    // the session files only exist on this machine, and shipping raw
-    // transcripts to the host to digest there would upload far more bytes and
-    // move the Gemini spend onto the host. See the sync-history docs.
-    const apiKey = envManager.get('GEMINI_API_KEY');
-    if (!apiKey) {
-        throw new Error('Chat-history ingestion needs a local GEMINI_API_KEY (digests are generated client-side).');
-    }
-    const manager = dependencies.createIngestManager?.() ?? new IngestManager({
-        apiKey,
-        geminiBaseUrl: envManager.get('GEMINI_BASE_URL'),
-    });
-
-    if (collect) {
-        const result = await manager.collect(await options.createTarget());
-        if (result.state === 'none') {
-            io.stdout('No pending batch job.\n');
-            return 0;
-        }
-        if (result.state === 'pending') {
-            io.stdout(`Batch job still ${result.jobState}. Try again later.\n`);
-            return 0;
-        }
-        if (result.state === 'failed') {
-            io.stderr(`Batch job failed: ${result.error}\n`);
-            return 1;
-        }
-        io.stdout(`Collected batch results — Ingested: ${result.ingested}, Failed: ${result.failed}.\n`);
-        return (result.failed ?? 0) === 0 ? 0 : 1;
-    }
+    const manager = dependencies.createIngestManager?.() ?? new IngestManager();
 
     const folders = parseIngestSources(args);
     const scan = manager.scan(folders);
@@ -862,31 +326,26 @@ async function runHistoryPipeline(
         return 0;
     }
     io.stdout(`Estimated input tokens: ~${scan.estimatedInputTokens.toLocaleString()}\n`);
-    io.stdout(`Cost estimates (pricing as of ${DIGEST_PRICING_AS_OF}):\n`);
+    io.stdout(`Cost at Anthropic API list price (as of ${INFERENCE_PRICING_AS_OF}):\n`);
     for (const estimate of scan.estimates) {
         const marker = estimate.model === model ? '*' : ' ';
-        io.stdout(
-            `  ${marker} ${estimate.model.padEnd(24)} standard ${formatUsd(estimate.standardUsd)}` +
-            `  batch ${formatUsd(estimate.batchUsd)}\n`,
-        );
+        io.stdout(`  ${marker} ${estimate.model.padEnd(12)} ${formatUsd(estimate.usd)}\n`);
     }
+    io.stdout('  A Claude subscription login is not billed per token; usage counts toward your plan limits.\n');
     if (dryRun) return 0;
 
-    const target = await options.createTarget();
-    if (batch) {
-        const progress = await manager.run({ folders, model, mode: 'batch' }, target);
-        const jobName = progress.pendingBatch?.jobName ?? '(unknown)';
-        io.stdout(`Submitted batch job ${jobName} (${progress.total} sessions).\n`);
-        io.stdout(`Collect results later with: gemdex ${options.verb} --collect\n`);
-        return 0;
+    const claude = await (dependencies.checkClaudeCode ?? (() => checkClaudeCode()))();
+    if (claude.status !== 'ready') {
+        throw new Error(`Claude Code is not ready: ${describeClaude(claude)}`);
     }
 
+    const target = createBackend();
     const ticker = setInterval(() => {
         const progress = manager.getProgress();
         io.stderr(`\r[ingest] ${progress.processed + progress.failed}/${progress.total} (failed: ${progress.failed})  `);
     }, 1000);
     try {
-        const progress = await manager.run({ folders, model, mode: 'standard' }, target);
+        const progress = await manager.run({ folders, model }, target);
         io.stderr('\n');
         io.stdout(
             `Done — Ingested: ${progress.processed}, Failed: ${progress.failed}, ` +
@@ -896,98 +355,4 @@ async function runHistoryPipeline(
     } finally {
         clearInterval(ticker);
     }
-}
-
-function runIngestHistory(args: string[], io: CliIo, dependencies: CliDependencies): Promise<number> {
-    return runHistoryPipeline(args, io, dependencies, {
-        verb: 'ingest-history',
-        createTarget: dependencies.createActiveBackend ?? (() => createMemoryBackend(createConfig())),
-    });
-}
-
-/**
- * Resolve the host's `/mcp` endpoint for sync. Precedence mirrors the existing
- * remote-mode convention (explicit flag → env → `~/.gemdex/.env`), and it is
- * required: there is no sensible default host to guess at, and silently
- * syncing to the wrong pool would be worse than failing.
- */
-function resolveSyncUrl(args: string[], store: ClientConfigStore): string {
-    const raw = optionValue(args, '--url') ?? store.getEnv('GEMDEX_SYNC_URL');
-    if (!raw) {
-        throw new Error(
-            'No sync host configured. Pass --url https://your-host/mcp or set GEMDEX_SYNC_URL.',
-        );
-    }
-    const trimmed = raw.trim().replace(/\/+$/, '');
-    let parsed: URL;
-    try {
-        parsed = new URL(trimmed);
-    } catch {
-        throw new Error(`Sync URL "${raw}" is not a valid absolute URL.`);
-    }
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-        throw new Error('Sync URL must use http or https.');
-    }
-    // The OAuth flow sends a bearer over this connection; plaintext off-box
-    // would expose it. Loopback is exempt so the reference stack can be
-    // smoke-tested against 127.0.0.1 without TLS.
-    const isLoopback = ['localhost', '127.0.0.1', '::1', '[::1]'].includes(parsed.hostname);
-    if (parsed.protocol === 'http:' && !isLoopback) {
-        throw new Error(
-            `Sync URL "${trimmed}" must use https for a non-loopback host — the OAuth token ` +
-            'would otherwise cross the network in the clear.',
-        );
-    }
-    return trimmed;
-}
-
-/** Open a URL in the user's default browser. Best-effort, per platform. */
-async function openInBrowser(url: string): Promise<void> {
-    const { spawn } = await import('node:child_process');
-    const command = process.platform === 'darwin'
-        ? 'open'
-        : process.platform === 'win32' ? 'start' : 'xdg-open';
-    spawn(command, [url], { stdio: 'ignore', detached: true, shell: process.platform === 'win32' })
-        .unref();
-}
-
-async function runSyncHistory(
-    args: string[],
-    io: CliIo,
-    store: ClientConfigStore,
-    dependencies: CliDependencies,
-): Promise<number> {
-    const mcpUrl = resolveSyncUrl(args, store);
-    const credentials = dependencies.createSyncCredentialStore?.(mcpUrl)
-        ?? new SyncCredentialStore(mcpUrl);
-
-    if (args.includes('--logout')) {
-        credentials.clear('all');
-        io.stdout(`Forgot stored sync credentials for ${mcpUrl}.\n`);
-        return 0;
-    }
-
-    // Progress and prompts go to stderr: stdout carries the machine-readable
-    // summary, and this same binary is an MCP server where stdout is the
-    // JSON-RPC channel.
-    const openBrowser = dependencies.openBrowser ?? openInBrowser;
-    const getAccessToken = async ({ forceRefresh }: { forceRefresh: boolean }): Promise<string> => {
-        if (forceRefresh) credentials.clear('tokens');
-        return authorizeSync({
-            mcpUrl,
-            store: credentials,
-            openBrowser,
-            log: (message) => io.stderr(message),
-        });
-    };
-
-    const createTarget = dependencies.createSyncTarget
-        ? () => dependencies.createSyncTarget!(mcpUrl)
-        : () => new RemoteSyncTarget({ mcpUrl, getAccessToken });
-
-    io.stdout(`Syncing chat history to ${mcpUrl}\n`);
-    if (!credentials.hasCredentials() && !args.includes('--dry-run')) {
-        io.stderr('No stored authorization for this host yet; a browser sign-in is needed once.\n');
-    }
-    return runHistoryPipeline(args, io, dependencies, { verb: 'sync-history', createTarget });
 }

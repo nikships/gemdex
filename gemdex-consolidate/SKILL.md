@@ -9,8 +9,8 @@ description: |
   memories", "clean up gemdex", "dedupe my memory layer", "merge duplicate
   memories", "prune bad memories", "my memory layer is a mess", or after a burst
   of proactive auto-saves has bloated the store. Autonomous: it merges and deletes
-  without per-item confirmation. Requires the gemdex sidecar (local mode needs a
-  validated GEMINI_API_KEY).
+  without per-item confirmation. Requires the gemdex sidecar with the local
+  embedding model installed (`npx gemdex-mcp install`).
 ---
 
 # Consolidate the gemdex memory layer
@@ -23,9 +23,9 @@ notes, and contradictions. This skill does a full **consolidation sweep**:
 
 It is **autonomous**: once the user asks for a cleanup, it merges and deletes
 without asking per item. It uses parallel subagents so a large store is scanned
-fast. All destruction goes through the sidecar's `DELETE /memories/:id` route —
-the MCP surface has no delete tool, so this skill drives the sidecar directly
-via `scripts/gemdex_admin.py`.
+fast. All reads and destruction go through the sidecar's HTTP routes
+(`GET /export`, `DELETE /memories/:id`, ...) via `scripts/gemdex_admin.py`, which
+handles bulk export and batched deletes that the MCP tools don't.
 
 ⚠️ **Deletes are hard and irreversible.** There is no archive/undo. The safety
 model here is *merge-before-delete*: never delete a memory whose unique facts
@@ -49,9 +49,9 @@ python3 scripts/gemdex_admin.py delete <id> [<id> ...]    # HARD delete
 
 `body.json` for save/update is `{ "content": "...", "title": "..." }`.
 
-If the helper prints *"no validated GEMINI_API_KEY"*, stop and tell the user to
-set the key in the desktop app or `~/.gemdex/.env` — local mode can't read
-memories without it.
+If the helper reports that the local embedding model is not installed, stop and
+tell the user to run `npx gemdex-mcp install` (or install it from the desktop
+app's Settings). The sidecar can't read memories without it.
 
 ## Procedure
 

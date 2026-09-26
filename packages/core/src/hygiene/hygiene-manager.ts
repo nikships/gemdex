@@ -1,8 +1,8 @@
 import type { MemoryBackend } from '../memory/backend';
 import type { MemoryStore, ParentVectorData } from '../memory/memory-store';
-import { estimateCost, estimateTokensForChars } from '../ingest/digester';
+import { estimateCost, estimateTokensForChars } from '../inference/claude-code';
 import { DEFAULT_HYGIENE_THRESHOLD, findCandidateClusters } from './candidate-finder';
-import { ClusterJudge, JudgeMemberInput, buildJudgePrompt } from './judge';
+import { ClusterJudge, Judge, JudgeMemberInput, buildJudgePrompt } from './judge';
 import { HygieneReportStore } from './hygiene-report';
 import {
     HygieneCluster,
@@ -26,11 +26,9 @@ function sleep(ms: number): Promise<void> {
 }
 
 export interface HygieneManagerConfig {
-    apiKey: string;
-    geminiBaseUrl?: string;
     reportStore?: HygieneReportStore;
-    /** Injectable for tests. */
-    createJudge?: (model: string | undefined) => ClusterJudge;
+    /** Injectable for tests. Defaults to a Claude Code {@link ClusterJudge}. */
+    createJudge?: (model: string | undefined) => Judge;
 }
 
 export interface HygieneRunOptions {
@@ -40,7 +38,7 @@ export interface HygieneRunOptions {
 
 /**
  * Orchestrates memory hygiene: cluster similar memories from the vectors
- * already in LanceDB (zero API calls), judge each cluster with a Gemini LLM
+ * already in LanceDB (zero API calls), judge each cluster with Claude (via the local Claude Code CLI)
  * for duplicate/superseded/contradicted verdicts, and persist the report at
  * `~/.gemdex/hygiene.json`. Deletion is applied later by a human via
  * {@link apply}; clusters can be permanently dismissed via {@link dismiss}.
@@ -54,7 +52,7 @@ export class HygieneManager {
     private cancelRequested = false;
     private running = false;
 
-    constructor(config: HygieneManagerConfig) {
+    constructor(config: HygieneManagerConfig = {}) {
         this.config = config;
         this.reportStore = config.reportStore ?? new HygieneReportStore();
     }
@@ -221,16 +219,12 @@ export class HygieneManager {
         }));
     }
 
-    private createJudge(model: string | undefined): ClusterJudge {
+    private createJudge(model: string | undefined): Judge {
         if (this.config.createJudge) return this.config.createJudge(model);
-        return new ClusterJudge({
-            apiKey: this.config.apiKey,
-            model,
-            baseURL: this.config.geminiBaseUrl,
-        });
+        return new ClusterJudge({ model });
     }
 
-    private async judgeWithRetry(judge: ClusterJudge, members: JudgeMemberInput[]): Promise<HygieneFinding[]> {
+    private async judgeWithRetry(judge: Judge, members: JudgeMemberInput[]): Promise<HygieneFinding[]> {
         let lastError: unknown;
         for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             if (this.cancelRequested) {

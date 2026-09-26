@@ -5,7 +5,6 @@ enum JobKind: String, Equatable, CaseIterable, Sendable {
     case ingest
     case hygiene
     case importFile
-    case migration
     case embedding
 
     var systemImage: String {
@@ -13,7 +12,6 @@ enum JobKind: String, Equatable, CaseIterable, Sendable {
         case .ingest: return "tray.and.arrow.down"
         case .hygiene: return "sparkles"
         case .importFile: return "square.and.arrow.down"
-        case .migration: return "arrow.triangle.2.circlepath"
         case .embedding: return "cpu"
         }
     }
@@ -23,19 +21,16 @@ enum JobKind: String, Equatable, CaseIterable, Sendable {
         case .ingest: return "Ingestion"
         case .hygiene: return "Hygiene"
         case .importFile: return "Import"
-        case .migration: return "Local → remote"
-        case .embedding: return "Local embeddings"
+        case .embedding: return "Local embedding model"
         }
     }
 }
 
-/// Lifecycle phase for a background job. `batchPending` is ingest-only
-/// (Gemini Batch API job waiting for collection). Terminal phases
+/// Lifecycle phase for a background job. Terminal phases
 /// (`completed` / `failed` / `cancelled`) stay visible briefly so the user
 /// can see what finished while they were elsewhere.
 enum JobPhase: String, Equatable, Sendable {
     case running
-    case batchPending
     case cancelling
     case completed
     case failed
@@ -43,7 +38,7 @@ enum JobPhase: String, Equatable, Sendable {
 
     var isActive: Bool {
         switch self {
-        case .running, .batchPending, .cancelling: return true
+        case .running, .cancelling: return true
         case .completed, .failed, .cancelled: return false
         }
     }
@@ -51,7 +46,7 @@ enum JobPhase: String, Equatable, Sendable {
     var isTerminal: Bool {
         switch self {
         case .completed, .failed, .cancelled: return true
-        case .running, .batchPending, .cancelling: return false
+        case .running, .cancelling: return false
         }
     }
 }

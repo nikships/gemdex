@@ -1,6 +1,8 @@
 import SwiftUI
 
-/// First-run and recovery screen: choose verified Gemini, local MLX, or remote.
+/// First-run screen shown while the local embedding model is not installed
+/// (`config.configured == false`). Installing is an explicit, confirmed action;
+/// progress stays visible here and in the Activity Center.
 struct SetupView: View {
     @EnvironmentObject var model: AppModel
 
@@ -8,22 +10,28 @@ struct SetupView: View {
         ScrollView {
             VStack(spacing: 24) {
                 header
-                ActivityRail()
-                GeminiReadinessAlert(
-                    readiness: model.geminiReadiness,
-                    detail: model.setupNotice
-                )
-
-                HStack(alignment: .top, spacing: 18) {
-                    localCard
-                    remoteCard
+                ActivityRail(hiding: .embedding)
+                VStack(alignment: .leading, spacing: 14) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Install the local embedding model").font(.title3.bold())
+                        Text("Gemdex embeds memories on this Mac with BGE-M3 running on MLX. Nothing leaves your machine, and no API key is needed. The download is about 600 MB and runs once.")
+                            .font(.callout).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    EmbeddingModelPanel(allowsMigration: false)
+                    Label("Requires a Mac with Apple Silicon (M1 or later). MLX does not run on Intel Macs.",
+                          systemImage: "cpu")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
-                .frame(maxWidth: 780)
+                .padding(22)
+                .frame(maxWidth: 620, alignment: .leading)
+                .glassSurface(cornerRadius: Metric.radiusPanel)
             }
             .padding(40)
             .frame(maxWidth: .infinity)
         }
         .background(BrandBackdrop())
+        .task { await model.refreshEmbeddingStatus() }
     }
 
     private var header: some View {
@@ -36,222 +44,136 @@ struct SetupView: View {
             } else {
                 Text("Gemdex Memory").font(.largeTitle.bold())
             }
-            Text("Choose Gemini, install local MLX for key-free text embeddings, or connect a server. Media and legacy Gemini operations, chat-history ingestion, and hygiene analysis still require a verified Gemini key.")
+            Text("Your memories live in ~/.gemdex on this Mac. Chat-history ingestion and memory hygiene run on your local Claude Code CLI.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-                .frame(maxWidth: 650)
-        }
-    }
-
-    private var localCard: some View {
-        SetupCard(
-            title: "Use this Mac",
-            subtitle: "Store memories locally with LanceDB. Use Gemini, or explicitly install MLX for local text embeddings without a key."
-        ) {
-            Button("Set up local MLX (no key required)") { model.showSettings = true }
-                .brandPrimary()
-            GeminiKeySetupPanel(primaryButtonTitle: "Validate & unlock Gemdex")
-        }
-    }
-
-    private var remoteCard: some View {
-        SetupCard(
-            title: "Use a Gemdex Server",
-            subtitle: "Connect to a server that owns memory embeddings. A validated local Gemini key is still required later for chat-history digestion."
-        ) {
-            VStack(alignment: .leading, spacing: 10) {
-                Button("Configure remote storage") { model.showSettings = true }
-                    .brandPrimary()
-                    .frame(maxWidth: .infinity)
-                Text("Remote storage can unlock the memory manager without putting an embedding key on this Mac. Ingestion remains visibly blocked until a local Gemini key is verified.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .sheet(isPresented: $model.showSettings) {
-            StorageSettingsView().environmentObject(model)
+                .frame(maxWidth: 560)
         }
     }
 }
 
-/// High-contrast readiness alert shared by the blocking setup screen and the
-/// ready-state manager shell. Red is intentional: this state prevents work.
-struct GeminiReadinessAlert: View {
-    let readiness: GeminiReadiness?
-    var detail: String?
-    var compact = false
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 14) {
-            Image(systemName: icon)
-                .font(compact ? .title3 : .title2)
-                .foregroundStyle(alertColor)
-            VStack(alignment: .leading, spacing: 6) {
-                Text(title)
-                    .font(compact ? .callout.bold() : .title3.bold())
-                Text(detail ?? readiness?.message ?? fallbackDetail)
-                    .font(.callout)
-                    .foregroundStyle(.primary.opacity(0.82))
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(compact ? 12 : 18)
-        .frame(maxWidth: compact ? .infinity : 780, alignment: .leading)
-        .background(alertColor.opacity(0.14), in: RoundedRectangle(cornerRadius: Metric.radiusCard, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: Metric.radiusCard, style: .continuous)
-                .strokeBorder(alertColor.opacity(0.9), lineWidth: compact ? 1.5 : 2)
-        )
-        .accessibilityElement(children: .combine)
-    }
-
-    private var status: String { readiness?.status ?? "missing" }
-
-    private var alertColor: Color {
-        switch status {
-        case "checking": return Brand.gold
-        case "unavailable": return Brand.terracotta
-        default: return .red
-        }
-    }
-
-    private var icon: String {
-        switch status {
-        case "checking": return "hourglass.circle.fill"
-        case "unavailable": return "wifi.exclamationmark"
-        default: return "exclamationmark.octagon.fill"
-        }
-    }
-
-    private var title: String {
-        switch status {
-        case "checking": return "Validating your Gemini API key"
-        case "invalid": return "Gemini rejected your API key"
-        case "unavailable": return "Gemini validation could not complete"
-        default: return "Gemini API key required"
-        }
-    }
-
-    private var fallbackDetail: String {
-        switch status {
-        case "checking": return "This usually takes a few seconds. Gemini features become available when validation succeeds; MLX text storage does not require this key."
-        case "invalid": return "Enter a working key below. Nothing is written to ~/.gemdex/.env until Gemini accepts it."
-        case "unavailable": return "Check your network and retry, or enter a different key. Gemini features stay blocked; local MLX text storage can work without this key."
-        default: return "Add a key for Gemini embeddings, media, and ingestion, or set up local MLX for key-free text storage."
-        }
-    }
-}
-
-/// Key entry and validation controls used by onboarding and Storage settings.
-@MainActor
-struct GeminiKeySetupPanel: View {
+/// Local embedding model status with install (and optionally migrate)
+/// controls. Shared by the setup screen and the Storage & Models panel. Every
+/// job needs explicit confirmation; progress is owned by `AppModel`.
+struct EmbeddingModelPanel: View {
     @EnvironmentObject var model: AppModel
-    let primaryButtonTitle: String
+    let allowsMigration: Bool
 
-    @State private var apiKey = ""
-    @State private var submitting = false
-    @State private var retrying = false
-    @State private var error: String?
-    @FocusState private var keyFocused: Bool
+    @State private var confirmInstall = false
+    @State private var confirmMigration = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            SecureField("GEMINI_API_KEY", text: $apiKey)
-                .textFieldStyle(.roundedBorder)
-                .focused($keyFocused)
-                .onSubmit(submit)
-
-            Button(action: submit) {
-                HStack {
-                    if submitting { ProgressView().controlSize(.small) }
-                    Text(submitting ? "Validating with Gemini…" : primaryButtonTitle)
+            if let state = model.embeddingStatus {
+                HStack(spacing: 8) {
+                    Image(systemName: statusIcon(state))
+                        .foregroundStyle(statusColor(state))
+                    Text(statusTitle(state)).font(.callout.bold())
                 }
-                .frame(maxWidth: .infinity)
-            }
-            .brandPrimary()
-            .disabled(submitting || retrying || isBusyChecking || apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-
-            if canRetrySavedKey {
-                Button {
-                    Task { await retrySavedKey() }
-                } label: {
-                    HStack {
-                        if retrying || isBusyChecking { ProgressView().controlSize(.small) }
-                        Text((retrying || isBusyChecking) ? "Retrying validation…" : "Retry saved key")
-                    }
-                }
-                .disabled(submitting || retrying || isBusyChecking)
-            }
-
-            if let error {
-                Label(error, systemImage: "xmark.octagon.fill")
-                    .font(.caption)
-                    .foregroundStyle(.red)
+                Text(state.model).font(.caption.monospaced()).foregroundStyle(.secondary)
                     .textSelection(.enabled)
+                if let message = state.message, !message.isEmpty {
+                    Text(message).font(.callout)
+                        .foregroundStyle(state.status == "error" ? Brand.terracotta : Color.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+                if state.isRunning {
+                    if let total = state.total, total > 0 {
+                        ProgressView(value: Double(min(state.completed ?? 0, total)), total: Double(total))
+                            .tint(Brand.sage)
+                        Text("\(state.completed ?? 0) / \(total)").font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ProgressView().controlSize(.small)
+                    }
+                    Text("Keep Gemdex running until this finishes. Progress also shows in the activity bar.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                HStack(spacing: 8) {
+                    if !state.installed {
+                        Button(state.status == "error" ? "Retry installation…" : "Install local model…") {
+                            confirmInstall = true
+                        }
+                        .brandPrimary()
+                        .disabled(model.embeddingIsBusy)
+                    }
+                    Button("Refresh status") { Task { await model.refreshEmbeddingStatus() } }
+                        .disabled(model.embeddingRequestPending)
+                    if model.embeddingRequestPending { ProgressView().controlSize(.small) }
+                }
+                if allowsMigration && model.legacyMemoryCount > 0 {
+                    legacyNotice(count: model.legacyMemoryCount)
+                }
+            } else {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Checking the local embedding model…").font(.callout).foregroundStyle(.secondary)
+                }
             }
-
-            Text("Your key is validated with a small embedding request, then stored locally in ~/.gemdex/.env. Gemdex never displays it again.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .onAppear { keyFocused = true }
-    }
-
-    private var canRetrySavedKey: Bool {
-        guard let status = model.geminiReadiness?.status else { return false }
-        return status == "invalid" || status == "unavailable" || status == "checking"
-    }
-
-    private var isBusyChecking: Bool {
-        model.geminiReadiness?.status == "checking" && !submitting && !retrying
-    }
-
-    private func submit() {
-        let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty else { return }
-        submitting = true
-        error = nil
-        Task {
-            defer { submitting = false }
-            do {
-                try await model.submitApiKey(key)
-                apiKey = ""
-            } catch {
-                self.error = error.localizedDescription
+            if let error = model.embeddingError {
+                Text(error).font(.callout).foregroundStyle(Brand.terracotta).textSelection(.enabled)
             }
         }
-    }
-
-    private func retrySavedKey() async {
-        retrying = true
-        error = nil
-        defer { retrying = false }
-        do {
-            try await model.retryApiKeyValidation()
-        } catch {
-            self.error = error.localizedDescription
+        .alert("Install the local embedding model?", isPresented: $confirmInstall) {
+            Button("Cancel", role: .cancel) {}
+            Button("Download & install") { Task { await model.startEmbeddingJob(.install) } }
+        } message: {
+            Text("Downloads the MLX runtime and the BGE-M3 model (about 600 MB) to this Mac. Requires Apple Silicon. Keep Gemdex running until it finishes.")
+        }
+        .alert(migrateTitle, isPresented: $confirmMigration) {
+            Button("Cancel", role: .cancel) {}
+            Button("Migrate") { Task { await model.startEmbeddingJob(.migrate) } }
+        } message: {
+            Text("Re-embeds memories saved with the previous Gemini embedding model so they show up in search. This can take a while; keep Gemdex running.")
         }
     }
-}
 
-/// A bordered card used on the setup screen.
-struct SetupCard<Content: View>: View {
-    let title: String
-    let subtitle: String
-    @ViewBuilder var content: Content
+    private var migrateTitle: String {
+        let n = model.legacyMemoryCount
+        return "Migrate \(n) \(n == 1 ? "memory" : "memories") to the local model?"
+    }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(title).font(.title3.bold())
-                Text(subtitle).font(.callout).foregroundStyle(.secondary)
-            }
-            content
+    private func legacyNotice(count: Int) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("\(count) \(count == 1 ? "memory is" : "memories are") still in the old Gemini index and will not appear in search until re-embedded.",
+                  systemImage: "arrow.triangle.2.circlepath")
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Migrate \(count) \(count == 1 ? "memory" : "memories")…") { confirmMigration = true }
+                .brandPrimary()
+                .disabled(model.embeddingIsBusy)
         }
-        .padding(22)
-        .frame(maxWidth: .infinity, minHeight: 300, alignment: .top)
-        .glassSurface(cornerRadius: Metric.radiusPanel)
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassSurface(cornerRadius: Metric.radiusCard, tint: Brand.gold)
+    }
+
+    private func statusTitle(_ state: EmbeddingStatus) -> String {
+        switch state.status {
+        case "installed": return "Installed"
+        case "installing": return "Installing…"
+        case "migrating": return "Migrating memories…"
+        case "error": return "Needs attention"
+        default: return "Not installed"
+        }
+    }
+
+    private func statusIcon(_ state: EmbeddingStatus) -> String {
+        switch state.status {
+        case "installed": return "checkmark.seal.fill"
+        case "installing", "migrating": return "arrow.down.circle"
+        case "error": return "exclamationmark.triangle.fill"
+        default: return "shippingbox"
+        }
+    }
+
+    private func statusColor(_ state: EmbeddingStatus) -> Color {
+        switch state.status {
+        case "installed": return Brand.sage
+        case "error": return Brand.terracotta
+        default: return Brand.gold
+        }
     }
 }

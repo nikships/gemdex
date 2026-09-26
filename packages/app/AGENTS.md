@@ -9,9 +9,13 @@ Architecture quick-reference for the **native SwiftUI manage-only macOS app**.
 It is a **thin HTTP client over a Node sidecar** and holds **no memory logic of
 its own** — all retrieval/embedding/storage lives in the sidecar (`gemdex serve`
 from `gemdex-mcp`, wrapping `gemdex-core` + LanceDB over the shared `~/.gemdex`
-store). The app spawns that sidecar, reads a localhost handshake, and drives a
-browse/create/edit/delete UI (inline image/audio/video/PDF attachments,
-semantic free-text search, JSONL export/import). Behavior changes belong
+store). The app is **local-only**: memories live in `~/.gemdex` on this Mac,
+embedded by the local BGE-M3 model on MLX (text only, no API key). It spawns
+the sidecar, reads a localhost handshake, and drives a browse/create/edit/delete
+UI (text memories, read-only file attachments such as chat transcripts,
+semantic free-text search, JSONL export/import). Chat-history ingestion and
+memory hygiene run on the user's local Claude Code CLI (`claude -p`, Haiku)
+through the sidecar. Behavior changes belong
 in `core`/`mcp`/`server`, not here. This is Swift/SwiftUI — the repo-wide TS
 lint rules (`??` over `||`, no `eslint-disable`) do **not** apply.
 
@@ -23,20 +27,26 @@ lint rules (`??` over `||`, no `eslint-disable`) do **not** apply.
 - `AppModel.swift` — `@MainActor ObservableObject`, the central state hub. Owns
   `SidecarManager` + `APIClient`, subscribes to `sidecar.$phase`, maps it to an
   `AppScreen`, and exposes all memory/config/settings async actions.
-- `EditorModel.swift` — editor state (content/title/attachments/captions).
+- `EditorModel.swift` — editor state (content/title; attachments read-only).
 - `Models/Models.swift` — `Codable` DTOs for the sidecar API (`Memory`,
-  `MemorySummary`, `ConfigSummary`, `SettingsSummary`, `RecallResult`, …).
+  `MemorySummary`, `ConfigSummary`, `EmbeddingStatus`, `ClaudeCodeReadiness`,
+  `RecallResult`, ingest/hygiene DTOs, …). `Attachment.kind` is a raw string so
+  legacy (`image`/`audio`/`video`/`pdf`) and unknown kinds decode; the UI treats
+  every kind as a generic file.
 - `Services/SidecarManager.swift` — Node child-process lifecycle, launch-mode
   state machine, handshake parsing (the most complex file — see below).
 - `Services/APIClient.swift` — `actor`; async localhost HTTP/JSON client.
 - `Services/UpdaterController.swift` — Sparkle wrapper; real updater only under
   `#if SPARKLE_ENABLED`, otherwise a no-op that disables the menu item.
 - `Views/*` — per-screen SwiftUI: `RootView` (screen switch), `MainView`,
-  `SidebarView`, `DetailPane`, `EditorView`, `AttachmentsSection`, `SetupView`,
-  `RecoveryView`, `LaunchOverlay`, `StorageSettingsView`, `IngestView`,
-  `HygieneView` (memory-hygiene panel: scan → judge → review/delete/dismiss),
-  `ActivityRail` (global progress/cancel/open strip for long jobs),
-  `Theme.swift` (brand).
+  `SidebarView`, `DetailPane`, `EditorView`, `AttachmentsSection` (read-only
+  file rows with Open / Save…), `SetupView` (local model install; also hosts the
+  shared `EmbeddingModelPanel`), `RecoveryView`, `LaunchOverlay`,
+  `StorageSettingsView` (Storage & Models), `IngestView`, `HygieneView`
+  (memory-hygiene panel: scan → judge → review/delete/dismiss),
+  `ClaudeCodeReadinessAlert` (shared Claude Code alert + `ClaudeModelCostSummary`
+  list-price line), `ActivityRail` (global progress/cancel/open strip for long
+  jobs), `Theme.swift` (brand).
 - `Models/JobActivity.swift` — Activity Center DTOs (`JobKind` / `JobPhase` /
   `JobActivity`). Long-running work is owned by `AppModel.activities`, not
   panel-local `@State`, so navigating away never loses progress.
@@ -88,57 +98,63 @@ The child `Process` is held in a thread-safe `ProcessHolder` and terminated
 **synchronously** on `NSApplication.willTerminateNotification`, so the sidecar
 never outlives the app.
 
-Routes used by `APIClient`: `GET /health`, `GET|POST /config`, `POST /config/validate`,
-`GET|POST /memories`, `GET|PUT|DELETE /memories/:id`,
-`PATCH /memories/:id/attachments` (caption-only),
-`GET /memories/:id/attachments/:attachmentId` (stream bytes),
-`POST /recall` (semantic free-text search), `GET /export`, `POST /import`,
-`GET /settings`, `POST /settings/mode`, `POST|DELETE /settings/remotes[/:name]`,
-`POST /settings/test`, `POST /settings/import-local`, and the memory-hygiene
-set: `GET /hygiene/report`, `POST /hygiene/scan`, `POST /hygiene/start`,
+Routes used by `APIClient`: `GET /health`, `GET /config`, `POST /config/check`,
+`GET /settings/embedding`, `POST /settings/embedding/install`,
+`POST /settings/embedding/migrate`, `GET|POST /memories`,
+`GET|PUT|DELETE /memories/:id`, `GET /memories/:id/attachments/:attachmentId`
+(stream bytes), `POST /recall` (semantic free-text search), `GET /export`,
+`POST /import`, the ingestion set: `GET /ingest/sources`,
+`POST|DELETE /ingest/folders`, `POST /ingest/scan`, `POST /ingest/start`,
+`GET /ingest/status`, `POST /ingest/cancel`, and the memory-hygiene set:
+`GET /hygiene/report`, `POST /hygiene/scan`, `POST /hygiene/start`,
 `GET /hygiene/status`, `POST /hygiene/cancel`, `POST /hygiene/apply`,
-`POST /hygiene/dismiss`.
+`POST /hygiene/dismiss`. `PUT /memories/:id` sends content/title only, so
+existing attachments are kept; the app never sends attachments.
 
-## Validated key gate (`SetupView`)
+## Readiness gates
 
-`GET /config` carries an explicit Gemini readiness state (`missing`, `checking`,
-`valid`, `invalid`, or `unavailable`). In local mode,
-`AppModel.syncConfigGate()` keeps Gemini storage unmounted until readiness is
-`valid`; configured local MLX text storage bypasses that Gemini gate. Missing,
-rejected, or unverifiable keys still block Gemini-only operations.
-`POST /config` validates a candidate with a real embedding
-request **before** persistence, and `POST /config/validate` retries a saved key.
+`GET /config` returns `{configured, embedding, claudeCode}`.
 
-`SetupView` offers two cards: **Use this Mac** validates and persists
-`GEMINI_API_KEY` to `~/.gemdex/.env`; **Use a Gemdex Server** opens
-`StorageSettingsView`. Remote mode can mount the manager without a local key,
-but `MainView` keeps a red ingestion warning visible and `IngestView` disables
-scan/start until the local Gemini readiness state is `valid`.
+- **Memory UI** is gated only on `configured` (the local BGE-M3/MLX model is
+  installed and the store is mounted). `AppModel.syncConfigGate()` shows
+  `SetupView` while it is false; memory routes answer
+  `503 {needsInstall: true}` in that state and `handleNeedsInstall` routes back
+  to setup.
+- **Ingest + hygiene** run buttons are gated on
+  `config.claudeCode.status == "ready"` (`AppModel.ingestionIsReady` /
+  `hygieneIsReady`). Other statuses are `checking` (AppModel polls `GET /config`
+  every 500 ms until it settles), `missing`, `unauthenticated`, and `error`.
+  `ClaudeCodeReadinessAlert` shows the sidecar's `message` with **Check again**
+  (`POST /config/check`, which waits for the probe) and **Open Settings**.
 
-### Local MLX settings
+### Local embedding model
 
-The existing **Storage & Gemini** panel exposes `GET /settings/embedding`,
-explicit `POST /settings/embedding/install` and `/migrate` jobs, and
-`POST /settings/embedding/provider`. Installation and text migration each require
-confirmation; switching providers does neither implicitly. All use the existing
-tokened API client. Remote mode hides/disallows local operations.
+`SetupView` and the **Storage & Models** panel share `EmbeddingModelPanel`:
+status (`not-installed | installed | installing | migrating | error`), model id,
+message, and determinate progress. `POST /settings/embedding/install`
+(~600 MB download, Apple Silicon only) requires a confirmation alert, answers
+`202`, and is polled through `GET /settings/embedding`; `409` means a job is
+already running and the app reconciles by polling. When it finishes,
+`syncConfigGate()` re-runs so a fresh install mounts the manager.
 
-`AppModel` owns status, errors, request exclusion, and Activity Center polling,
-including reconciliation after an ambiguous POST response. Closing the panel
-does not stop polling; the app must remain running. Setup links directly to
-these controls without requiring a key and shows the activity rail. MLX is
-text-only: media, legacy Gemini operations, ingestion, and hygiene still need
-Gemini readiness; a rejected Gemini key does not lock working MLX storage.
+`EmbeddingStatus.legacyMemories` (optional, present once installed) counts
+memories still in the old Gemini index. When it is > 0, Storage & Models shows
+a notice with a confirmed **Migrate N memories** button that calls
+`POST /settings/embedding/migrate`. It behaves like install: `202` with
+`status: "migrating"` and `completed`/`total` counters, polled through
+`GET /settings/embedding` until it returns to `installed` (message
+"Migration complete.", `legacyMemories` = what is left) or `error` (message =
+error text); `409` if a job is already running. Both jobs share
+`AppModel.startEmbeddingJob`, the `.embedding` Activity Center row, and the
+same status/error/request-exclusion state; `syncConfigGate()` re-runs when a
+job finishes, which also reloads the memory list.
 
-## Remote / BYOI mode (`StorageSettingsView`)
+### Claude Code
 
-The app **always talks only to the localhost sidecar**, never directly to a
-remote. Settings switch the sidecar's backend (`POST /settings/mode`
-local|remote), and add/test/remove named remotes. A remote bearer token is sent
-to the sidecar **once** via `POST /settings/remotes`, persisted under
-`~/.gemdex/.env`, and **never returned** to the app (`hasToken` is the only
-signal exposed); the sidecar owns all outbound remote traffic. If a remote
-backend is unreachable, `loadMemories` surfaces `.remoteUnavailable`.
+Storage & Models also shows the Claude Code row: status, version, path,
+message, last check time, and **Check again**. Scan results in Ingest and
+Hygiene show the model (`haiku`) and one "≈ $X at API list price" line; a
+Claude subscription login is not billed per token.
 
 ## Concurrency model
 
@@ -150,14 +166,20 @@ mutated back on the main actor.
 
 ## Activity Center (long-running jobs)
 
-Ingest, hygiene, JSON import, and local→remote migration are tracked on
-`AppModel` (`activities`, `ingestStatus`, `hygieneStatus`) and rendered by
-`ActivityRail` at the top of `MainView`. Closing a panel never cancels the job
+Ingest, hygiene, JSON import, and local model install/migrate are tracked on
+`AppModel` (`activities`, `ingestStatus`, `hygieneStatus`, `embeddingStatus`)
+and rendered by
+`ActivityRail`, a glass card pinned to the bottom of `DetailPane` (never under
+the toolbar or over the sidebar). A job's row is hidden while its own panel
+(Ingest, Hygiene, Storage & Models) is open, since that panel already shows
+progress and Cancel. Closing a panel never cancels the job
 or hides progress. The rail exposes **Cancel** (cooperative: sidecar
 `/ingest/cancel` + `/hygiene/cancel`, import batch boundary) and **Show/Review**
 to reopen the panel. There is no pause primitive — cancel keeps already-saved
-work (ingest ledger / partial hygiene report / imported batches); re-run or
-collect continues from remaining work. Terminal chips auto-dismiss after ~12s.
+work (ingest ledger / partial hygiene report / imported batches); re-running
+continues from remaining work. Ingest state is
+`idle | running | done | failed | cancelled`. Local model jobs cannot be
+cancelled. Terminal chips auto-dismiss after ~12s.
 
 ## Build note
 
@@ -181,7 +203,11 @@ binary directly (not `open`) against a local sidecar build with
 - The sidecar child is killed on app quit and must never outlive the app.
 - Sidecar bootstrap downloads happen **only** through explicit
   `bootstrap(install: true)`; MLX runtime/model downloads separately require the
-  confirmed Storage & Gemini install action. Neither happens silently.
+  confirmed install action in Setup or Storage & Models. Neither happens
+  silently.
+- The app never creates or edits attachments (the sidecar rejects media with
+  400). Attachments are displayed read-only and opened/saved via
+  `GET /memories/:id/attachments/:attachmentId`.
 - Sparkle/updater code is gated behind `#if SPARKLE_ENABLED`; dev/CI builds need
   no Sparkle framework.
 - Release DMGs bundle their own Node runtime + sidecar under

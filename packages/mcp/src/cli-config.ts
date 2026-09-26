@@ -3,43 +3,19 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { errorMessage } from './errors.js';
 
-export interface StoredRemote {
-    url: string;
-    tokenEnvVar: string;
-}
-
 export interface StoredClientConfig {
     version: 1;
-    remotes: Record<string, StoredRemote>;
     /** Custom folders the user added for chat-history ingestion (absolute paths). */
     ingestFolders?: string[];
+    /**
+     * Keys written by other Gemdex versions (e.g. `remotes`). Kept verbatim on
+     * rewrite so this file never destroys settings it does not own.
+     */
+    [key: string]: unknown;
 }
 
 export interface ClientConfigStoreOptions {
     rootDir?: string;
-}
-
-function normalizeRemoteName(name: string): string {
-    const normalized = name.trim();
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(normalized)) {
-        throw new Error(
-            'Remote name must start with a letter or number and contain only letters, numbers, ".", "_", or "-".',
-        );
-    }
-    return normalized;
-}
-
-function normalizeRemoteUrl(value: string): string {
-    let parsed: URL;
-    try {
-        parsed = new URL(value);
-    } catch {
-        throw new Error(`Remote URL "${value}" is not a valid absolute URL.`);
-    }
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-        throw new Error('Remote URL must use http or https.');
-    }
-    return value.replace(/\/+$/, '');
 }
 
 function parseConfig(value: unknown): StoredClientConfig {
@@ -47,33 +23,14 @@ function parseConfig(value: unknown): StoredClientConfig {
         throw new Error('Gemdex client config must be a JSON object.');
     }
     const candidate = value as Record<string, unknown>;
-    if (candidate.version !== 1 || !candidate.remotes || typeof candidate.remotes !== 'object') {
+    if (candidate.version !== 1) {
         throw new Error('Gemdex client config has an unsupported format.');
-    }
-
-    const remotes: Record<string, StoredRemote> = {};
-    for (const [name, remoteValue] of Object.entries(candidate.remotes as Record<string, unknown>)) {
-        if (!remoteValue || typeof remoteValue !== 'object' || Array.isArray(remoteValue)) {
-            throw new Error(`Remote "${name}" has an invalid configuration.`);
-        }
-        const remote = remoteValue as Record<string, unknown>;
-        if (typeof remote.url !== 'string' || typeof remote.tokenEnvVar !== 'string') {
-            throw new Error(`Remote "${name}" requires string url and tokenEnvVar fields.`);
-        }
-        remotes[normalizeRemoteName(name)] = {
-            url: normalizeRemoteUrl(remote.url),
-            tokenEnvVar: remote.tokenEnvVar,
-        };
     }
     const ingestFolders = Array.isArray(candidate.ingestFolders)
         ? candidate.ingestFolders.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0)
         : undefined;
-    return { version: 1, remotes, ...(ingestFolders?.length && { ingestFolders }) };
-}
-
-export function tokenEnvVarForRemote(name: string): string {
-    const suffix = normalizeRemoteName(name).toUpperCase().replace(/[^A-Z0-9]/g, '_');
-    return `GEMDEX_REMOTE_TOKEN_${suffix}`;
+    const { ingestFolders: _ignored, ...rest } = candidate;
+    return { ...rest, version: 1, ...(ingestFolders?.length && { ingestFolders }) };
 }
 
 export class ClientConfigStore {
@@ -89,55 +46,13 @@ export class ClientConfigStore {
 
     load(): StoredClientConfig {
         if (!fs.existsSync(this.configPath)) {
-            return { version: 1, remotes: {} };
+            return { version: 1 };
         }
         try {
             return parseConfig(JSON.parse(fs.readFileSync(this.configPath, 'utf8')));
         } catch (error) {
             throw new Error(`Unable to read ${this.configPath}: ${errorMessage(error)}`);
         }
-    }
-
-    list(): Array<{ name: string } & StoredRemote> {
-        return Object.entries(this.load().remotes)
-            .map(([name, remote]) => ({ name, ...remote }))
-            .sort((a, b) => a.name.localeCompare(b.name));
-    }
-
-    get(name: string): StoredRemote | null {
-        return this.load().remotes[normalizeRemoteName(name)] ?? null;
-    }
-
-    add(name: string, url: string, tokenEnvVar: string): StoredRemote {
-        const normalizedName = normalizeRemoteName(name);
-        const normalizedTokenEnvVar = tokenEnvVar.trim();
-        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(normalizedTokenEnvVar)) {
-            throw new Error('Token environment variable must be a valid environment variable name.');
-        }
-        const config = this.load();
-        const remote = {
-            url: normalizeRemoteUrl(url.trim()),
-            tokenEnvVar: normalizedTokenEnvVar,
-        };
-        config.remotes[normalizedName] = remote;
-        this.writeConfig(config);
-        return remote;
-    }
-
-    remove(name: string): boolean {
-        const normalizedName = normalizeRemoteName(name);
-        const config = this.load();
-        const remote = config.remotes[normalizedName];
-        if (!remote) return false;
-        delete config.remotes[normalizedName];
-        this.writeConfig(config);
-        if (remote.tokenEnvVar === tokenEnvVarForRemote(normalizedName)) {
-            this.unsetEnv(remote.tokenEnvVar);
-        }
-        if (this.getEnv('GEMDEX_REMOTE_NAME') === normalizedName) {
-            this.setEnv('GEMDEX_MODE', 'local');
-        }
-        return true;
     }
 
     listIngestFolders(): string[] {
@@ -167,25 +82,6 @@ export class ClientConfigStore {
         }
         this.writeConfig(config);
         return folders;
-    }
-
-    activateLocal(): void {
-        this.setEnv('GEMDEX_MODE', 'local');
-    }
-
-    activateRemote(name: string): StoredRemote {
-        const normalizedName = normalizeRemoteName(name);
-        const remote = this.get(normalizedName);
-        if (!remote) {
-            throw new Error(`Remote "${normalizedName}" is not configured.`);
-        }
-        this.setEnvValues({
-            GEMDEX_MODE: 'remote',
-            GEMDEX_REMOTE_NAME: normalizedName,
-            GEMDEX_REMOTE_URL: remote.url,
-            GEMDEX_REMOTE_TOKEN_ENV_VAR: remote.tokenEnvVar,
-        });
-        return remote;
     }
 
     getEnv(name: string): string | undefined {

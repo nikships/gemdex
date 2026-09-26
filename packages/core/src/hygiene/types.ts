@@ -1,11 +1,11 @@
 /**
  * Shared types for the memory-hygiene feature: clustering near-duplicate /
  * superseded / contradicted memories from the vectors already in LanceDB,
- * judging each cluster with a Gemini LLM, and persisting a report a human
+ * judging each cluster with Claude via the local Claude Code CLI, and persisting a report a human
  * reviews before any deletion is applied.
  */
 
-import { ModelCostEstimate } from '../ingest/types';
+import type { ModelCostEstimate } from '../inference/claude-code';
 
 /** The judge's verdict for one memory within a cluster. */
 export type HygieneVerdictKind = 'keep' | 'duplicate' | 'superseded' | 'contradicted';
