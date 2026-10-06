@@ -14,7 +14,7 @@ struct SetupView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Install the local embedding model").font(.title3.bold())
-                        Text("Gemdex embeds memories on this Mac with BGE-M3 running on MLX. Nothing leaves your machine, and no API key is needed. The download is about 600 MB and runs once.")
+                        Text("Gemdex embeds memories on this Mac with EmbeddingGemma 2 running on MLX. Nothing leaves your machine, and no API key is needed. The download is about 1.3 GB and runs once.")
                             .font(.callout).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -120,13 +120,13 @@ struct EmbeddingModelPanel: View {
             Button("Cancel", role: .cancel) {}
             Button("Download & install") { Task { await model.startEmbeddingJob(.install) } }
         } message: {
-            Text("Downloads the MLX runtime and the BGE-M3 model (about 600 MB) to this Mac. Requires Apple Silicon. Keep Gemdex running until it finishes.")
+            Text("Downloads the MLX runtime and the EmbeddingGemma 2 model (about 1.3 GB) to this Mac. Requires Apple Silicon. Keep Gemdex running until it finishes.")
         }
         .alert(migrateTitle, isPresented: $confirmMigration) {
             Button("Cancel", role: .cancel) {}
             Button("Migrate") { Task { await model.startEmbeddingJob(.migrate) } }
         } message: {
-            Text("Re-embeds memories saved with the previous Gemini embedding model so they show up in search. This can take a while; keep Gemdex running.")
+            Text("Re-embeds memories saved with an earlier embedding model so they show up in search. This can take a while; keep Gemdex running.")
         }
     }
 
@@ -137,7 +137,7 @@ struct EmbeddingModelPanel: View {
 
     private func legacyNotice(count: Int) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label("\(count) \(count == 1 ? "memory is" : "memories are") still in the old Gemini index and will not appear in search until re-embedded.",
+            Label("\(count) \(count == 1 ? "memory is" : "memories are") still in an older embedding index and will not appear in search until re-embedded.",
                   systemImage: "arrow.triangle.2.circlepath")
                 .font(.callout)
                 .fixedSize(horizontal: false, vertical: true)

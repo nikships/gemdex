@@ -938,7 +938,7 @@ final class AppModel: ObservableObject {
         case "migrating": return "Local: migrating memories"
         case "error": return "Local: model error"
         case "not-installed": return "Local: model not installed"
-        default: return config.configured ? "Local: BGE-M3 (MLX)" : "Local: model not installed"
+        default: return config.configured ? "Local: EmbeddingGemma 2 (MLX)" : "Local: model not installed"
         }
     }
 
@@ -1033,7 +1033,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Memories still in the legacy Gemini index (0 when none or unknown).
+    /// Memories still in an older (BGE-M3 or Gemini) index (0 when none or unknown).
     var legacyMemoryCount: Int {
         guard let state = embeddingStatus, state.installed else { return 0 }
         return state.legacyMemories ?? 0

@@ -41,7 +41,7 @@ without waiting for permission. Explicit user requests ("remember that…", "sav
 this") are just one trigger among many. Keep memories to durable, reusable facts
 — skip one-off trivia and anything easily re-derived from the current context.
 
-Behavior: the content is chunked, embedded on-device (BGE-M3 via MLX), and
+Behavior: the content is chunked, embedded on-device (EmbeddingGemma 2 via MLX), and
 stored globally (searchable from every repo and session). Returns the new
 memory id.
 

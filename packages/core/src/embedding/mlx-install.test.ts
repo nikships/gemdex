@@ -8,7 +8,7 @@ import { MLX_ARTIFACTS } from './mlx-manifest';
 import { getMlxStatus, installMlxModel, downloadMlxArtifact, mlxRoot, verifyMlxFiles } from './mlx-install';
 
 jest.mock('node:os', () => ({ ...jest.requireActual('node:os'), release: () => '25.0.0' }));
-jest.mock('./mlx-manifest', () => ({ MLX_MODEL: 'fixture/model', MLX_REVISION: 'immutable', MLX_ARTIFACTS: [
+jest.mock('./mlx-manifest', () => ({ MLX_MODEL: 'fixture/model', MLX_REVISION: 'immutable', MLX_DIMENSION: 768, MLX_ARTIFACTS: [
     { path: 'python.tar.gz', url: 'https://fixture.invalid/python', sha256: require('node:crypto').createHash('sha256').update('fixture').digest('hex') },
 ] }));
 jest.mock('node:child_process', () => {
@@ -33,7 +33,7 @@ describe('managed installer with controlled artifacts/runtime smoke fixture', ()
         Object.defineProperty(process, 'platform', { value: 'darwin' });
         Object.defineProperty(process, 'arch', { value: 'arm64' });
         jest.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('fixture'));
-        jest.spyOn(MlxProcess.prototype, 'request').mockResolvedValue([[1, ...Array(1023).fill(0)]]);
+        jest.spyOn(MlxProcess.prototype, 'request').mockResolvedValue([[1, ...Array(767).fill(0)]]);
     });
     afterEach(async () => {
         jest.restoreAllMocks();
@@ -41,17 +41,28 @@ describe('managed installer with controlled artifacts/runtime smoke fixture', ()
         Object.defineProperty(process, 'arch', arch);
         await rm(home, { recursive: true, force: true });
     });
-    test('lazy text-only constructor and no BGE query instruction', async () => {
+    test('lazy text-only constructor', async () => {
         const embedding = new MlxEmbedding({ homeDir: home });
-        expect(embedding.getDimension()).toBe(1024);
+        expect(embedding.getDimension()).toBe(768);
         expect(embedding.isMultimodal()).toBe(false);
         expect(getMlxStatus(home).installed).toBe(false);
         await expect(embedding.embedContentBatch([{ inlineData: { mimeType: 'image/png', data: '' } }])).rejects.toThrow('inline media');
         await expect(embedding.embed('text')).rejects.toThrow('not installed');
         expect(fetch).not.toHaveBeenCalled();
-        const spy = jest.spyOn(embedding, 'embed').mockResolvedValue({ vector: [], dimension: 1024 });
-        await embedding.embedQuery('question');
-        expect(spy).toHaveBeenCalledWith('question');
+    });
+    test('queries and documents use their own retrieval prompts', async () => {
+        await installMlxModel({ homeDir: home });
+        const request = MlxProcess.prototype.request as jest.Mock;
+        expect(request).toHaveBeenLastCalledWith(['Gemdex local embedding installation check'], 'document');
+        const embedding = new MlxEmbedding({ homeDir: home });
+        try {
+            await embedding.embedQuery('question');
+            expect(request).toHaveBeenLastCalledWith(['question'], 'query');
+            await embedding.embed('stored memory');
+            expect(request).toHaveBeenLastCalledWith(['stored memory'], 'document');
+            await embedding.embedBatch(['one', 'two']);
+            expect(request).toHaveBeenLastCalledWith(['one', 'two'], 'document');
+        } finally { embedding.close(); }
     });
     test('refuses unsupported platforms before writes/downloads', async () => {
         Object.defineProperty(process, 'platform', { value: 'linux' });
@@ -78,7 +89,7 @@ describe('managed installer with controlled artifacts/runtime smoke fixture', ()
         await installMlxModel({ homeDir: home });
         const embedding = new MlxEmbedding({ homeDir: home });
         const outputs = await Promise.all([embedding.embed('a'), embedding.embed('b')]);
-        expect(outputs.map(x => x.dimension)).toEqual([1024, 1024]);
+        expect(outputs.map(x => x.dimension)).toEqual([768, 768]);
         const pending = Array.from({ length: 16 }, () => embedding.embed('c'));
         const settled = Promise.allSettled(pending);
         const overflow = embedding.embed('overflow');
@@ -108,6 +119,25 @@ describe('managed installer with controlled artifacts/runtime smoke fixture', ()
         await writeFile(join(parent, 'install.lock'), '2147483647:dead');
         await installMlxModel({ homeDir: home });
         expect(getMlxStatus(home).installed).toBe(true);
+    });
+    test('downloads abort on a stall, not on total duration', async () => {
+        const chunked = (chunks: string[], gapMs: number, hang = false) => new Response(new ReadableStream({
+            async start(controller) {
+                for (const chunk of chunks) {
+                    controller.enqueue(new TextEncoder().encode(chunk));
+                    await new Promise(resolve => setTimeout(resolve, gapMs));
+                }
+                if (!hang) controller.close();
+            },
+        }));
+        (fetch as jest.Mock).mockResolvedValueOnce(chunked(['fix'], 0, true));
+        await expect(downloadMlxArtifact(MLX_ARTIFACTS[0], home, 50)).rejects.toThrow('stalled');
+        expect(existsSync(join(home, 'python.tar.gz.part'))).toBe(false);
+        expect(existsSync(join(home, 'python.tar.gz'))).toBe(false);
+        // Five 30 ms gaps outlast the 50 ms window in total, but each gap is shorter.
+        (fetch as jest.Mock).mockResolvedValueOnce(chunked(['fi', 'x', 'tu', 'r', 'e'], 30));
+        await downloadMlxArtifact(MLX_ARTIFACTS[0], home, 50);
+        expect(existsSync(join(home, 'python.tar.gz'))).toBe(true);
     });
     test('hash mismatch cannot commit; verified download resumes without network', async () => {
         (fetch as jest.Mock).mockResolvedValueOnce(new Response('wrong bytes'));

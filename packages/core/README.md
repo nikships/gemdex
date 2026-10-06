@@ -16,13 +16,14 @@ import {
   MemoryStore,
   LanceDBVectorDatabase,
   MlxEmbedding,
+  LEGACY_BGE_M3_COLLECTION,
   LEGACY_GEMINI_COLLECTION,
 } from 'gemdex-core';
 
 const memory = new MemoryStore({
   embedding: new MlxEmbedding(),
   vectorDatabase: new LanceDBVectorDatabase(),
-  legacyCollectionName: LEGACY_GEMINI_COLLECTION,
+  legacyCollectionNames: [LEGACY_BGE_M3_COLLECTION, LEGACY_GEMINI_COLLECTION],
 });
 
 await memory.save({ content: 'How we deploy: …', title: 'Deploy' });
@@ -30,15 +31,15 @@ const hits = await memory.recall('how do we deploy', 5);
 console.log(hits[0]?.content); // whole parent, never a fragment
 ```
 
-`MemoryStore` indexes chunks in `memories_mlx_bge_m3_8bit` and resolves
+`MemoryStore` indexes chunks in `memories_mlx_embeddinggemma2_8bit` (768d) and resolves
 hybrid dense + BM25 matches to full parents. Its attachments are non-embedded
 text-file blobs; media queries and new media attachments are unsupported.
 
-### Upgrade from Gemini-based releases
+### Upgrade from earlier releases
 
-Pass `legacyCollectionName: LEGACY_GEMINI_COLLECTION` to access the older
-`memories` table. List/get/update/delete/export can access legacy parents;
-recall and hygiene reject a populated legacy table. `memory.migrateLegacy()`
+Pass `legacyCollectionNames: [LEGACY_BGE_M3_COLLECTION, LEGACY_GEMINI_COLLECTION]`
+to access the older BGE-M3 and Gemini tables. List/get/update/delete/export can access legacy parents;
+recall and hygiene reject while any legacy table is populated. `memory.migrateLegacy()`
 re-embeds text (or the title of a media-only parent), preserving timestamps,
 metadata and blob bytes. Legacy media remains readable, not media-searchable.
 Back up the store before migration.

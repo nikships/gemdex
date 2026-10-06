@@ -148,7 +148,7 @@ struct ClaudeCodeReadiness: Codable, Equatable, Sendable {
     var isChecking: Bool { status == "checking" }
 }
 
-/// Local embedding model (BGE-M3 via MLX) and its explicit install/migrate job
+/// Local embedding model (EmbeddingGemma 2 via MLX) and its explicit install/migrate job
 /// snapshot. Status is one of
 /// `not-installed | installed | installing | migrating | error`.
 struct EmbeddingStatus: Codable, Equatable, Sendable {
@@ -158,7 +158,7 @@ struct EmbeddingStatus: Codable, Equatable, Sendable {
     let message: String?
     let completed: Int?
     let total: Int?
-    /// Memories still in the legacy Gemini index that need re-embedding.
+    /// Memories still in an older (BGE-M3 or Gemini) index that need re-embedding.
     /// Present once the model is installed.
     var legacyMemories: Int? = nil
 

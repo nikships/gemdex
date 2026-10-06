@@ -10,7 +10,7 @@ It is a **thin HTTP client over a Node sidecar** and holds **no memory logic of
 its own** — all retrieval/embedding/storage lives in the sidecar (`gemdex serve`
 from `gemdex-mcp`, wrapping `gemdex-core` + LanceDB over the shared `~/.gemdex`
 store). The app is **local-only**: memories live in `~/.gemdex` on this Mac,
-embedded by the local BGE-M3 model on MLX (text only, no API key). It spawns
+embedded by the local EmbeddingGemma 2 model on MLX (text only, no API key). It spawns
 the sidecar, reads a localhost handshake, and drives a browse/create/edit/delete
 UI (text memories, read-only file attachments such as chat transcripts,
 semantic free-text search, JSONL export/import). Chat-history ingestion and
@@ -115,7 +115,7 @@ existing attachments are kept; the app never sends attachments.
 
 `GET /config` returns `{configured, embedding, claudeCode}`.
 
-- **Memory UI** is gated only on `configured` (the local BGE-M3/MLX model is
+- **Memory UI** is gated only on `configured` (the local EmbeddingGemma 2/MLX model is
   installed and the store is mounted). `AppModel.syncConfigGate()` shows
   `SetupView` while it is false; memory routes answer
   `503 {needsInstall: true}` in that state and `handleNeedsInstall` routes back
@@ -132,13 +132,13 @@ existing attachments are kept; the app never sends attachments.
 `SetupView` and the **Storage & Models** panel share `EmbeddingModelPanel`:
 status (`not-installed | installed | installing | migrating | error`), model id,
 message, and determinate progress. `POST /settings/embedding/install`
-(~600 MB download, Apple Silicon only) requires a confirmation alert, answers
+(~1.3 GB download, Apple Silicon only) requires a confirmation alert, answers
 `202`, and is polled through `GET /settings/embedding`; `409` means a job is
 already running and the app reconciles by polling. When it finishes,
 `syncConfigGate()` re-runs so a fresh install mounts the manager.
 
 `EmbeddingStatus.legacyMemories` (optional, present once installed) counts
-memories still in the old Gemini index. When it is > 0, Storage & Models shows
+memories still in an older (BGE-M3 or Gemini) index. When it is > 0, Storage & Models shows
 a notice with a confirmed **Migrate N memories** button that calls
 `POST /settings/embedding/migrate`. It behaves like install: `202` with
 `status: "migrating"` and `completed`/`total` counters, polled through

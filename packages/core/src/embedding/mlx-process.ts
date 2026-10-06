@@ -1,4 +1,8 @@
 import { spawn, ChildProcessWithoutNullStreams } from 'node:child_process';
+import { MLX_DIMENSION } from './mlx-manifest';
+
+/** Retrieval prompt selector: queries and stored documents are embedded differently. */
+export type MlxEmbeddingKind = 'query' | 'document';
 
 /** One in-flight request; no unbounded queue, stdout or stderr accumulation. */
 export class MlxProcess {
@@ -11,11 +15,11 @@ export class MlxProcess {
 
     constructor(private command: string, private args: string[], private timeoutMs = 120_000) {}
 
-    request(texts: string[]): Promise<number[][]> {
+    request(texts: string[], kind: MlxEmbeddingKind): Promise<number[][]> {
         if (this.pending) return Promise.reject(new Error('MLX worker is busy; await the previous embedding request'));
         if (texts.length < 1 || texts.length > 16) return Promise.reject(new Error('MLX batch must contain 1–16 texts'));
         const id = ++this.sequence;
-        const frame = JSON.stringify({ id, texts }) + '\n';
+        const frame = JSON.stringify({ id, kind, texts }) + '\n';
         if (Buffer.byteLength(frame) > 1024 * 1024) return Promise.reject(new Error('MLX request exceeds 1 MiB'));
         clearTimeout(this.idle);
         if (!this.child) {
@@ -41,8 +45,8 @@ export class MlxProcess {
                     if (!pending || response.id !== pending.id || this.output.length) throw new Error('Invalid MLX worker response id/framing');
                     if (typeof response.error === 'string') throw new Error(`MLX embedding failed: ${response.error.slice(0, 500)}`);
                     if (!Array.isArray(response.vectors) || response.vectors.length !== pending.count ||
-                        !response.vectors.every((v: unknown) => Array.isArray(v) && v.length === 1024 && v.every(x => typeof x === 'number' && Number.isFinite(x)) && Math.abs(Math.hypot(...v) - 1) < 0.01)) {
-                        throw new Error('Invalid MLX worker vectors (expected normalized 1024-dimensional vectors)');
+                        !response.vectors.every((v: unknown) => Array.isArray(v) && v.length === MLX_DIMENSION && v.every(x => typeof x === 'number' && Number.isFinite(x)) && Math.abs(Math.hypot(...v) - 1) < 0.01)) {
+                        throw new Error(`Invalid MLX worker vectors (expected normalized ${MLX_DIMENSION}-dimensional vectors)`);
                     }
                     clearTimeout(pending.timer);
                     this.pending = undefined;

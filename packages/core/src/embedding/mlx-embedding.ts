@@ -1,9 +1,10 @@
-import { join } from 'node:path';
 import { Embedding, EmbeddingVector } from './base-embedding';
-import { assertMlxPlatform, getMlxStatus, verifyMlxFiles } from './mlx-install';
-import { MlxProcess } from './mlx-process';
+import { assertMlxPlatform, getMlxStatus, mlxWorkerArgs, verifyMlxFiles } from './mlx-install';
+import { MLX_DIMENSION } from './mlx-manifest';
+import { MlxEmbeddingKind, MlxProcess } from './mlx-process';
+import { join } from 'node:path';
 
-/** Offline, text-only BGE-M3 embeddings. Construction and status never install or spawn. */
+/** Offline, text-only EmbeddingGemma 2 embeddings. Construction and status never install or spawn. */
 export class MlxEmbedding extends Embedding {
     protected maxTokens = 2048;
     private worker?: MlxProcess;
@@ -12,11 +13,14 @@ export class MlxEmbedding extends Embedding {
     private queued = 0;
     private generation = 0;
     constructor(private options: { homeDir?: string } = {}) { super(); }
-    getDimension(): number { return 1024; }
+    getDimension(): number { return MLX_DIMENSION; }
     getProvider(): string { return 'mlx'; }
-    async detectDimension(): Promise<number> { await this.embed('dimension check'); return 1024; }
+    async detectDimension(): Promise<number> { await this.embed('dimension check'); return MLX_DIMENSION; }
     async embed(text: string): Promise<EmbeddingVector> { return (await this.embedBatch([text]))[0]; }
-    async embedBatch(texts: string[]): Promise<EmbeddingVector[]> {
+    async embedBatch(texts: string[]): Promise<EmbeddingVector[]> { return this.run(texts, 'document'); }
+    /** EmbeddingGemma 2 uses a distinct retrieval prompt for search queries. */
+    async embedQuery(text: string): Promise<EmbeddingVector> { return (await this.run([text], 'query'))[0]; }
+    private async run(texts: string[], kind: MlxEmbeddingKind): Promise<EmbeddingVector[]> {
         if (texts.length === 0) return [];
         if (this.queued >= 16) throw new Error('MLX embedding queue is full; retry after pending requests finish');
         if (texts.length > 256) throw new Error('MLX embedding batch exceeds 256 texts; split the batch');
@@ -35,12 +39,12 @@ export class MlxEmbedding extends Embedding {
             this.ready ??= verifyMlxFiles(status.path).catch(error => { this.ready = undefined; throw error; });
             await this.ready;
             if (generation !== this.generation) throw new Error('MLX embedding closed');
-            this.worker ??= new MlxProcess(join(status.path, 'python/bin/python3'), ['-I', '-B', '-u', join(status.path, 'worker.py'), join(status.path, 'model')]);
+            this.worker ??= new MlxProcess(join(status.path, 'python/bin/python3'), mlxWorkerArgs(status.path));
             const results: EmbeddingVector[] = [];
             for (let i = 0; i < texts.length; i += 16) {
                 if (generation !== this.generation) throw new Error('MLX embedding closed');
-                const vectors = await this.worker.request(texts.slice(i, i + 16));
-                results.push(...vectors.map(vector => ({ vector, dimension: 1024 })));
+                const vectors = await this.worker.request(texts.slice(i, i + 16), kind);
+                results.push(...vectors.map(vector => ({ vector, dimension: MLX_DIMENSION })));
             }
             return results;
         } finally { this.queued--; release(); }

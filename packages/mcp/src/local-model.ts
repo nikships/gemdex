@@ -7,7 +7,7 @@ export interface LocalModelStatus {
     installed: boolean;
     model: string;
     status: 'not-installed' | 'installed' | 'installing' | 'migrating' | 'error';
-    /** Memories still in the legacy Gemini index; present once the model is installed. */
+    /** Memories still in an older (BGE-M3 or Gemini) index; present once the model is installed. */
     legacyMemories?: number;
     message?: string;
     completed?: number;

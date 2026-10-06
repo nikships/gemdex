@@ -16,12 +16,12 @@ and import memories.
 The app manages the local `~/.gemdex` store on this Mac. There is no remote or
 server mode and no API key.
 
-- **Embeddings** run on this Mac with BGE-M3 on MLX (text only). On first run
+- **Embeddings** run on this Mac with EmbeddingGemma 2 on MLX (text only). On first run
   the setup screen offers an explicit, confirmed install of the MLX runtime and
-  model (about 600 MB, Apple Silicon required). The memory manager unlocks once
+  model (about 1.3 GB, Apple Silicon required). The memory manager unlocks once
   the model is installed.
 - **Storage & Models** settings show the local model status and the install
-  control. When memories saved with the previous Gemini embedding model remain,
+  control. When memories saved with an earlier embedding model (BGE-M3 or Gemini) remain,
   a notice offers a confirmed **Migrate N memories** action that re-embeds them
   locally.
 - **Chat-history ingestion and memory hygiene** run on your local

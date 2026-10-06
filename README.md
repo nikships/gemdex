@@ -20,7 +20,7 @@ only the memories they need.
 | | Local | Self-hosted |
 |---|---|---|
 | Agent connection | `npx gemdex-mcp`, stdio | Streamable HTTP `/mcp` |
-| Embeddings | On-device BGE-M3 via MLX | Server-owned Gemini, including multimodal |
+| Embeddings | On-device EmbeddingGemma 2 via MLX | Server-owned Gemini, including multimodal |
 | Storage | LanceDB and blobs under `~/.gemdex` | Postgres/pgvector and file/S3 blobs |
 | Platform | Apple Silicon, macOS 14+, native arm64 Node ≥24 | Docker host |
 | Human management | Native macOS app via localhost sidecar | Web manager |
@@ -38,8 +38,8 @@ claude mcp add gemdex -- npx -y gemdex-mcp@latest
 ```
 
 The explicit install downloads managed Python/MLX and pinned
-[`mlx-community/bge-m3-mlx-8bit`](https://huggingface.co/mlx-community/bge-m3-mlx-8bit)
-weights, about 600 MB. No Python, uv, Homebrew, HF CLI, or compiler setup is
+[`mlx-community/embeddinggemma-2-8bit`](https://huggingface.co/mlx-community/embeddinggemma-2-8bit)
+weights, about 1.3 GB in total. No Python, uv, Homebrew, HF CLI, or compiler setup is
 needed. Embeddings run offline after installation. There is no API key,
 sentinel value, or provider switch. Rosetta Node is unsupported.
 See [MLX model and runtime requirements](docs/MLX_MODELS.md).
@@ -60,11 +60,14 @@ For another MCP client:
 }
 ```
 
-### Upgrade from Gemini-based releases
+### Upgrade from earlier releases
 
-Run `npx gemdex-mcp migrate` after installation. It re-embeds legacy memories
-from `memories` into `memories_mlx_bge_m3_8bit`, preserving text, titles,
-timestamps and attachment bytes. Installation alone does not migrate.
+Releases before EmbeddingGemma 2 used BGE-M3 (`memories_mlx_bge_m3_8bit`) or,
+earlier, Gemini (`memories`). After upgrading, run `npx gemdex-mcp install`
+again (the new model is a separate download), then `npx gemdex-mcp migrate`.
+Migration re-embeds memories from both older tables into
+`memories_mlx_embeddinggemma2_8bit`, preserving text, titles, timestamps and
+attachment bytes. Installation alone does not migrate.
 
 Recall and hygiene refuse to run while legacy rows remain. List/get/update/
 delete/export remain available after installation. Migration reports progress

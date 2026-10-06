@@ -3,7 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { MemoryBackend } from '../memory/backend';
 import type { MemoryStore, ParentVectorData } from '../memory/memory-store';
-import { clusterIdFor } from './candidate-finder';
+import { clusterIdFor, DEFAULT_HYGIENE_THRESHOLD } from './candidate-finder';
 import { HygieneReportStore } from './hygiene-report';
 import { HygieneManager } from './hygiene-manager';
 import type { Judge, JudgeMemberInput } from './judge';
@@ -88,7 +88,7 @@ describe('HygieneManager.scan', () => {
         expect(result.memoryCount).toBe(3);
         expect(result.clusters).toHaveLength(1);
         expect(result.clusters[0].members.map((m) => m.memoryId)).toEqual(['dup-new', 'dup-old']);
-        expect(result.threshold).toBe(0.9);
+        expect(result.threshold).toBe(DEFAULT_HYGIENE_THRESHOLD);
         expect(result.estimatedInputTokens).toBeGreaterThan(0);
         expect(result.estimatedOutputTokens).toBe(400);
         expect(result.estimates).toEqual([{ model: 'haiku', usd: expect.any(Number) }]);

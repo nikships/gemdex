@@ -51,11 +51,11 @@ Usage:
   gemdex backfill-transcripts [--force] [--dry-run]
   gemdex ingest-history [--source claude|factory|codex|antigravity|PATH]... [--model MODEL] [--dry-run]
 
-install downloads the managed Python/MLX runtime and the pinned BGE-M3 model
-(Apple Silicon only, ~600 MB). It is the only step that downloads anything.
+install downloads the managed Python/MLX runtime and the pinned EmbeddingGemma 2
+model (Apple Silicon only, ~1.3 GB). It is the only step that downloads anything.
 
-migrate re-embeds memories saved by earlier Gemini-based releases into the
-local model. Their text, titles, timestamps and attachment files are kept.
+migrate re-embeds memories saved by earlier BGE-M3 or Gemini-based releases into
+the current model. Their text, titles, timestamps and attachment files are kept.
 
 backfill-transcripts re-imports digest memories that only have a path footer,
 attaching the full transcript blob. Missing files are skipped with a message.
@@ -211,7 +211,7 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
         if (command === 'install') {
             if (args.length !== 1) throw new Error('Usage: npx gemdex-mcp install');
             await installLocalModel(store, (message) => io.stderr(`${message}\n`));
-            io.stdout('Local model installed. Run npx gemdex-mcp migrate if you have memories from a Gemini-based Gemdex release.\n');
+            io.stdout('Local model installed. Run npx gemdex-mcp migrate if you have memories from an earlier Gemdex release.\n');
             return 0;
         }
 

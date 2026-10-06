@@ -28,19 +28,20 @@ export function createConfig(getEnv: EnvGetter = defaultEnvGetter): GemdexConfig
 export function logConfigurationSummary(config: GemdexConfig): void {
     console.log(`[MCP] 🧠 Starting Gemdex Memory MCP Server`);
     console.log(`[MCP]   Server: ${config.name} v${config.version}`);
-    console.log(`[MCP]   Embedding: local BGE-M3 (MLX)`);
+    console.log(`[MCP]   Embedding: local EmbeddingGemma 2 (MLX)`);
     console.log(`[MCP]   LanceDB Path: ${config.lancedbPath || '[default: ~/.gemdex/lance]'}`);
 }
 
 export function showHelpMessage(): void {
     console.log(`
-Gemdex — local memory layer for AI coding agents (on-device BGE-M3 embeddings + LanceDB)
+Gemdex — local memory layer for AI coding agents (on-device EmbeddingGemma 2 embeddings + LanceDB)
 
 Usage:
-  npx gemdex-mcp install           Install the managed BGE-M3 MLX runtime and model
-                                   (Apple Silicon only; explicit ~600 MB download).
-  npx gemdex-mcp migrate           Re-embed memories saved by earlier Gemini-based
-                                   releases into the local model.
+  npx gemdex-mcp install           Install the managed EmbeddingGemma 2 MLX runtime
+                                   and model (Apple Silicon only; explicit ~1.3 GB
+                                   download).
+  npx gemdex-mcp migrate           Re-embed memories saved by earlier BGE-M3 or
+                                   Gemini-based releases into the current model.
   npx gemdex-mcp status            Show local model, Claude Code and store status.
   npx gemdex-mcp@latest            Start the MCP server (stdio) exposing save_memory,
                                    recall, get_memory, update_memory, report_outcome,

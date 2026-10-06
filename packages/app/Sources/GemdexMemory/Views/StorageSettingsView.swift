@@ -60,7 +60,7 @@ struct StorageSettingsView: View {
     private var embeddingSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Local embedding model").font(.headline)
-            Text("BGE-M3 on MLX embeds memory text on this Mac (Apple Silicon only). Memories saved with the previous Gemini embedding model need a one-time, confirmed migration before they appear in search.")
+            Text("EmbeddingGemma 2 on MLX embeds memory text on this Mac (Apple Silicon only). Memories saved with an earlier embedding model (BGE-M3 or Gemini) need a one-time, confirmed migration before they appear in search.")
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             EmbeddingModelPanel(allowsMigration: true)

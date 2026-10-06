@@ -31,16 +31,18 @@ release. Its writes use temporary files and user-only permissions.
 
 ## Local model and migration
 
-- `createMemoryBackend` always uses BGE-M3 via MLX. There is no provider
+- `createMemoryBackend` always uses EmbeddingGemma 2 via MLX. There is no provider
   selector, API-key sentinel, or network storage configuration.
 - Installation is explicit (`npx gemdex-mcp install`), Apple Silicon only,
-  about 600 MB for managed Python/MLX and pinned model weights. Normal inference
+  about 1.3 GB for managed Python/MLX and pinned model weights. Normal inference
   never downloads. See [runtime constraints](../../docs/MLX_MODELS.md) before
   changing the installer.
 - All seven tools remain discoverable before installation and return setup
   guidance without running handlers. Subsequent calls can see installation.
-- **Upgrade from Gemini-based releases:** `npx gemdex-mcp migrate` re-embeds
-  legacy `memories` into `memories_mlx_bge_m3_8bit`. Install does not migrate.
+- **Upgrade from earlier releases:** `npx gemdex-mcp migrate` re-embeds the
+  legacy `memories_mlx_bge_m3_8bit` (BGE-M3) and `memories` (Gemini) tables into
+  `memories_mlx_embeddinggemma2_8bit`. Upgraded installs need `install` first
+  (new install id); install does not migrate.
   Recall and hygiene refuse to run while legacy rows remain; list/get/update/
   delete/export remain available once the model is installed. Preserve legacy
   attachment bytes and timestamps. Do not compare vectors across these tables.
