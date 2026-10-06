@@ -26,6 +26,10 @@ function parent(id: string, vectors: number[][], updatedAt = 1_000): ParentVecto
 }
 
 describe('findCandidateClusters', () => {
+    it('defaults to the threshold calibrated for EmbeddingGemma 2', () => {
+        expect(DEFAULT_HYGIENE_THRESHOLD).toBe(0.93);
+    });
+
     it('clusters obvious duplicates together and leaves unrelated parents out', () => {
         const parents = [
             parent('dup-a', [axis(0)], 2_000),

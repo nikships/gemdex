@@ -22,10 +22,11 @@
 
 ## Storage and migration invariants
 
-- Default local table: `LOCAL_TEXT_COLLECTION = memories_mlx_bge_m3_8bit`.
-  MCP also supplies `LEGACY_GEMINI_COLLECTION = memories` for upgrades from
-  Gemini-based releases. Legacy vectors are never searched with MLX queries.
-  Recall and `listParentsWithVectors` fail while legacy rows remain.
+- Default local table: `LOCAL_TEXT_COLLECTION = memories_mlx_embeddinggemma2_8bit`.
+  MCP also supplies `legacyCollectionNames` = `LEGACY_BGE_M3_COLLECTION`
+  (`memories_mlx_bge_m3_8bit`), then `LEGACY_GEMINI_COLLECTION` (`memories`),
+  for upgrades. Legacy vectors are never searched with MLX queries.
+  Recall and `listParentsWithVectors` fail while any legacy rows remain.
 - Legacy parents remain listable, readable, updatable, deletable and exportable.
   Writes go into the main index. `migrateLegacy` embeds text (or a title for a
   media-only parent), commits destination rows before deleting source rows,
@@ -48,8 +49,8 @@
   Server media caps remain in `memory/attachment-validator.ts`.
 - Export inlines blobs; import re-embeds text. Caption-only updates preserve
   vectors and blobs. Do not make metadata edits depend on inference.
-- Dimensions are fixed per collection. BGE-M3 uses 1024d; do not reuse a table
-  with vectors from another model.
+- Dimensions are fixed per collection. EmbeddingGemma 2 uses 768d (BGE-M3 was
+  1024d); do not reuse a table with vectors from another model.
 - `LanceDBVectorDatabase` construction creates its directory; `FileBlobStore`
   writes lazily. Tests must supply disposable locations.
 
@@ -64,7 +65,7 @@
   camelCase columns and the `==` to `=` translation without corrupting string
   literals or other comparison operators.
 - Save-time similarity reuses embedded vectors and centroid math from
-  `utils/centroid.ts`, default threshold 0.90. It is advisory and failure
+  `utils/centroid.ts`, default threshold 0.93 (calibrated for EmbeddingGemma 2). It is advisory and failure
   must not fail a save. `GEMDEX_SIMILAR_ON_SAVE=false` disables it;
   `GEMDEX_SIMILAR_THRESHOLD` must be in `(0,1]`.
 - Server multimodal retrieval lives in `packages/server/src/postgres.ts`;
@@ -116,5 +117,6 @@ Apply deletes only after explicit human approval, never as an automatic
 judge side effect or agent tool. BYOI has no vector-listing/hygiene endpoint.
 
 For MLX worker/installer changes, read [MLX runtime](../../docs/MLX_MODELS.md):
-CLS pooling and normalization (not mean pooling), offline inference, pinned
+query/document task prompts, prompt-inclusive mean pooling and normalization,
+the unmodified pinned upstream `language.py`, offline inference, pinned
 artifacts, bounded subprocess protocol, and explicit installation are required.

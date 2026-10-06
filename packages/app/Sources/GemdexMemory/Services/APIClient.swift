@@ -113,7 +113,7 @@ actor APIClient {
         return try decode(EmbeddingStatus.self, from: data)
     }
 
-    /// Starts re-embedding memories left in the legacy Gemini index; answers
+    /// Starts re-embedding memories left in an older embedding index; answers
     /// `202` with a `migrating` status to poll, like install.
     func migrateEmbedding() async throws -> EmbeddingStatus {
         let (data, _) = try await send(makeRequest("POST", "/settings/embedding/migrate", body: Data("{}".utf8)))

@@ -8,6 +8,7 @@ import {
     EmbeddingVector,
     FileBlobStore,
     LanceDBVectorDatabase,
+    LEGACY_BGE_M3_COLLECTION,
     LEGACY_GEMINI_COLLECTION,
     LocalMemoryBackend,
     MLX_MODEL,
@@ -47,12 +48,12 @@ function markModelInstalled(rootDir: string): void {
     fs.writeFileSync(path.join(status.path, 'installed'), path.basename(status.path));
 }
 
-/** Store memories in the legacy Gemini index the way earlier releases did. */
-async function seedLegacyMemories(lanceDir: string, blobDir: string, contents: string[]): Promise<void> {
+/** Store memories in an older index (Gemini by default) the way earlier releases did. */
+async function seedLegacyMemories(lanceDir: string, blobDir: string, contents: string[], collectionName = LEGACY_GEMINI_COLLECTION): Promise<void> {
     const legacy = new LocalMemoryBackend({
         embedding: new FakeEmbedding(),
         vectorDatabase: new LanceDBVectorDatabase({ uri: lanceDir }),
-        collectionName: LEGACY_GEMINI_COLLECTION,
+        collectionName,
         blobStore: new FileBlobStore(blobDir),
     });
     for (const content of contents) await legacy.save({ content });
@@ -112,6 +113,22 @@ test('localModelStatusWithLegacy counts memories still in the legacy Gemini inde
     const status = await localModelStatusWithLegacy(store);
     assert.equal(status.status, 'installed');
     assert.equal(status.legacyMemories, 2);
+});
+
+test('upgrading from a BGE-M3 release needs a fresh install, then counts both older indexes', async () => {
+    // A BGE-M3-era runtime lives under a different install id and is not reused.
+    const previousRuntime = path.join(path.dirname(getMlxStatus(rootDir).path), 'previous-bge-m3-install');
+    fs.mkdirSync(previousRuntime, { recursive: true });
+    fs.writeFileSync(path.join(previousRuntime, 'installed'), 'previous-bge-m3-install');
+    assert.equal(localModelStatus(store).status, 'not-installed');
+
+    markModelInstalled(rootDir);
+    await seedLegacyMemories(path.join(rootDir, 'lance'), path.join(rootDir, 'blobs'), [
+        'bge memory about notarization',
+        'bge memory about release tags',
+    ], LEGACY_BGE_M3_COLLECTION);
+    await seedLegacyMemories(path.join(rootDir, 'lance'), path.join(rootDir, 'blobs'), ['gemini memory about deploys']);
+    assert.equal((await localModelStatusWithLegacy(store)).legacyMemories, 3);
 });
 
 test('migrateLegacyMemories refuses to run before install', async () => {

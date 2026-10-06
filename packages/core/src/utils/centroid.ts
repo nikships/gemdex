@@ -7,14 +7,16 @@
  */
 
 /**
- * Default centroid cosine-similarity threshold for "similar". Calibrated on a
- * real ~1.9k-memory store: 0.90 surfaces tight duplicate/superseded groups,
- * while 0.80 flags the majority of the store as candidates. Shared by memory
- * hygiene clustering and save-time similar-memory detection — one threshold,
- * one mental model for "similar" across the product. Re-exported from
- * `hygiene/candidate-finder.ts` for existing importers.
+ * Default centroid cosine-similarity threshold for "similar". Originally
+ * calibrated on a real ~1.9k-memory store, where 0.90 (Gemini scale) surfaced
+ * tight duplicate/superseded groups while 0.80 flagged most of the store.
+ * EmbeddingGemma 2 scores the same pairs higher: on 1,463 parents of that store,
+ * 0.93 flags the same number of pairs as Gemini at 0.90, while 0.90 flags 3.5x
+ * as many. Shared by memory hygiene clustering and save-time similar-memory
+ * detection — one threshold, one mental model for "similar" across the
+ * product. Re-exported from `hygiene/candidate-finder.ts` for existing importers.
  */
-export const DEFAULT_HYGIENE_THRESHOLD = 0.90;
+export const DEFAULT_HYGIENE_THRESHOLD = 0.93;
 
 /**
  * Mean of `vectors`, L2-normalized so cosine similarity against another

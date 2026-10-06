@@ -6,7 +6,7 @@ import * as path from 'path';
 import { PDFDocument } from 'pdf-lib';
 import { LanceDBVectorDatabase } from '../vectordb';
 import { Embedding, EmbeddingVector } from '../embedding';
-import { LEGACY_GEMINI_COLLECTION, LOCAL_TEXT_COLLECTION, MemoryStore } from './memory-store';
+import { LEGACY_BGE_M3_COLLECTION, LEGACY_GEMINI_COLLECTION, LOCAL_TEXT_COLLECTION, MemoryStore } from './memory-store';
 import { LocalMemoryBackend } from './backend';
 import { FileBlobStore, S3BlobStore } from './blob-store';
 import { AttachmentValidationError } from './attachment-validator';
@@ -192,7 +192,7 @@ describe('MemoryStore', () => {
     });
 
     it('writes to the local text collection by default', async () => {
-        expect(LOCAL_TEXT_COLLECTION).toBe('memories_mlx_bge_m3_8bit');
+        expect(LOCAL_TEXT_COLLECTION).toBe('memories_mlx_embeddinggemma2_8bit');
         await store.save({ content: 'default collection' });
         expect(await readRows(db, LOCAL_TEXT_COLLECTION)).toHaveLength(1);
         expect(await db.hasCollection(LEGACY_GEMINI_COLLECTION)).toBe(false);
@@ -203,9 +203,15 @@ describe('MemoryStore', () => {
             embedding: new FakeEmbedding(),
             vectorDatabase: db,
             collectionName: 'same',
-            legacyCollectionName: 'same',
+            legacyCollectionNames: ['same'],
             blobStore: new FileBlobStore(path.join(tmpDir, 'blobs')),
         })).toThrow(/must differ/);
+        expect(() => new MemoryStore({
+            embedding: new FakeEmbedding(),
+            vectorDatabase: db,
+            legacyCollectionNames: ['old', 'old'],
+            blobStore: new FileBlobStore(path.join(tmpDir, 'blobs')),
+        })).toThrow(/distinct/);
     });
 
     it('uses an explicit title when provided', async () => {
@@ -881,7 +887,7 @@ describe('MemoryStore (save-time similar-memory detection)', () => {
         const withLegacy = new MemoryStore({
             embedding: new FakeEmbedding(),
             vectorDatabase: db,
-            legacyCollectionName: LEGACY_GEMINI_COLLECTION,
+            legacyCollectionNames: [LEGACY_GEMINI_COLLECTION],
             blobStore: blobStore(),
         });
         const b = await withLegacy.save({ content: NOTARIZE_B, title: 'Notarization B' });
@@ -989,7 +995,7 @@ describe('MemoryStore (legacy collection + migrateLegacy)', () => {
         store = new MemoryStore({
             embedding,
             vectorDatabase: db,
-            legacyCollectionName: LEGACY_GEMINI_COLLECTION,
+            legacyCollectionNames: [LEGACY_GEMINI_COLLECTION],
             blobStore: blobs,
         });
     });
@@ -1026,7 +1032,7 @@ describe('MemoryStore (legacy collection + migrateLegacy)', () => {
         const noLegacy = new MemoryStore({ embedding, vectorDatabase: db, blobStore: blobs });
         expect(await noLegacy.countLegacyMemories()).toBe(0);
         const missingLegacy = new MemoryStore({
-            embedding, vectorDatabase: db, legacyCollectionName: 'never_created', blobStore: blobs,
+            embedding, vectorDatabase: db, legacyCollectionNames: ['never_created'], blobStore: blobs,
         });
         expect(await missingLegacy.countLegacyMemories()).toBe(0);
     });
@@ -1036,7 +1042,7 @@ describe('MemoryStore (legacy collection + migrateLegacy)', () => {
         await expect(store.recall('staging credentials', 5)).rejects.toThrow(/Cannot search yet/);
         await expect(store.recall('staging credentials', 5)).rejects.toThrow(/npx gemdex-mcp migrate/);
         await expect(store.listParentsWithVectors()).rejects.toThrow(/Cannot check memory hygiene yet/);
-        await expect(store.listParentsWithVectors()).rejects.toThrow(/legacy Gemini index/);
+        await expect(store.listParentsWithVectors()).rejects.toThrow(/older embedding index/);
         // An empty query short-circuits before the legacy check.
         expect(await store.recall('', 5)).toEqual([]);
     });
@@ -1210,7 +1216,7 @@ describe('MemoryStore (legacy collection + migrateLegacy)', () => {
         const second = new MemoryStore({
             embedding: new FakeEmbedding(),
             vectorDatabase: new LanceDBVectorDatabase({ uri: path.join(dir, 'lance') }),
-            legacyCollectionName: LEGACY_GEMINI_COLLECTION,
+            legacyCollectionNames: [LEGACY_GEMINI_COLLECTION],
             blobStore: blobs,
         });
         const migration = store.migrateLegacy();
@@ -1231,7 +1237,7 @@ describe('MemoryStore (legacy collection + migrateLegacy)', () => {
         const unlocked = Object.create(db) as LanceDBVectorDatabase;
         Object.defineProperty(unlocked, 'withMemoryWriteLock', { value: undefined });
         const noLock = new MemoryStore({
-            embedding, vectorDatabase: unlocked, legacyCollectionName: LEGACY_GEMINI_COLLECTION, blobStore: blobs,
+            embedding, vectorDatabase: unlocked, legacyCollectionNames: [LEGACY_GEMINI_COLLECTION], blobStore: blobs,
         });
         await expect(noLock.migrateLegacy()).rejects.toThrow(/write locking/);
     });
@@ -1263,5 +1269,101 @@ describe('MemoryStore (legacy collection + migrateLegacy)', () => {
         const cleared = await store.update(MEDIA_ID, { attachments: [] });
         expect(cleared.attachments).toEqual([]);
         expect(await store.readAttachment(MEDIA_ID, 'diagram')).toBeNull();
+    });
+});
+
+describe('MemoryStore (upgrade from BGE-M3 and Gemini indexes)', () => {
+    /** Stand-in for the 1024-dim BGE-M3 space; distinct from DIM and LEGACY_DIM. */
+    const BGE_DIM = 20;
+    let dir: string;
+    let db: LanceDBVectorDatabase;
+    let blobs: FileBlobStore;
+    let store: MemoryStore;
+    let bgeId: string;
+    let geminiId: string;
+
+    function writer(collectionName: string, dimension: number): MemoryStore {
+        return new MemoryStore({ embedding: new FakeEmbedding(dimension), vectorDatabase: db, collectionName, blobStore: blobs });
+    }
+
+    beforeEach(async () => {
+        dir = await fs.mkdtemp(path.join(os.tmpdir(), 'gemdex-upgrade-'));
+        db = new LanceDBVectorDatabase({ uri: path.join(dir, 'lance') });
+        blobs = new FileBlobStore(path.join(dir, 'blobs'));
+        bgeId = 'bge-memory';
+        const imported = await writer(LEGACY_BGE_M3_COLLECTION, BGE_DIM).importRecords([{
+            id: bgeId,
+            title: 'Notarization',
+            content: 'notarize the desktop app with notarytool and staple the ticket',
+            createdAt: 100,
+            updatedAt: 200,
+            attachments: [{ id: 'log', mimeType: 'text/plain', data: Buffer.from('notary log').toString('base64') }],
+        }]);
+        expect(imported.imported).toBe(1);
+        geminiId = (await writer(LEGACY_GEMINI_COLLECTION, LEGACY_DIM).save({ content: 'rotate the staging database credentials weekly' })).id;
+        store = new MemoryStore({
+            embedding: new FakeEmbedding(),
+            vectorDatabase: db,
+            legacyCollectionNames: [LEGACY_BGE_M3_COLLECTION, LEGACY_GEMINI_COLLECTION],
+            blobStore: blobs,
+        });
+    });
+
+    afterEach(async () => {
+        jest.restoreAllMocks();
+        await fs.rm(dir, { recursive: true, force: true });
+    });
+
+    it('serves both older indexes before migration but refuses recall', async () => {
+        expect(await store.countLegacyMemories()).toBe(2);
+        expect((await store.list()).map((m) => m.id).sort()).toEqual([bgeId, geminiId].sort());
+        expect((await store.get(bgeId))!.content).toContain('notarytool');
+        await expect(store.recall('notarize', 5)).rejects.toThrow(/older embedding index/);
+    });
+
+    it('migrates both indexes into the EmbeddingGemma 2 table, preserving metadata and blobs', async () => {
+        const progress: Array<[number, number]> = [];
+        await store.migrateLegacy((completed, total) => progress.push([completed, total]));
+        expect(progress).toEqual([[0, 2], [1, 2], [2, 2]]);
+        expect(await readRows(db, LEGACY_BGE_M3_COLLECTION)).toEqual([]);
+        expect(await readRows(db, LEGACY_GEMINI_COLLECTION)).toEqual([]);
+        expect(await store.countLegacyMemories()).toBe(0);
+
+        const main = await readRows(db, LOCAL_TEXT_COLLECTION);
+        expect(new Set(main.map((r) => r.relativePath))).toEqual(new Set([bgeId, geminiId]));
+        expect(main.every((r) => r.vector.length === DIM)).toBe(true);
+        const migrated = (await store.get(bgeId))!;
+        expect(migrated).toMatchObject({ title: 'Notarization', createdAt: 100, updatedAt: 200 });
+        expect((await store.readAttachment(bgeId, 'log'))!.data.toString()).toBe('notary log');
+
+        expect((await store.recall('notarize notarytool staple', 5))[0].id).toBe(bgeId);
+        await store.migrateLegacy((completed, total) => progress.push([completed, total]));
+        expect(progress.at(-1)).toEqual([0, 0]);
+    });
+
+    it('counts a parent left in both indexes by an interrupted migration once', async () => {
+        const leftover = (await readRows(db, LEGACY_BGE_M3_COLLECTION)).filter((r) => r.relativePath === bgeId);
+        await db.insertHybrid(LEGACY_GEMINI_COLLECTION, leftover.map((row) => ({
+            id: row.id,
+            content: row.content,
+            relativePath: row.relativePath,
+            startLine: Number(row.startLine),
+            endLine: Number(row.endLine),
+            fileExtension: '',
+            vector: Array.from({ length: LEGACY_DIM }, (_, i) => (i === 0 ? 1 : 0)),
+            metadata: typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata,
+        })));
+        expect(await store.countLegacyMemories()).toBe(2);
+        await store.migrateLegacy();
+        expect(await store.countLegacyMemories()).toBe(0);
+        expect((await store.list()).map((m) => m.id).sort()).toEqual([bgeId, geminiId].sort());
+        expect((await store.get(bgeId))!.title).toBe('Notarization');
+    });
+
+    it('moves an older-index memory into the main table on update', async () => {
+        await store.update(bgeId, { content: 'staple after notarizing' });
+        expect((await readRows(db, LEGACY_BGE_M3_COLLECTION))).toEqual([]);
+        expect((await readRows(db, LOCAL_TEXT_COLLECTION)).map((r) => r.relativePath)).toEqual([bgeId]);
+        expect(await store.countLegacyMemories()).toBe(1);
     });
 });

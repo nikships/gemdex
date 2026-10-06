@@ -1,5 +1,6 @@
 import {
     LanceDBVectorDatabase,
+    LEGACY_BGE_M3_COLLECTION,
     LEGACY_GEMINI_COLLECTION,
     LocalMemoryBackend,
     MlxEmbedding,
@@ -13,8 +14,8 @@ export const INSTALL_HINT = 'Local model is not installed. Run npx gemdex-mcp in
  * Build the local MemoryBackend over the shared embedded LanceDB store
  * (~/.gemdex/lance by default). Both the MCP server and the `gemdex serve`
  * sidecar use this so a memory saved by the agent shows up in the app and
- * vice-versa. Memories written by earlier Gemini-embedded releases stay
- * readable through the legacy collection until `gemdex migrate` moves them.
+ * vice-versa. Memories written by earlier BGE-M3 or Gemini-embedded releases
+ * stay readable through the legacy collections until `gemdex migrate` moves them.
  */
 export function createMemoryBackend(config: GemdexConfig, localHomeDir?: string): LocalMemoryBackend {
     if (!getMlxStatus(localHomeDir).installed) {
@@ -26,6 +27,6 @@ export function createMemoryBackend(config: GemdexConfig, localHomeDir?: string)
     return new LocalMemoryBackend({
         embedding: new MlxEmbedding({ homeDir: localHomeDir }),
         vectorDatabase,
-        legacyCollectionName: LEGACY_GEMINI_COLLECTION,
+        legacyCollectionNames: [LEGACY_BGE_M3_COLLECTION, LEGACY_GEMINI_COLLECTION],
     });
 }

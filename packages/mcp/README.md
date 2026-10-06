@@ -1,6 +1,6 @@
 # gemdex-mcp
 
-Local memory for AI coding agents: on-device BGE-M3 embeddings via MLX,
+Local memory for AI coding agents: on-device EmbeddingGemma 2 embeddings via MLX,
 embedded LanceDB, seven stdio MCP tools, and a localhost desktop sidecar.
 Part of [Gemdex](https://github.com/nikships/gemdex).
 
@@ -14,7 +14,7 @@ claude mcp add gemdex -- npx -y gemdex-mcp@latest
 ```
 
 Installation explicitly downloads managed Python/MLX and pinned
-`mlx-community/bge-m3-mlx-8bit` weights, about 600 MB. No preinstalled Python,
+`mlx-community/embeddinggemma-2-8bit` weights, about 1.3 GB in total. No preinstalled Python,
 uv, Homebrew, compiler, or model tooling is needed. Embeddings run offline
 after installation. There is no API key, provider switch, or remote backend
 setting. Before installation all seven tools return setup guidance.
@@ -37,11 +37,14 @@ The local pool lives at `~/.gemdex/lance`, with attachment bytes at
 to the [Streamable HTTP MCP endpoint](../mcp-http/README.md). The npx package
 and desktop sidecar manage only the local pool.
 
-### Upgrade from Gemini-based releases
+### Upgrade from earlier releases
 
-After installation, run `npx gemdex-mcp migrate` to re-embed legacy `memories`
-into `memories_mlx_bge_m3_8bit` (1024 dimensions). Installation alone does not
-migrate. Progress is reported and migration is safe to rerun.
+Earlier releases stored BGE-M3 vectors in `memories_mlx_bge_m3_8bit` or Gemini
+vectors in `memories`. After upgrading, run `npx gemdex-mcp install` (the
+EmbeddingGemma 2 model is a new download), then `npx gemdex-mcp migrate` to
+re-embed both older tables into `memories_mlx_embeddinggemma2_8bit`
+(768 dimensions). Installation alone does not migrate. Progress is reported and
+migration is safe to rerun.
 
 Recall and hygiene refuse to run while legacy rows remain, avoiding incomplete
 results. List/get/update/delete/export remain available after installation.
@@ -125,7 +128,7 @@ not ordinary memory reads. See the
 | `GEMDEX_STATS_PATH` | Override `~/.gemdex/stats.json` |
 | `GEMDEX_TRUST_RANKING` | `true` enables outcome-weighted title ranking |
 | `GEMDEX_SIMILAR_ON_SAVE` | `false` disables similarity advisories |
-| `GEMDEX_SIMILAR_THRESHOLD` | Similarity threshold in `(0,1]`, default 0.90 |
+| `GEMDEX_SIMILAR_THRESHOLD` | Similarity threshold in `(0,1]`, default 0.93 |
 
 ## MCP Registry
 

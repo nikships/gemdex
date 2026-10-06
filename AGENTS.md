@@ -10,7 +10,7 @@ Remote agent -> mcp-http --/v1--> server -> Postgres/pgvector + Gemini
 Browser ------> web BFF ---/v1--> server -> core shared HTTP router
 ```
 
-- `packages/mcp` is local-only: on-device BGE-M3 embeddings via `MlxEmbedding`,
+- `packages/mcp` is local-only: on-device EmbeddingGemma 2 embeddings via `MlxEmbedding`,
   shared storage with the desktop sidecar, and Claude Code inference for
   ingestion/hygiene. Do not wire it to the self-hosted pool.
 - `packages/server` owns self-hosted Gemini embedding (including multimodal)

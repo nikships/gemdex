@@ -7,13 +7,17 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { MLX_ARTIFACTS, MLX_MODEL, MLX_REVISION } from './mlx-manifest';
+import { MLX_ARTIFACTS, MLX_DIMENSION, MLX_MODEL, MLX_REVISION } from './mlx-manifest';
 import { MLX_WORKER } from './mlx-worker';
 import { MlxProcess } from './mlx-process';
 
 const exec = promisify(execFile);
 export const MLX_INSTALL_ID = createHash('sha256').update(JSON.stringify(MLX_ARTIFACTS) + MLX_WORKER).digest('hex');
 export function mlxRoot(homeDir = join(homedir(), '.gemdex')): string { return join(homeDir, 'mlx', MLX_INSTALL_ID); }
+/** Python arguments for the worker: the pinned model directory and upstream text-encoder source. */
+export function mlxWorkerArgs(root: string): string[] {
+    return ['-I', '-B', '-u', join(root, 'worker.py'), join(root, 'model'), join(root, 'arch/embedding_gemma2')];
+}
 export function assertMlxPlatform(): void {
     if (process.platform !== 'darwin' || process.arch !== 'arm64' || Number(release().split('.')[0]) < 23) {
         throw new Error('Local MLX embeddings require native Apple Silicon Node.js on macOS 14 or newer. Use Gemini or remote mode on this machine.');
@@ -23,7 +27,7 @@ export function getMlxStatus(homeDir?: string): { installed: boolean; model: str
     const path = mlxRoot(homeDir);
     let installed = false;
     try { installed = readFileSync(join(path, 'installed'), 'utf8') === MLX_INSTALL_ID; } catch { /* not installed */ }
-    return { installed, model: MLX_MODEL, revision: MLX_REVISION, dimension: 1024, path };
+    return { installed, model: MLX_MODEL, revision: MLX_REVISION, dimension: MLX_DIMENSION, path };
 }
 async function digest(path: string): Promise<string> {
     const hash = createHash('sha256');
@@ -52,19 +56,43 @@ export async function verifyMlxFiles(root: string): Promise<void> {
     if (await runtimeDigest(root) !== await readFile(join(root, 'runtime.sha256'), 'utf8')) throw new Error('MLX installed runtime integrity check failed; reinstall the model');
 }
 
-/** Download only during explicit installation. Incomplete files never become artifacts. */
-export async function downloadMlxArtifact(artifact: { url: string; sha256: string; path: string }, root: string): Promise<void> {
+/**
+ * Download only during explicit installation. Incomplete files never become artifacts.
+ * The deadline is a stall timeout, not a total one: the 1.2 GB weights take
+ * longer than any fixed limit on a slow but healthy connection.
+ */
+export async function downloadMlxArtifact(artifact: { url: string; sha256: string; path: string }, root: string, stallMs = 120_000): Promise<void> {
     const destination = join(root, artifact.path);
     try { if (await digest(destination) === artifact.sha256) return; } catch { /* missing/interrupted */ }
     await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
     const partial = destination + '.part';
+    const controller = new AbortController();
+    let stall: NodeJS.Timeout | undefined;
+    const arm = () => {
+        clearTimeout(stall);
+        stall = setTimeout(() => controller.abort(new Error(`MLX download stalled for ${stallMs / 1000}s: ${artifact.path}`)), stallMs);
+    };
     try {
-        const response = await fetch(artifact.url, { signal: AbortSignal.timeout(10 * 60_000) });
-        if (!response.ok || !response.body) throw new Error(`MLX download failed (${response.status}): ${artifact.path}`);
-        await pipeline(Readable.fromWeb(response.body as import('node:stream/web').ReadableStream), createWriteStream(partial, { mode: 0o600 }));
+        arm();
+        try {
+            const response = await fetch(artifact.url, { signal: controller.signal });
+            if (!response.ok || !response.body) throw new Error(`MLX download failed (${response.status}): ${artifact.path}`);
+            await pipeline(
+                Readable.fromWeb(response.body as import('node:stream/web').ReadableStream),
+                async function* (source: AsyncIterable<Buffer>) { for await (const chunk of source) { arm(); yield chunk; } },
+                createWriteStream(partial, { mode: 0o600 }),
+                { signal: controller.signal },
+            );
+        } catch (error) {
+            throw controller.signal.aborted ? controller.signal.reason : error;
+        }
+        clearTimeout(stall);
         if (await digest(partial) !== artifact.sha256) throw new Error(`MLX download integrity check failed: ${artifact.path}`);
         await rename(partial, destination);
-    } finally { await rm(partial, { force: true }); }
+    } finally {
+        clearTimeout(stall);
+        await rm(partial, { force: true });
+    }
 }
 
 /** PID lock: live installs fail clearly; crashed installs can be retried explicitly. */
@@ -122,8 +150,8 @@ export async function installMlxModel(options: { homeDir?: string; onProgress?: 
         await writeFile(join(stage, 'runtime.sha256'), await runtimeDigest(stage), { mode: 0o600 });
         await verifyMlxFiles(stage);
         options.onProgress?.('Smoke-testing local MLX embeddings');
-        const worker = new MlxProcess(python, ['-I', '-B', '-u', join(stage, 'worker.py'), join(stage, 'model')]);
-        try { await worker.request(['Gemdex local embedding installation check']); } finally { worker.close(); }
+        const worker = new MlxProcess(python, mlxWorkerArgs(stage));
+        try { await worker.request(['Gemdex local embedding installation check'], 'document'); } finally { worker.close(); }
         // Commit only after inference passes; failed repair never advertises a new install.
         await writeFile(join(stage, 'installed'), MLX_INSTALL_ID, { mode: 0o600 });
         await rm(root, { recursive: true, force: true });

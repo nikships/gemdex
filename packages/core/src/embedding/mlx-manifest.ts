@@ -1,6 +1,9 @@
-// Immutable upstream artifacts; see docs/MLX_MODELS.md. Generated from HF/PyPI/release metadata.
-export const MLX_MODEL = "mlx-community/bge-m3-mlx-8bit";
-export const MLX_REVISION = "7eca4a1c6ea1a0c5efc37598b369012f3985910f";
+// Immutable upstream artifacts; see docs/MLX_MODELS.md. Generated from HF/PyPI/GitHub release metadata.
+export const MLX_MODEL = "mlx-community/embeddinggemma-2-8bit";
+export const MLX_REVISION = "7505ef2f8ddef45efef6d060865f27989b3c9cec";
+/** mlx-vlm commit whose unmodified text encoder (`language.py`) the worker loads. */
+export const MLX_ARCHITECTURE_REVISION = "fec3f50379bb2cb0760ef3c8a68ebce9585e4d97";
+export const MLX_DIMENSION = 768;
 export const MLX_ARTIFACTS = [
     {
         "path": "python.tar.gz",
@@ -8,68 +11,53 @@ export const MLX_ARTIFACTS = [
         "sha256": "22625deaf5757e7c266cf1a096c9151a06b598b1e14632a2ec9993d58ec5fe84"
     },
     {
-        "path": "wheels/mlx-0.29.3-cp312-cp312-macosx_14_0_arm64.whl",
-        "url": "https://files.pythonhosted.org/packages/c6/e2/5177c80e8c33a8be89fa45fa0a839d5b6a5578687d0ec973bf03638a4e73/mlx-0.29.3-cp312-cp312-macosx_14_0_arm64.whl",
-        "sha256": "cddf6bcdc561094af6b3f0706f8768ecc5216a97eb6973e838c3ac2e2fca2cc8"
+        "path": "wheels/mlx-0.32.3-cp312-cp312-macosx_14_0_arm64.whl",
+        "url": "https://files.pythonhosted.org/packages/26/8c/2f8b796885b4c02ab9644916bebf656cd1d6d366df94d174b046903ea250/mlx-0.32.3-cp312-cp312-macosx_14_0_arm64.whl",
+        "sha256": "7aecc3d4a904279492dae58e28378a3c4bec4533e7066e64ae5c78c7a5511f22"
     },
     {
-        "path": "wheels/mlx_embeddings-0.0.5-py2.py3-none-any.whl",
-        "url": "https://files.pythonhosted.org/packages/e7/66/524db48e1e90ae071589ebcd29cd8e03daa4f69ac63718f0977dac922f0f/mlx_embeddings-0.0.5-py2.py3-none-any.whl",
-        "sha256": "3c13eba4c10d26362e6d92f5faffd58d1d9ab28d56f1ee210ea7766c7980c24a"
+        "path": "wheels/mlx_metal-0.32.3-py3-none-macosx_14_0_arm64.whl",
+        "url": "https://files.pythonhosted.org/packages/f8/ed/8510985bcb24a6eae359a5441ce4cedcee13b84258a010cd0e515e9fb0bc/mlx_metal-0.32.3-py3-none-macosx_14_0_arm64.whl",
+        "sha256": "fdba88ed9131448cf163be2c7ad6374746d8818205f28657aa91b6c69050f691"
     },
     {
-        "path": "wheels/mlx_metal-0.29.3-py3-none-macosx_14_0_arm64.whl",
-        "url": "https://files.pythonhosted.org/packages/c0/d8/5ee91eac16dfcf0334103120b47d4abd8c890ccc0d73d3eee4770ce8810f/mlx_metal-0.29.3-py3-none-macosx_14_0_arm64.whl",
-        "sha256": "f426d4b67f96b4d6f0ed50d5992933595aadb370dc3e9ed2410bafbc16229882"
+        "path": "wheels/tokenizers-0.23.2-cp310-abi3-macosx_11_0_arm64.whl",
+        "url": "https://files.pythonhosted.org/packages/67/49/22da045a91732384d3a3771816bf188dc5a1f702c32e635afa7c679c0bef/tokenizers-0.23.2-cp310-abi3-macosx_11_0_arm64.whl",
+        "sha256": "986670e43691469dcee610ea0f846f91a8f84e91fc6f7a48d4c064414c0ec2bf"
     },
     {
-        "path": "wheels/tokenizers-0.22.2-cp39-abi3-macosx_11_0_arm64.whl",
-        "url": "https://files.pythonhosted.org/packages/2e/47/174dca0502ef88b28f1c9e06b73ce33500eedfac7a7692108aec220464e7/tokenizers-0.22.2-cp39-abi3-macosx_11_0_arm64.whl",
-        "sha256": "1e418a55456beedca4621dbab65a318981467a2b188e982a23e117f115ce5001"
+        "path": "arch/embedding_gemma2/language.py",
+        "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/fec3f50379bb2cb0760ef3c8a68ebce9585e4d97/mlx_vlm/models/embedding_gemma2/language.py",
+        "sha256": "001033b2cc50dc80c5b0ec7c1c9f1121047e054e78d5eef4143fec4095e1aa3b"
     },
     {
         "path": "model/config.json",
-        "url": "https://huggingface.co/mlx-community/bge-m3-mlx-8bit/resolve/7eca4a1c6ea1a0c5efc37598b369012f3985910f/config.json",
-        "sha256": "4603d4b7f4ed1c9aa3590c279d0558d426264463403847d293f66ade9f23dc1b"
+        "url": "https://huggingface.co/mlx-community/embeddinggemma-2-8bit/resolve/7505ef2f8ddef45efef6d060865f27989b3c9cec/config.json",
+        "sha256": "35e55812554bf172f9321f5c6a25d58810432db9eeeb38094723a04e8d3dd9af"
     },
     {
         "path": "model/config_sentence_transformers.json",
-        "url": "https://huggingface.co/mlx-community/bge-m3-mlx-8bit/resolve/7eca4a1c6ea1a0c5efc37598b369012f3985910f/config_sentence_transformers.json",
-        "sha256": "1eef72430e7194a1e59680e635aed81ffa083f05668dbc5bb1c56c04c0999c38"
-    },
-    {
-        "path": "model/model.safetensors",
-        "url": "https://huggingface.co/mlx-community/bge-m3-mlx-8bit/resolve/7eca4a1c6ea1a0c5efc37598b369012f3985910f/model.safetensors",
-        "sha256": "57b597e5aa8c102c2698cc0915760a839e4c1a30bff0a46d7883d27d3f010720"
-    },
-    {
-        "path": "model/model.safetensors.index.json",
-        "url": "https://huggingface.co/mlx-community/bge-m3-mlx-8bit/resolve/7eca4a1c6ea1a0c5efc37598b369012f3985910f/model.safetensors.index.json",
-        "sha256": "40240743a3a26832574855f41cf9a1babbd5b7ffa71cc462aa058be26f931883"
+        "url": "https://huggingface.co/mlx-community/embeddinggemma-2-8bit/resolve/7505ef2f8ddef45efef6d060865f27989b3c9cec/config_sentence_transformers.json",
+        "sha256": "031e56a498d33c349ab489a21885bcfe25b4fcba841149dc99e1e90d4a7c28f5"
     },
     {
         "path": "model/modules.json",
-        "url": "https://huggingface.co/mlx-community/bge-m3-mlx-8bit/resolve/7eca4a1c6ea1a0c5efc37598b369012f3985910f/modules.json",
-        "sha256": "84e40c8e006c9b1d6c122e02cba9b02458120b5fb0c87b746c41e0207cf642cf"
+        "url": "https://huggingface.co/mlx-community/embeddinggemma-2-8bit/resolve/7505ef2f8ddef45efef6d060865f27989b3c9cec/modules.json",
+        "sha256": "3d02572a0455b832de67fb8e63a54981bc7e8b46e337c95e917bd8122a533bfd"
     },
     {
-        "path": "model/sentence_bert_config.json",
-        "url": "https://huggingface.co/mlx-community/bge-m3-mlx-8bit/resolve/7eca4a1c6ea1a0c5efc37598b369012f3985910f/sentence_bert_config.json",
-        "sha256": "eb9b44b13c0f52a3b3685c3b1cbdea1ba8b04bea123b98f61610048940776eb1"
-    },
-    {
-        "path": "model/special_tokens_map.json",
-        "url": "https://huggingface.co/mlx-community/bge-m3-mlx-8bit/resolve/7eca4a1c6ea1a0c5efc37598b369012f3985910f/special_tokens_map.json",
-        "sha256": "8c785abebea9ae3257b61681b4e6fd8365ceafde980c21970d001e834cf10835"
+        "path": "model/1_Pooling/config.json",
+        "url": "https://huggingface.co/mlx-community/embeddinggemma-2-8bit/resolve/7505ef2f8ddef45efef6d060865f27989b3c9cec/1_Pooling/config.json",
+        "sha256": "8759bdf7c77efc7df7723f64856a593c8943b71ee38baf2a88771fbaf78438f9"
     },
     {
         "path": "model/tokenizer.json",
-        "url": "https://huggingface.co/mlx-community/bge-m3-mlx-8bit/resolve/7eca4a1c6ea1a0c5efc37598b369012f3985910f/tokenizer.json",
-        "sha256": "5df1f55d60c9705a501ab9a75550728625740741fe4be308dac4806c16b7d51d"
+        "url": "https://huggingface.co/mlx-community/embeddinggemma-2-8bit/resolve/7505ef2f8ddef45efef6d060865f27989b3c9cec/tokenizer.json",
+        "sha256": "4d777ef5bdc1aa36227abdfb77c3e49e7b9c892d16e1b6bda41c393504828be4"
     },
     {
-        "path": "model/tokenizer_config.json",
-        "url": "https://huggingface.co/mlx-community/bge-m3-mlx-8bit/resolve/7eca4a1c6ea1a0c5efc37598b369012f3985910f/tokenizer_config.json",
-        "sha256": "c2ef99124628ae6f79a847ad67e5d3f5b016d0387de90c9fbaf17c45a98933af"
+        "path": "model/model.safetensors",
+        "url": "https://huggingface.co/mlx-community/embeddinggemma-2-8bit/resolve/7505ef2f8ddef45efef6d060865f27989b3c9cec/model.safetensors",
+        "sha256": "6b7e97f9687ad422ab3625a1cdf6002892187d7dd04d01b2a09253fa1e5d4cfd"
     }
 ] as const;

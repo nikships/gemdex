@@ -38,8 +38,10 @@ import {
 } from './types';
 export type { AttachmentBytes } from './types';
 
-/** The local text index (BGE-M3 via MLX, 1024 dimensions). */
-export const LOCAL_TEXT_COLLECTION = 'memories_mlx_bge_m3_8bit';
+/** The local text index (EmbeddingGemma 2 via MLX, 768 dimensions). */
+export const LOCAL_TEXT_COLLECTION = 'memories_mlx_embeddinggemma2_8bit';
+/** The index written by earlier BGE-M3 MLX releases (1024 dimensions). */
+export const LEGACY_BGE_M3_COLLECTION = 'memories_mlx_bge_m3_8bit';
 /** The index written by earlier Gemini-embedded releases (3072 dimensions). */
 export const LEGACY_GEMINI_COLLECTION = 'memories';
 const DEFAULT_PREVIEW_LENGTH = 200;
@@ -119,14 +121,15 @@ export interface MemoryStoreConfig {
     /** Index table name. Defaults to {@link LOCAL_TEXT_COLLECTION}. */
     collectionName?: string;
     /**
-     * An older index in a different embedding space (e.g. the Gemini
-     * `memories` table). Its memories stay listable, readable, updatable,
-     * deletable and exportable, and {@link MemoryStore.migrateLegacy} moves them
-     * into the main index. It is never searched: its vectors cannot be compared
-     * with the main embedding, so recall and hygiene refuse to run while it
-     * still holds rows rather than silently omitting those memories.
+     * Older indexes in different embedding spaces (e.g. the BGE-M3 and Gemini
+     * tables). Their memories stay listable, readable, updatable, deletable and
+     * exportable, and {@link MemoryStore.migrateLegacy} moves them into the main
+     * index, in this order. They are never searched: their vectors cannot be
+     * compared with the main embedding, so recall and hygiene refuse to run
+     * while any of them still holds rows rather than silently omitting those
+     * memories.
      */
-    legacyCollectionName?: string;
+    legacyCollectionNames?: string[];
     /** Chunking parameters; sensible defaults applied when omitted. */
     chunkOptions?: ChunkOptions;
     /** Where attachment bytes are stored. Defaults to `~/.gemdex/blobs`. */
@@ -139,7 +142,7 @@ export class MemoryStore {
     private embedding: Embedding;
     private db: VectorDatabase;
     private collectionName: string;
-    private legacyCollectionName?: string;
+    private legacyCollectionNames: string[];
     private chunkOptions: ChunkOptions;
     private blobStore: BlobStore;
     private attachmentLimits: AttachmentLimits;
@@ -149,9 +152,12 @@ export class MemoryStore {
         this.embedding = config.embedding;
         this.db = config.vectorDatabase;
         this.collectionName = config.collectionName ?? LOCAL_TEXT_COLLECTION;
-        this.legacyCollectionName = config.legacyCollectionName;
-        if (this.legacyCollectionName === this.collectionName) {
-            throw new Error('The legacy collection must differ from the main collection');
+        this.legacyCollectionNames = [...(config.legacyCollectionNames ?? [])];
+        if (this.legacyCollectionNames.includes(this.collectionName)) {
+            throw new Error('A legacy collection must differ from the main collection');
+        }
+        if (new Set(this.legacyCollectionNames).size !== this.legacyCollectionNames.length) {
+            throw new Error('Legacy collections must be distinct');
         }
         this.chunkOptions = config.chunkOptions ?? {};
         this.blobStore = config.blobStore ?? new FileBlobStore();
@@ -178,7 +184,7 @@ export class MemoryStore {
     }
 
     private get banks(): string[] {
-        return this.legacyCollectionName ? [this.collectionName, this.legacyCollectionName] : [this.collectionName];
+        return [this.collectionName, ...this.legacyCollectionNames];
     }
 
     private withWriteLock<T>(operation: () => Promise<T>): Promise<T> {
@@ -358,10 +364,10 @@ export class MemoryStore {
         const chunkVectors = await this.embedChunks(chunks);
         await this.ensureCollection();
 
-        // Keep a rollback snapshot when the prior rows may live in the legacy
-        // index: neither table can transactionally commit the other's rows or
-        // the blob store.
-        const previous = this.legacyCollectionName ? await this.queryBanks(
+        // Keep a rollback snapshot when the prior rows may live in a legacy
+        // index: no table can transactionally commit another's rows or the
+        // blob store.
+        const previous = this.legacyCollectionNames.length ? await this.queryBanks(
             `relativePath == '${MemoryStore.escapeLiteral(id)}'`,
             ['id', 'vector', 'content', 'relativePath', 'startLine', 'endLine', 'fileExtension', 'metadata'],
         ) : [];
@@ -596,22 +602,26 @@ export class MemoryStore {
         return dense.map((r) => ({ document: r.document, score: r.score }));
     }
 
-    /** Number of parent memories still stored only in the legacy index. */
+    /** Number of parent memories still stored only in a legacy index. */
     async countLegacyMemories(): Promise<number> {
-        const legacy = this.legacyCollectionName;
-        if (!legacy || !await this.db.hasCollection(legacy)) return 0;
-        const rows = await this.db.query(legacy, '', ['relativePath'], LIST_FETCH_LIMIT);
-        return new Set(rows.map((row) => row.relativePath as string).filter(Boolean)).size;
+        const parents = new Set<string>();
+        for (const legacy of this.legacyCollectionNames) {
+            if (!await this.db.hasCollection(legacy)) continue;
+            const rows = await this.db.query(legacy, '', ['relativePath'], LIST_FETCH_LIMIT);
+            for (const row of rows) if (row.relativePath) parents.add(row.relativePath as string);
+        }
+        return parents.size;
     }
 
     private async assertNoLegacyRows(action: string): Promise<void> {
-        const legacy = this.legacyCollectionName;
-        if (!legacy || !await this.db.hasCollection(legacy)) return;
-        if ((await this.db.query(legacy, '', ['id'], 1)).length === 0) return;
-        throw new Error(
-            `Cannot ${action} yet: some memories are still in the legacy Gemini index. ` +
-            'Run `npx gemdex-mcp migrate` (or Settings → Migrate in the desktop app) to re-embed them locally.',
-        );
+        for (const legacy of this.legacyCollectionNames) {
+            if (!await this.db.hasCollection(legacy)) continue;
+            if ((await this.db.query(legacy, '', ['id'], 1)).length === 0) continue;
+            throw new Error(
+                `Cannot ${action} yet: some memories are still in an older embedding index. ` +
+                'Run `npx gemdex-mcp migrate` (or Settings → Migrate in the desktop app) to re-embed them locally.',
+            );
+        }
     }
 
     /**
@@ -895,7 +905,7 @@ export class MemoryStore {
     }
 
     /**
-     * Move every memory out of the legacy index into the main index. Text
+     * Move every memory out of the legacy indexes into the main index. Text
      * chunks are re-embedded with the main embedding; a parent with no text
      * rows (media-only) gets a single title row. Legacy media rows are dropped
      * — the media is no longer searchable — but parent metadata and blobs are
@@ -910,64 +920,62 @@ export class MemoryStore {
     }
 
     private async migrateLegacyUnlocked(onProgress?: (completed: number, total: number) => void): Promise<void> {
-        const legacy = this.legacyCollectionName;
         if (!this.db.upsertHybrid) throw new Error('Migration requires atomic vector upsert support');
-        if (!legacy || !await this.db.hasCollection(legacy)) {
-            onProgress?.(0, 0);
-            return;
-        }
-        // Rows are read in capped pages; a parent split across a page boundary
-        // is finished on the next pass because its main-index rows already exist.
         let completed = 0;
         let total = await this.countLegacyMemories();
         onProgress?.(0, total);
-        for (;;) {
-            const rows = await this.db.query(legacy, '',
-                ['id', 'content', 'relativePath', 'startLine', 'endLine', 'fileExtension', 'metadata'], LIST_FETCH_LIMIT);
-            if (rows.length === 0) return;
-            const parents = new Map<string, Record<string, any>[]>();
-            for (const row of rows) {
-                const parentId = row.relativePath as string;
-                if (!parentId) continue;
-                const parent = parents.get(parentId) ?? [];
-                parent.push(row);
-                parents.set(parentId, parent);
-            }
-            if (parents.size === 0) return;
-            for (const [parentId, parentRows] of parents) {
-                const unique = [...new Map(parentRows.map(row => [row.id as string, row])).values()];
-                const textRows = unique.filter(row => !(row.id as string).startsWith(`${parentId}::att::`));
-                const metadata = this.parseMetadata(unique[0].metadata);
-                const inMain = await this.db.hasCollection(this.collectionName) && (await this.db.query(
-                    this.collectionName, `relativePath == '${MemoryStore.escapeLiteral(parentId)}'`, ['id'], 1)).length > 0;
-                const toEmbed = textRows.length > 0 || inMain ? textRows : [{
-                    id: MemoryStore.chunkRowId(parentId, 0),
-                    content: this.rowToParentMeta(metadata).title,
-                    relativePath: parentId,
-                    startLine: 0,
-                    endLine: 1,
-                    fileExtension: '',
-                    metadata,
-                }];
-                if (toEmbed.length > 0) {
-                    const vectors = await this.embedChunks(toEmbed.map(row => row.content as string));
-                    const documents: VectorDocument[] = toEmbed.map((row, index) => ({
-                        id: row.id as string,
-                        content: row.content as string,
-                        vector: vectors[index].vector,
-                        relativePath: parentId,
-                        startLine: Number(row.startLine),
-                        endLine: Number(row.endLine),
-                        fileExtension: typeof row.fileExtension === 'string' ? row.fileExtension : '',
-                        metadata: this.parseMetadata(row.metadata),
-                    }));
-                    await this.ensureCollection();
-                    await this.db.upsertHybrid(this.collectionName, documents);
+        for (const legacy of this.legacyCollectionNames) {
+            if (!await this.db.hasCollection(legacy)) continue;
+            // Rows are read in capped pages; a parent split across a page boundary
+            // is finished on the next pass because its main-index rows already exist.
+            for (;;) {
+                const rows = await this.db.query(legacy, '',
+                    ['id', 'content', 'relativePath', 'startLine', 'endLine', 'fileExtension', 'metadata'], LIST_FETCH_LIMIT);
+                if (rows.length === 0) break;
+                const parents = new Map<string, Record<string, any>[]>();
+                for (const row of rows) {
+                    const parentId = row.relativePath as string;
+                    if (!parentId) continue;
+                    const parent = parents.get(parentId) ?? [];
+                    parent.push(row);
+                    parents.set(parentId, parent);
                 }
-                await this.db.delete(legacy, unique.map(row => row.id as string));
-                completed += 1;
-                total = Math.max(total, completed);
-                onProgress?.(completed, total);
+                if (parents.size === 0) break;
+                for (const [parentId, parentRows] of parents) {
+                    const unique = [...new Map(parentRows.map(row => [row.id as string, row])).values()];
+                    const textRows = unique.filter(row => !(row.id as string).startsWith(`${parentId}::att::`));
+                    const metadata = this.parseMetadata(unique[0].metadata);
+                    const inMain = await this.db.hasCollection(this.collectionName) && (await this.db.query(
+                        this.collectionName, `relativePath == '${MemoryStore.escapeLiteral(parentId)}'`, ['id'], 1)).length > 0;
+                    const toEmbed = textRows.length > 0 || inMain ? textRows : [{
+                        id: MemoryStore.chunkRowId(parentId, 0),
+                        content: this.rowToParentMeta(metadata).title,
+                        relativePath: parentId,
+                        startLine: 0,
+                        endLine: 1,
+                        fileExtension: '',
+                        metadata,
+                    }];
+                    if (toEmbed.length > 0) {
+                        const vectors = await this.embedChunks(toEmbed.map(row => row.content as string));
+                        const documents: VectorDocument[] = toEmbed.map((row, index) => ({
+                            id: row.id as string,
+                            content: row.content as string,
+                            vector: vectors[index].vector,
+                            relativePath: parentId,
+                            startLine: Number(row.startLine),
+                            endLine: Number(row.endLine),
+                            fileExtension: typeof row.fileExtension === 'string' ? row.fileExtension : '',
+                            metadata: this.parseMetadata(row.metadata),
+                        }));
+                        await this.ensureCollection();
+                        await this.db.upsertHybrid(this.collectionName, documents);
+                    }
+                    await this.db.delete(legacy, unique.map(row => row.id as string));
+                    completed += 1;
+                    total = Math.max(total, completed);
+                    onProgress?.(completed, total);
+                }
             }
         }
     }

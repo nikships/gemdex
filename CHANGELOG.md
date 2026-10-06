@@ -5,6 +5,12 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Changed
+- **Breaking: the local model is now EmbeddingGemma 2** (`mlx-community/embeddinggemma-2-8bit`, text encoder only, 768 dimensions, Apache-2.0), replacing BGE-M3. Google reports clearly better code and technical retrieval at the same multilingual text accuracy as EmbeddingGemma 1.
+  - **Upgrading from 1.0.48 (BGE-M3) or a Gemini-based release:** run `npx gemdex-mcp install` (a new ~1.3 GB download), then `npx gemdex-mcp migrate`, or use Settings → Storage & Models in the app. Migration re-embeds memories from both older tables (`memories_mlx_bge_m3_8bit`, then `memories`) into `memories_mlx_embeddinggemma2_8bit`, keeping text, titles, timestamps, and attachments. Until you install, tools return setup guidance. Until you migrate, recall and hygiene stay unavailable.
+  - Queries and stored memories use EmbeddingGemma 2's retrieval prompts, mean pooling, and normalization. The worker loads mlx-vlm's unmodified text encoder, pinned by hash, on MLX 0.32.3. It installs no other Python packages.
+  - The default similarity threshold for hygiene clustering and save-time "similar memory" hints is now **0.93** (was 0.90). EmbeddingGemma 2 scores pairs higher; on a real 1,463-memory store, 0.93 flags as many pairs as the old default did.
+  - Model downloads now fail only after 2 minutes without progress, instead of after 10 minutes in total, so slow connections can finish the 1.2 GB weights file.
+  - The previous BGE-M3 runtime under `~/.gemdex/mlx/` is not removed automatically. Delete it once every Gemdex client is upgraded.
 - **Breaking: the npx package (`gemdex-mcp`) and the macOS app are local-only and run without Gemini.**
   - **Embeddings run on-device only**, using BGE-M3 via MLX on Apple Silicon. `npx gemdex-mcp install` downloads the managed runtime and model. You no longer need `GEMINI_API_KEY`, and there is no embedding-provider switch.
   - **Chat-history ingestion and memory hygiene use Claude Code.** Both call `claude -p --model haiku` with structured JSON output and your existing Claude Code login. Each call runs fully isolated: no tools, no user settings, skills, MCP servers, hooks, or `CLAUDE.md`, no session persistence, and a throwaway working directory. `ingest-history` and the desktop app keep the same progress display. Cost estimates use Haiku list prices. On a Claude subscription, usage counts against your plan limits and is not billed per token. Gemini batch digestion no longer exists.
