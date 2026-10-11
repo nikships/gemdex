@@ -60,20 +60,6 @@ For another MCP client:
 }
 ```
 
-### Upgrade from earlier releases
-
-Releases before EmbeddingGemma 2 used BGE-M3 (`memories_mlx_bge_m3_8bit`) or,
-earlier, Gemini (`memories`). After upgrading, run `npx gemdex-mcp install`
-again (the new model is a separate download), then `npx gemdex-mcp migrate`.
-Migration re-embeds memories from both older tables into
-`memories_mlx_embeddinggemma2_8bit`, preserving text, titles, timestamps and
-attachment bytes. Installation alone does not migrate.
-
-Recall and hygiene refuse to run while legacy rows remain. List/get/update/
-delete/export remain available after installation. Migration reports progress
-and is rerunnable. Legacy media blobs remain readable but are not
-media-searchable; back up your store before migrating.
-
 ### Save and recall
 
 Ask your agent to save something durable:
@@ -94,7 +80,6 @@ Tell your agent when to use memory in its instructions:
 ## Memory
 
 Use Gemdex recall to find relevant memories before starting work.
-Recall returns titles and ids; use get_memory only for useful hits.
 Save reusable findings and update existing memories when correcting them.
 Report worked/failed/stale outcomes after acting on a fetched memory.
 Use read_attachment for transcript bytes.
