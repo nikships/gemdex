@@ -12,11 +12,19 @@ import {
 import { resolveAttachmentInputs } from "./attachment-path.js";
 import { errorMessage } from "./errors.js";
 
-type ToolResult = { content: Array<{ type: "text"; text: string }>; isError?: boolean };
+type TextContent = { type: "text"; text: string };
+type ImageContent = { type: "image"; data: string; mimeType: string };
+/** Text always comes first; `read_attachment` may follow it with a viewable image. */
+type ToolResult = { content: [TextContent, ...ImageContent[]]; isError?: boolean };
 
 function textResult(text: string, isError = false): ToolResult {
     return { content: [{ type: "text", text }], ...(isError && { isError: true }) };
 }
+
+/** Image types MCP clients render as viewable images in a tool result. */
+const VIEWABLE_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+/** Largest image returned as viewable content; clients reject larger images (e.g. Claude's 5 MB cap). */
+export const MAX_VIEWABLE_IMAGE_BYTES = 5 * 1024 * 1024;
 
 /** Default max characters returned by `read_attachment` (~1.5 MiB of UTF-8 text). */
 export const DEFAULT_READ_ATTACHMENT_MAX_CHARS = 1_500_000;
@@ -252,10 +260,16 @@ export class MemoryToolHandlers {
      */
     async handleRecall(args: any): Promise<ToolResult> {
         const query = typeof args?.query === 'string' ? args.query.trim() : '';
-        if (query.length === 0) {
-            return textResult("Error: 'query' is required.", true);
+        const parsed = parseAttachments(args?.attachments);
+        if ('error' in parsed) return parsed.error;
+        const attachments = parsed.attachments ?? [];
+        if (query.length === 0 && attachments.length === 0) {
+            return textResult("Error: provide 'query', at least one file in 'attachments', or both.", true);
         }
-        const label = `"${query}"`;
+        const files = attachments.length > 0
+            ? `${attachments.length} ${attachments.length === 1 ? 'file' : 'files'}`
+            : '';
+        const label = [query && `"${query}"`, files].filter(Boolean).join(' + ');
         // Read once per call: an unparseable/missing value is simply "not
         // 'true'" => off, so ranking stays byte-identical to backend order
         // whenever the flag is unset.
@@ -266,7 +280,8 @@ export class MemoryToolHandlers {
             const fetchLimit = trustRankingEnabled
                 ? Math.min(Math.max(RECALL_FIXED_LIMIT * 2, RECALL_FIXED_LIMIT + 5), 100)
                 : RECALL_FIXED_LIMIT;
-            const fetched = await this.store.recall(query, fetchLimit);
+            const queryMedia = attachments.length > 0 ? await resolveAttachmentInputs(attachments) : undefined;
+            const fetched = await this.store.recall(query, fetchLimit, queryMedia);
             const results = trustRankingEnabled
                 ? this.applyTrustRanking(fetched).slice(0, RECALL_FIXED_LIMIT)
                 : fetched;
@@ -481,6 +496,16 @@ export class MemoryToolHandlers {
                 `byteLength: ${bytes.byteLength}`,
                 ...(bytes.caption ? [`caption: ${bytes.caption}`] : []),
             ].join('\n');
+
+            const imageMime = bytes.mimeType.toLowerCase();
+            if (VIEWABLE_IMAGE_MIME_TYPES.has(imageMime) && bytes.byteLength <= MAX_VIEWABLE_IMAGE_BYTES) {
+                return {
+                    content: [
+                        { type: "text", text: `${header}\nencoding: image` },
+                        { type: "image", data: bytes.data.toString('base64'), mimeType: imageMime },
+                    ],
+                };
+            }
 
             if (isTextishMime(bytes.mimeType)) {
                 const text = bytes.data.toString('utf8');

@@ -23,6 +23,7 @@ import {
     factoryPresetFolder,
     getMlxStatus,
     handleMemoryApiRequest,
+    LOCAL_ATTACHMENT_BODY_LIMIT,
     readBody,
     sendJson,
 } from "gemdex-core";
@@ -585,6 +586,7 @@ export function createServer(ctx: ServeContext): http.Server {
             const handled = await handleMemoryApiRequest(req, res, {
                 store: ctx.store,
                 corsHeaders,
+                attachmentBodyLimit: LOCAL_ATTACHMENT_BODY_LIMIT,
             });
             if (!handled) {
                 sendJson(res, 404, { error: `No route for ${method} ${pathname}` }, corsHeaders);

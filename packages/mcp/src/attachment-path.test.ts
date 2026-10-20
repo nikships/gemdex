@@ -55,11 +55,19 @@ test("honors an explicit mimeType override for a path attachment", async () => {
     assert.equal(attachment.mimeType, "text/plain");
 });
 
-test("media extensions still resolve here; the text-only store is what rejects them", async () => {
-    // Resolution is transport only. Rejecting media happens in the core store
-    // (see handlers-attachments.test.ts), so the agent gets one clear error.
-    const [attachment] = await resolveAttachmentInputs([{ path: fixture("shot.png", Buffer.from([0x89, 0x50, 0x4e, 0x47])) }]);
-    assert.equal(attachment.mimeType, "image/png");
+test("infers image, audio and video mimeTypes from the extension", async () => {
+    const cases: Array<[string, string]> = [
+        ["shot.png", "image/png"],
+        ["photo.webp", "image/webp"],
+        ["memo.m4a", "audio/mp4"],
+        ["take.flac", "audio/flac"],
+        ["demo.mov", "video/quicktime"],
+        ["talk.webm", "video/webm"],
+    ];
+    for (const [name, mimeType] of cases) {
+        const [attachment] = await resolveAttachmentInputs([{ path: fixture(name, "bytes") }]);
+        assert.equal(attachment.mimeType, mimeType, name);
+    }
 });
 
 test("passes inline base64 data through untouched", async () => {
@@ -90,20 +98,22 @@ test("rejects a missing file", async () => {
 });
 
 test("rejects a path with an unknown extension and no explicit mimeType", async () => {
-    const file = fixture("notes.gif", "hi");
+    const file = fixture("archive.zip", "hi");
     await assert.rejects(
         () => resolveAttachmentInputs([{ path: file }]),
         (err: unknown) => err instanceof AttachmentValidationError
             && /could not infer mimeType/.test((err as Error).message)
-            && /\.txt/.test((err as Error).message),
+            && /\.txt/.test((err as Error).message)
+            && /\.m4a/.test((err as Error).message)
+            && !/\.pdf/.test((err as Error).message),
     );
 });
 
 test("rejects an oversized file via stat before reading", async () => {
     const file = path.join(tmp, "big.txt");
-    // One byte over the 20 MiB per-attachment ceiling; sparse so the test stays fast.
+    // One byte over the 100 MiB local per-attachment ceiling; sparse so the test stays fast.
     const fd = fs.openSync(file, "w");
-    fs.ftruncateSync(fd, 20 * 1024 * 1024 + 1);
+    fs.ftruncateSync(fd, 100 * 1024 * 1024 + 1);
     fs.closeSync(fd);
     await assert.rejects(
         () => resolveAttachmentInputs([{ path: file }]),
