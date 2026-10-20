@@ -52,7 +52,7 @@ Usage:
   gemdex ingest-history [--source claude|factory|codex|antigravity|PATH]... [--model MODEL] [--dry-run]
 
 install downloads the managed Python/MLX runtime and the pinned EmbeddingGemma 2
-model (Apple Silicon only, ~1.3 GB). It is the only step that downloads anything.
+model (Apple Silicon only, ~1.45 GB). It is the only step that downloads anything.
 
 migrate re-embeds memories saved by earlier BGE-M3 or Gemini-based releases into
 the current model. Their text, titles, timestamps and attachment files are kept.

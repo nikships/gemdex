@@ -14,7 +14,8 @@ claude mcp add gemdex -- npx -y gemdex-mcp@latest
 ```
 
 Installation explicitly downloads managed Python/MLX and pinned
-`mlx-community/embeddinggemma-2-8bit` weights, about 1.3 GB in total. No preinstalled Python,
+`mlx-community/embeddinggemma-2-8bit` weights, about 1.45 GB to download and 1.9 GB
+on disk. No preinstalled Python,
 uv, Homebrew, compiler, or model tooling is needed. Embeddings run offline
 after installation. There is no API key, provider switch, or remote backend
 setting. Before installation all seven tools return setup guidance.
@@ -39,6 +40,10 @@ and desktop sidecar manage only the local pool.
 
 ### Upgrade from earlier releases
 
+From the previous (text-only) EmbeddingGemma 2 release, run `npx gemdex-mcp install`
+once more: the runtime now includes the vision and audio towers, and the 1.2 GB
+weights are reused locally. No migration is needed; text vectors are unchanged.
+
 Earlier releases stored BGE-M3 vectors in `memories_mlx_bge_m3_8bit` or Gemini
 vectors in `memories`. After upgrading, run `npx gemdex-mcp install` (the
 EmbeddingGemma 2 model is a new download), then `npx gemdex-mcp migrate` to
@@ -48,8 +53,9 @@ migration is safe to rerun.
 
 Recall and hygiene refuse to run while legacy rows remain, avoiding incomplete
 results. List/get/update/delete/export remain available after installation.
-Migration preserves text, titles, timestamps and attachment blobs. Legacy
-media is readable but is not embedded or searchable as media.
+Migration preserves text, titles, timestamps and attachment blobs, and embeds
+legacy images, audio and video from their blobs. Legacy PDFs stay readable but
+unsearchable.
 
 ## CLI
 
@@ -88,24 +94,28 @@ the distinction between local ingestion and server-side uploads.
 
 | Tool | Behavior |
 |------|----------|
-| `save_memory` | Save text and/or text-file attachments; return id and title |
-| `recall` | Text query, fixed top-10 title index, never full bodies |
+| `save_memory` | Save text and/or image, audio, video and text-file attachments; return id and title |
+| `recall` | Text query and/or example media files, fixed top-10 title index, never full bodies |
 | `get_memory` | Open a full parent by id; increment recall stats |
 | `update_memory` | Replace content or apply literal `edits`; preserve omitted fields |
 | `report_outcome` | Record `worked`, `failed`, or `stale` in the client stats ledger |
-| `read_attachment` | Read a memory's attachment bytes as UTF-8 or base64 |
+| `read_attachment` | Read an attachment as UTF-8 text, a viewable image, or base64 |
 | `delete_memory` | Permanently delete a memory and clear its client stats |
 
 Prefer updates for corrections and delete only when the memory should be gone.
 HTTP MCP is a separate six-tool surface without delete.
 
-New local attachments are text files only: `.txt`, `.json`, `.jsonl`/`.ndjson`.
-Pass a local `path` (preferred) or inline base64 `data` and `mimeType`.
-Accepted MIME types: `text/plain`, `application/json`, `application/jsonl`,
-`application/x-ndjson`, `text/x-jsonl`. The limit is four files per memory,
-20 MiB each. File bytes are never embedded. Images, audio, video, PDF and media
-recall queries are unsupported. Omitting attachments on update preserves them;
-`attachments:[]` clears them.
+Attachments are a local `path` (preferred) or inline base64 `data` and
+`mimeType`. Images (`.png` `.jpg` `.webp` `.gif`), audio (`.wav` `.mp3` `.m4a`
+`.flac` `.aac` `.aiff`, up to 5 minutes) and video (`.mp4` `.mov` `.m4v` `.webm`)
+are embedded on-device, one row per file, in the same space as text. Text files
+(`.txt` `.json` `.jsonl` `.ndjson`) are stored as non-embedded blobs. Per
+memory: 8 images, 4 audio files, 2 videos, 4 text files, 100 MiB each. A
+`caption` is optional and adds keyword matching. PDFs are not supported.
+`recall` accepts the same image/audio/video items as `attachments` to search by
+example, with or without `query`. `read_attachment` returns PNG/JPEG/WebP/GIF
+images up to 5 MB as MCP image content. Omitting attachments on update
+preserves them (and re-embeds their media); `attachments:[]` clears them.
 
 ## Desktop sidecar
 

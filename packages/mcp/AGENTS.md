@@ -34,7 +34,8 @@ release. Its writes use temporary files and user-only permissions.
 - `createMemoryBackend` always uses EmbeddingGemma 2 via MLX. There is no provider
   selector, API-key sentinel, or network storage configuration.
 - Installation is explicit (`npx gemdex-mcp install`), Apple Silicon only,
-  about 1.3 GB for managed Python/MLX and pinned model weights. Normal inference
+  about 1.45 GB download (1.9 GB on disk) for managed Python, the full mlx-vlm
+  runtime and pinned model weights. Normal inference
   never downloads. See [runtime constraints](../../docs/MLX_MODELS.md) before
   changing the installer.
 - All seven tools remain discoverable before installation and return setup
@@ -46,12 +47,12 @@ release. Its writes use temporary files and user-only permissions.
   Recall and hygiene refuse to run while legacy rows remain; list/get/update/
   delete/export remain available once the model is installed. Preserve legacy
   attachment bytes and timestamps. Do not compare vectors across these tables.
-- New attachments are non-embedded `file` blobs only: `.txt`, `.json`,
-  `.jsonl`/`.ndjson`. Accepted MIME types are `text/plain`, `application/json`,
-  `application/jsonl`, `application/x-ndjson`, `text/x-jsonl`.
-  Limit: four files per memory, 20 MiB each. A local `path` is preferred over
-  inline base64 `data` + `mimeType`. New image/audio/video/PDF attachments and
-  media recall queries are rejected. Legacy media can remain readable.
+- Attachments follow core's `LOCAL_ATTACHMENT_LIMITS`: images, audio and
+  video are embedded (one row each); `.txt`, `.json`, `.jsonl`/`.ndjson` are
+  non-embedded `file` blobs; PDFs are rejected. 100 MiB per file;
+  `attachment-path.ts` stat-guards a `path` against that before reading it. A
+  local `path` is preferred over inline base64 `data` + `mimeType`. `recall`
+  accepts image/audio/video example files through the same resolver.
 
 ## Sidecar contract
 
@@ -98,8 +99,10 @@ Data routes delegate to core: `GET|POST /memories`,
 `GET|PUT|PATCH|DELETE /memories/:id`,
 `GET /memories/:id/attachments/:attachmentId`,
 `PATCH /memories/:id/attachments`, `POST /recall`, `GET /export`,
-`POST /import`. Recall is text-only here. Body limits are 50 MiB by default,
-100 MiB for attachment-bearing core routes; oversize is 413, invalid JSON 400.
+`POST /import`. `POST /recall` takes a text `query` and/or media
+`attachments`. Body limits are 50 MiB by default and
+`LOCAL_ATTACHMENT_BODY_LIMIT` (256 MiB) for attachment-bearing core routes;
+oversize is 413, invalid JSON 400.
 
 ## Inference and ingestion
 
@@ -118,8 +121,10 @@ job/collect path exists. `backfill-transcripts` uses list + per-id get, not
 
 - Handlers return readable `{content, isError:true}` on failure, never throw
   through the protocol.
-- `recall(query)` returns a fixed top-10 title index, never bodies or media
-  queries. `get_memory(id)` opens the full parent and increments recall stats.
+- `recall(query?, attachments?)` returns a fixed top-10 title index, never
+  bodies; at least one of the two is required.
+- `read_attachment` returns PNG/JPEG/WebP/GIF images up to 5 MB as an MCP
+  `image` block after the text header; other binary media stays base64 text. `get_memory(id)` opens the full parent and increments recall stats.
 - `update_memory` preserves omitted fields; `attachments:[]` clears them.
   `edits` and full `content` are mutually exclusive. Literal edits are applied
   after get, then update, so this read-modify-write is last-write-wins.

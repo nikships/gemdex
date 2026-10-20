@@ -32,16 +32,19 @@ console.log(hits[0]?.content); // whole parent, never a fragment
 ```
 
 `MemoryStore` indexes chunks in `memories_mlx_embeddinggemma2_8bit` (768d) and resolves
-hybrid dense + BM25 matches to full parents. Its attachments are non-embedded
-text-file blobs; media queries and new media attachments are unsupported.
+hybrid dense + BM25 matches to full parents. Image, audio and video attachments
+are embedded from their bytes into the same space (one row per file), text-file
+attachments are non-embedded blobs, and `recall(query, limit, queryAttachments)`
+also searches by example media.
 
 ### Upgrade from earlier releases
 
 Pass `legacyCollectionNames: [LEGACY_BGE_M3_COLLECTION, LEGACY_GEMINI_COLLECTION]`
 to access the older BGE-M3 and Gemini tables. List/get/update/delete/export can access legacy parents;
 recall and hygiene reject while any legacy table is populated. `memory.migrateLegacy()`
-re-embeds text (or the title of a media-only parent), preserving timestamps,
-metadata and blob bytes. Legacy media remains readable, not media-searchable.
+re-embeds text and stored image/audio/video blobs (a title row for a parent with
+nothing else to embed), preserving timestamps, metadata and blob bytes. Legacy
+PDFs remain readable, not searchable.
 Back up the store before migration.
 
 ## Shared server functionality
