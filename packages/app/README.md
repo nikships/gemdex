@@ -16,7 +16,7 @@ server mode and no API key.
 
 - **Embeddings** run on this Mac with EmbeddingGemma 2 on MLX (text, images, audio and video share one vector space). On first run
   the setup screen offers an explicit, confirmed install of the MLX runtime and
-  model (about 1.3 GB, Apple Silicon required). The memory manager unlocks once
+  model (about 1.5 GB to download and 1.9 GB on disk, Apple Silicon required). The memory manager unlocks once
   the model is installed.
 - **Storage & Models** settings show the local model status and the install
   control. When memories saved with an earlier embedding model (BGE-M3 or Gemini) remain,
@@ -54,8 +54,12 @@ type, too many files, too large) inline.
 
 Accepted types: images `png jpg jpeg webp gif`; audio `mp3 wav flac m4a aac
 aiff aif`; video `mp4 mov m4v webm`; files `txt json jsonl ndjson`. PDF is not
-supported locally. The sidecar enforces the limits (up to 8 images, 4 audio, 2
-video, and 4 files per memory; 100 MiB per attachment; audio up to 5 minutes).
+supported locally, and the app says so when you pick one (as it does for any
+other unsupported file type). The sidecar enforces the limits (up to 8 images,
+4 audio, 2 video, and 4 files per memory; 100 MiB per attachment; audio up to 5
+minutes). One save is also capped at 256 MiB in total (attachments are sent as
+base64), so the editor warns before sending when several large files add up to
+more than that.
 
 Stored attachments show inline: an image thumbnail, or a playable audio/video
 player (AVKit; formats macOS can't play, such as WebM, fall back to **Open**).

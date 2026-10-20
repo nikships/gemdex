@@ -346,10 +346,13 @@ final class AppModel: ObservableObject {
 
     /// Use `url` (an image, audio or video file) as the search query and run it.
     func searchByFile(_ url: URL) async {
-        guard let mediaType = MediaTypes.lookup(url: url), mediaType.kind != .file else {
-            setStatus("Search by file supports images, audio and video.", isError: true)
+        if let reason = MediaTypes.rejection(for: url, mediaOnly: true) {
+            searchGeneration += 1
+            searchState = .failed(reason)
+            setStatus("Search failed: \(reason)", isError: true)
             return
         }
+        guard let mediaType = MediaTypes.lookup(url: url) else { return }
         searchFile = SearchFile(url: url, mediaType: mediaType)
         await runSearch()
     }

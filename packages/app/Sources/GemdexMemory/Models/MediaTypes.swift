@@ -58,6 +58,38 @@ enum MediaTypes {
 
     static func lookup(url: URL) -> MediaType? { lookup(extension: url.pathExtension) }
 
+    /// Why `url` can't be attached or searched with, or nil when its extension
+    /// is accepted. `mediaOnly` is for search by file, which embeds media only.
+    static func rejection(for url: URL, mediaOnly: Bool = false) -> String? {
+        let ext = url.pathExtension.lowercased()
+        let name = url.lastPathComponent
+        if ext == "pdf" {
+            return "\(name): PDFs are not supported locally. Use an image, audio, video or text/JSON file."
+        }
+        guard let type = lookup(extension: ext) else {
+            let shown = ext.isEmpty ? "no file extension" : ".\(ext)"
+            let list = (mediaOnly ? searchableExtensions : attachableExtensions).joined(separator: ", ")
+            return "\(name): unsupported file type (\(shown)). Supported: \(list)."
+        }
+        if mediaOnly && type.kind == .file {
+            return "\(name): search by file needs an image, audio or video file."
+        }
+        return nil
+    }
+
+    /// One sidecar request body is capped at 256 MiB, and attachments travel as
+    /// base64 (4/3 of the raw size), so a save with several big files can exceed
+    /// it even when each file is under 100 MiB.
+    static let maxRequestBytes = 256 * 1024 * 1024
+
+    /// Error text when `rawBytes` of attachments would not fit in one request, else nil.
+    static func requestSizeProblem(rawBytes: Int) -> String? {
+        let encoded = (rawBytes + 2) / 3 * 4
+        guard encoded > maxRequestBytes else { return nil }
+        let mib = { (bytes: Int) in String(format: "%.0f MiB", Double(bytes) / 1_048_576) }
+        return "These attachments add up to \(mib(rawBytes)), more than one save can carry (about \(mib(maxRequestBytes / 4 * 3)) of files, since they are sent as base64). Attach fewer or smaller files."
+    }
+
     /// Mirrors the sidecar's per-memory and per-file limits as a UI hint only.
     static let limitsHint =
         "Up to 8 images, 4 audio, 2 video and 4 text/JSON files per memory · 100 MiB each · audio up to 5 minutes."

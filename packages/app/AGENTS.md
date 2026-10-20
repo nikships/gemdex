@@ -143,7 +143,7 @@ the model embeds the files before the sidecar answers.
 `SetupView` and the **Storage & Models** panel share `EmbeddingModelPanel`:
 status (`not-installed | installed | installing | migrating | error`), model id,
 message, and determinate progress. `POST /settings/embedding/install`
-(~1.3 GB download, Apple Silicon only) requires a confirmation alert, answers
+(~1.5 GB download, ~1.9 GB on disk: the full mlx-vlm runtime with vision and audio; Apple Silicon only) requires a confirmation alert, answers
 `202`, and is polled through `GET /settings/embedding`; `409` means a job is
 already running and the app reconciles by polling. When it finishes,
 `syncConfigGate()` re-runs so a fresh install mounts the manager.
@@ -220,10 +220,15 @@ binary directly (not `open`) against a local sidecar build with
   `bootstrap(install: true)`; MLX runtime/model downloads separately require the
   confirmed install action in Setup or Storage & Models. Neither happens
   silently.
-- Attachments are created and edited from the editor (Attach…). The UI only
-  filters by extension; unsupported types, per-memory counts, size and audio
-  length limits are enforced by the sidecar (400/413) and its message is shown
-  as-is. PDF is not supported locally. Previews load bytes via
+- Attachments are created and edited from the editor (Attach…). The open
+  panels are deliberately not type-filtered: `MediaTypes.rejection(for:)`
+  refuses unsupported extensions (PDF gets its own "not supported locally"
+  message) with an inline explanation instead of greying files out. Per-memory
+  counts, per-file size and audio length limits are enforced by the sidecar
+  (400) and its message is shown as-is. One request body is capped at 256 MiB
+  and attachments travel as base64, so `EditorModel` checks the total
+  (`MediaTypes.requestSizeProblem`) before sending; a sidecar 413 is also
+  shown as a readable message. Previews load bytes via
   `GET /memories/:id/attachments/:attachmentId` (audio/video go through a temp
   file for AVKit); a memory may be saved with no text when it has attachments.
 - Sparkle/updater code is gated behind `#if SPARKLE_ENABLED`; dev/CI builds need

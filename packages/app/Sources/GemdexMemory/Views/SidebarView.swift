@@ -1,6 +1,5 @@
 import SwiftUI
 import AppKit
-import UniformTypeIdentifiers
 
 /// Source-list of memories with a search box. Typing filters loaded titles
 /// client-side; pressing Return runs semantic free-text recall (`POST /recall`)
@@ -89,7 +88,6 @@ struct SidebarView: View {
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
-        panel.allowedContentTypes = MediaTypes.searchableExtensions.compactMap { UTType(filenameExtension: $0) }
         panel.message = "Choose an image, audio or video file to search by."
         guard panel.runModal() == .OK, let url = panel.url else { return }
         Task { await model.searchByFile(url) }

@@ -14,7 +14,7 @@ struct SetupView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Install the local embedding model").font(.title3.bold())
-                        Text("Gemdex embeds memories on this Mac with EmbeddingGemma 2 running on MLX. Nothing leaves your machine, and no API key is needed. The download is about 1.3 GB and runs once.")
+                        Text("Gemdex embeds memories on this Mac with EmbeddingGemma 2 running on MLX. Nothing leaves your machine, and no API key is needed. The download is about 1.5 GB (about 1.9 GB on disk) and runs once.")
                             .font(.callout).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -120,7 +120,7 @@ struct EmbeddingModelPanel: View {
             Button("Cancel", role: .cancel) {}
             Button("Download & install") { Task { await model.startEmbeddingJob(.install) } }
         } message: {
-            Text("Downloads the MLX runtime and the EmbeddingGemma 2 model (about 1.3 GB) to this Mac. Requires Apple Silicon. Keep Gemdex running until it finishes.")
+            Text("Downloads the MLX runtime and the EmbeddingGemma 2 model (about 1.5 GB to download, 1.9 GB on disk) to this Mac. Requires Apple Silicon. Keep Gemdex running until it finishes.")
         }
         .alert(migrateTitle, isPresented: $confirmMigration) {
             Button("Cancel", role: .cancel) {}

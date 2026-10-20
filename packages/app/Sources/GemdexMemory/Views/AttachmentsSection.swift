@@ -7,9 +7,7 @@ import AVKit
 /// (optional caption, remove). The "Attach…" button adds pending files; they
 /// are sent when the memory is saved.
 struct AttachmentsSection: View {
-    @EnvironmentObject var model: AppModel
-
-    private var editor: EditorModel { model.editor }
+    @ObservedObject var editor: EditorModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -26,15 +24,21 @@ struct AttachmentsSection: View {
                 .controlSize(.small)
                 .disabled(editor.isSaving)
             }
+            if let notice = editor.attachNotice {
+                Label(notice, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(Brand.terracotta)
+                    .textSelection(.enabled)
+            }
             if editor.attachments.isEmpty && editor.pending.isEmpty {
                 Text("Add images, audio, video or text/JSON files. Media is embedded so it can be found by search; captions are optional and help keyword search.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             ForEach(editor.attachments) { attachment in
-                AttachmentRow(attachment: attachment)
+                AttachmentRow(editor: editor, attachment: attachment)
             }
             ForEach(editor.pending) { file in
-                PendingAttachmentRow(file: file)
+                PendingAttachmentRow(editor: editor, file: file)
             }
             if !editor.attachments.isEmpty || !editor.pending.isEmpty {
                 Text(MediaTypes.limitsHint)
@@ -48,7 +52,8 @@ struct AttachmentsSection: View {
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
-        panel.allowedContentTypes = MediaTypes.attachableExtensions.compactMap { UTType(filenameExtension: $0) }
+        // Not filtered by type: an unsupported file (a PDF, say) is refused with
+        // an explanation instead of being silently greyed out.
         panel.message = "Choose images, audio, video or text/JSON files to attach."
         guard panel.runModal() == .OK else { return }
         editor.addPending(panel.urls)
@@ -61,12 +66,12 @@ struct AttachmentsSection: View {
 /// open/save/remove actions.
 private struct AttachmentRow: View {
     @EnvironmentObject var model: AppModel
+    @ObservedObject var editor: EditorModel
     let attachment: Attachment
 
     @State private var working = false
     @State private var error: String?
 
-    private var editor: EditorModel { model.editor }
     private var isRemoved: Bool { editor.removedIDs.contains(attachment.id) }
 
     var body: some View {
@@ -188,10 +193,8 @@ private struct AttachmentRow: View {
 
 /// A picked file that is not saved yet, with an optional caption.
 private struct PendingAttachmentRow: View {
-    @EnvironmentObject var model: AppModel
+    @ObservedObject var editor: EditorModel
     let file: PendingAttachment
-
-    private var editor: EditorModel { model.editor }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {

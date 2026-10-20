@@ -17,6 +17,8 @@ final class EditorModel: ObservableObject {
     @Published var isSaving = false
     @Published private(set) var saveProgress: String?
     @Published private(set) var saveError: String?
+    /// Why the last picked file(s) were refused (unsupported type, PDF).
+    @Published private(set) var attachNotice: String?
 
     /// nil while composing a brand-new memory.
     private(set) var memoryID: String?
@@ -72,15 +74,21 @@ final class EditorModel: ObservableObject {
         captionDrafts = [:]
         saveError = nil
         saveProgress = nil
+        attachNotice = nil
     }
 
     // MARK: - Attachment edits
 
     func addPending(_ urls: [URL]) {
+        var refused: [String] = []
         for url in urls {
-            guard let mediaType = MediaTypes.lookup(url: url) else { continue }
-            pending.append(PendingAttachment(url: url, mediaType: mediaType))
+            if let reason = MediaTypes.rejection(for: url) {
+                refused.append(reason)
+            } else if let mediaType = MediaTypes.lookup(url: url) {
+                pending.append(PendingAttachment(url: url, mediaType: mediaType))
+            }
         }
+        attachNotice = refused.isEmpty ? nil : refused.joined(separator: "\n")
     }
 
     func removePending(_ id: UUID) { pending.removeAll { $0.id == id } }
@@ -157,6 +165,13 @@ final class EditorModel: ObservableObject {
     /// Full replacement list: kept stored attachments (bytes re-fetched, id and
     /// caption preserved) followed by the pending files.
     private func buildUploads(memoryID: String?, api: APIClient) async throws -> [AttachmentUpload] {
+        let keptBytes = memoryID == nil ? 0 : keptAttachments.reduce(0) { $0 + $1.byteLength }
+        let pendingBytes = pending.reduce(0) { total, file in
+            total + ((try? file.url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+        }
+        if let problem = MediaTypes.requestSizeProblem(rawBytes: keptBytes + pendingBytes) {
+            throw APIError(status: 413, message: problem)
+        }
         var uploads: [AttachmentUpload] = []
         if let memoryID {
             for attachment in keptAttachments {
