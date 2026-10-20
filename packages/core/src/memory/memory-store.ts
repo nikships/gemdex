@@ -423,7 +423,9 @@ export class MemoryStore {
      * into one row each. New media the store cannot embed is refused.
      * `preserveMedia` (update-preserve and import) re-writes files that are
      * already stored: it validates against the looser of the store and server
-     * limits, and keeps any file it cannot embed as an unsearchable blob.
+     * limits, and keeps any file it cannot embed as an unsearchable blob. On an
+     * update with explicit attachments, inputs matching a `storedAttachments`
+     * entry by id and mimeType get the same treatment; the rest are new files.
      * Throws if the resulting memory would be completely empty.
      *
      * Also returns the vectors it just computed so `save` can reuse them for
@@ -436,23 +438,35 @@ export class MemoryStore {
         attachmentsInput: MemoryAttachmentInput[],
         createdAt: number,
         updatedAt: number,
-        options: { preserveMedia?: boolean } = {},
+        options: { preserveMedia?: boolean; storedAttachments?: StoredAttachment[] } = {},
     ): Promise<{ memory: Memory; vectors: EmbeddingVector[] }> {
         const text = content ?? '';
-        const preserve = options.preserveMedia === true;
+        // An input re-sending a file this memory already stores (same id and
+        // mimeType) is held to the stored-file rules, so re-sending a legacy PDF
+        // alongside a newly added image does not fail the update.
+        const stored = new Set((options.storedAttachments ?? []).map((att) => `${att.id}\n${att.mimeType.toLowerCase()}`));
+        const preserved = attachmentsInput.map((att) => options.preserveMedia === true ||
+            (typeof att?.id === 'string' && typeof att.mimeType === 'string' &&
+                stored.has(`${att.id.trim()}\n${att.mimeType.toLowerCase()}`)));
         const validated = attachmentsInput.length > 0
-            ? await validateAttachments(attachmentsInput, preserve ? this.preserveLimits : this.attachmentLimits)
+            ? await validateAttachments(attachmentsInput, preserved.some(Boolean) ? this.preserveLimits : this.attachmentLimits)
             : [];
 
-        if (!preserve) {
-            const unembeddable = validated.find((att) => isEmbeddableAttachmentKind(att.kind) && !this.embedsAttachment(att));
-            if (unembeddable) {
+        const accepted = this.attachmentLimits.mimeTypes ?? SUPPORTED_MIME_TYPES;
+        validated.forEach((att, index) => {
+            if (preserved[index]) return;
+            if (!accepted.includes(att.mimeType.toLowerCase())) {
                 throw new AttachmentValidationError(
-                    `${unembeddable.mimeType} attachments need a multimodal embedding model; ` +
+                    `Unsupported attachment mimeType '${att.mimeType}'. Supported: ${accepted.join(', ')}.`,
+                );
+            }
+            if (isEmbeddableAttachmentKind(att.kind) && !this.embedsAttachment(att)) {
+                throw new AttachmentValidationError(
+                    `${att.mimeType} attachments need a multimodal embedding model; ` +
                     `the current ${this.embedding.getProvider()} model only embeds text.`,
                 );
             }
-        }
+        });
         const embeddable: ValidatedAttachment[] = validated.filter((att) => this.embedsAttachment(att));
 
         // Guard BEFORE any destructive work: an empty payload must never wipe an
@@ -467,9 +481,12 @@ export class MemoryStore {
         // deleting the prior rows/blobs means a failed update/import leaves the
         // existing memory intact instead of destroying it.
         let chunks = text.trim().length > 0 ? chunkMemory(text, this.chunkOptions) : [];
-        const mediaResults = preserve
-            ? await this.embedStoredMedia(embeddable)
-            : await this.embedMedia(embeddable, 'document');
+        const mediaResults: (EmbeddingVector | undefined)[] = [];
+        for (const att of embeddable) {
+            mediaResults.push(preserved[validated.indexOf(att)]
+                ? (await this.embedStoredMedia([att]))[0]
+                : (await this.embedMedia([att], 'document'))[0]);
+        }
         const vectorsByStoredIndex = new Map<number, EmbeddingVector>();
         for (let i = 0; i < embeddable.length; i++) {
             const vector = mediaResults[i];
@@ -849,6 +866,7 @@ export class MemoryStore {
 
         const content = input.content ?? existing.fullContent;
         const preserveMedia = input.attachments === undefined;
+        const storedAttachments = existing.attachments;
         const attachmentsInput = input.attachments ?? await this.attachmentsToInput(existing.attachments);
         const title = input.title ?? existing.title;
 
@@ -858,7 +876,7 @@ export class MemoryStore {
 
         const now = Date.now();
         const { memory } = await this.writeMemory(
-            id, content, title, attachmentsInput, existing.createdAt, now, { preserveMedia });
+            id, content, title, attachmentsInput, existing.createdAt, now, { preserveMedia, storedAttachments });
         return memory;
     }
 

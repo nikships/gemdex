@@ -915,6 +915,27 @@ describe('MemoryStore (multimodal media)', () => {
         expect((await store.get('old-export'))!.attachments.map((a) => a.id)).toEqual(['diagram', 'spec']);
     });
 
+    it('accepts a stored PDF re-sent with a new image on update, but not a new PDF', async () => {
+        const pdf = await PDFDocument.create();
+        pdf.addPage();
+        const pdfData = Buffer.from(await pdf.save()).toString('base64');
+        await store.importRecords([{
+            id: 'with-pdf', title: 'Spec', content: 'spec notes', createdAt: 1, updatedAt: 2,
+            attachments: [{ id: 'spec', mimeType: 'application/pdf', data: pdfData }],
+        }]);
+
+        const updated = await store.update('with-pdf', {
+            attachments: [{ id: 'spec', mimeType: 'application/pdf', data: pdfData }, png('red circle')],
+        });
+        expect(updated.attachments.map((a) => [a.id, a.kind])).toEqual([['spec', 'pdf'], ['1', 'image']]);
+        expect((await readRows(db, LOCAL_TEXT_COLLECTION)).map((r) => r.id).sort()).toEqual(['with-pdf::0', 'with-pdf::att::1']);
+
+        await expect(store.update('with-pdf', {
+            attachments: [{ id: 'other', mimeType: 'application/pdf', data: pdfData }],
+        })).rejects.toThrow(/Unsupported attachment mimeType 'application\/pdf'/);
+        expect((await store.get('with-pdf'))!.attachments.map((a) => a.id)).toEqual(['spec', '1']);
+    });
+
     it('keeps preserved media it cannot embed as a blob instead of failing the import', async () => {
         embedding.failMime = 'video/mp4';
         jest.spyOn(console, 'warn').mockImplementation(() => undefined);
@@ -1454,11 +1475,16 @@ describe('MemoryStore (legacy collection + migrateLegacy)', () => {
         expect(retitled.attachments.map((a) => a.id)).toEqual(['diagram']);
         expect((await store.readAttachment(MEDIA_ID, 'diagram'))!.data.equals(IMAGE_BYTES)).toBe(true);
 
-        // Explicitly re-supplying media is a new media write and is refused.
-        await expect(store.update(MEDIA_ID, {
+        // With this text-only embedding, re-sending the stored file keeps it as
+        // a blob, while a new media file is refused.
+        await store.update(MEDIA_ID, {
             attachments: [{ id: 'diagram', mimeType: 'image/png', data: IMAGE_BYTES.toString('base64') }],
-        })).rejects.toThrow(AttachmentValidationError);
+        });
         expect((await store.readAttachment(MEDIA_ID, 'diagram'))!.data.equals(IMAGE_BYTES)).toBe(true);
+        await expect(store.update(MEDIA_ID, {
+            attachments: [{ id: 'diagram', mimeType: 'image/png', data: IMAGE_BYTES.toString('base64') }, png('new image')],
+        })).rejects.toThrow(AttachmentValidationError);
+        expect((await store.get(MEDIA_ID))!.attachments.map((a) => a.id)).toEqual(['diagram']);
 
         // Explicitly clearing attachments removes the media.
         const cleared = await store.update(MEDIA_ID, { attachments: [] });
