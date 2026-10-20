@@ -3,6 +3,8 @@ import {
     validateAttachments,
     AttachmentValidationError,
     SUPPORTED_MIME_TYPES,
+    LOCAL_SUPPORTED_MIME_TYPES,
+    LOCAL_ATTACHMENT_LIMITS,
     SUPPORTED_ATTACHMENT_EXTENSIONS,
     mimeToKind,
     inferMimeTypeFromPath,
@@ -55,8 +57,31 @@ describe('validateAttachments', () => {
     });
 
     it('rejects an unsupported mimeType', async () => {
-        await expect(validateAttachments([{ mimeType: 'image/gif', data: b64('x') }]))
+        await expect(validateAttachments([{ mimeType: 'image/bmp', data: b64('x') }]))
             .rejects.toThrow(AttachmentValidationError);
+        // The server default list is the Gemini set; the local list adds containers Gemini lacks.
+        await expect(validateAttachments([{ mimeType: 'image/gif', data: b64('x') }]))
+            .rejects.toThrow(/Unsupported attachment mimeType 'image\/gif'/);
+    });
+
+    it('applies the local limits: more formats and longer clips, but no PDF', async () => {
+        const local = await validateAttachments([
+            { mimeType: 'image/webp', data: b64('webp') },
+            { mimeType: 'image/gif', data: b64('gif') },
+            { mimeType: 'audio/flac', data: b64('flac') },
+            { mimeType: 'audio/x-m4a', data: b64('m4a') },
+            { mimeType: 'video/webm', data: b64('webm') },
+            { mimeType: 'video/x-m4v', data: b64('m4v') },
+        ], LOCAL_ATTACHMENT_LIMITS);
+        expect(local.map((a) => a.kind)).toEqual(['image', 'image', 'audio', 'audio', 'video', 'video']);
+        await expect(validateAttachments([{ mimeType: 'application/pdf', data: await pdfWithPages(1) }], LOCAL_ATTACHMENT_LIMITS))
+            .rejects.toThrow(/Unsupported attachment mimeType 'application\/pdf'/);
+        const [long] = await validateAttachments([{ mimeType: 'audio/wav', data: wavOfDuration(200) }], LOCAL_ATTACHMENT_LIMITS);
+        expect(long.kind).toBe('audio');
+        await expect(validateAttachments([{ mimeType: 'audio/wav', data: wavOfDuration(301) }], LOCAL_ATTACHMENT_LIMITS))
+            .rejects.toThrow(/over the audio 300s limit/);
+        const threeVideos = Array.from({ length: 3 }, () => ({ mimeType: 'video/mp4', data: b64('v') }));
+        await expect(validateAttachments(threeVideos, LOCAL_ATTACHMENT_LIMITS)).rejects.toThrow(/Too many video/);
     });
 
     it('rejects empty bytes', async () => {
@@ -152,7 +177,7 @@ describe('inferMimeTypeFromPath', () => {
         for (const ext of SUPPORTED_ATTACHMENT_EXTENSIONS) {
             const mime = inferMimeTypeFromPath(`file${ext}`);
             expect(mime).toBeDefined();
-            expect(SUPPORTED_MIME_TYPES).toContain(mime);
+            expect([...SUPPORTED_MIME_TYPES, ...LOCAL_SUPPORTED_MIME_TYPES]).toContain(mime);
         }
     });
 
@@ -164,7 +189,8 @@ describe('inferMimeTypeFromPath', () => {
     it('returns undefined for unknown or missing extensions', () => {
         expect(inferMimeTypeFromPath('notes.txt')).toBe('text/plain');
         expect(inferMimeTypeFromPath('session.jsonl')).toBe('application/x-ndjson');
-        expect(inferMimeTypeFromPath('archive.gif')).toBeUndefined();
+        expect(inferMimeTypeFromPath('voice.m4a')).toBe('audio/mp4');
+        expect(inferMimeTypeFromPath('archive.zip')).toBeUndefined();
         expect(inferMimeTypeFromPath('README')).toBeUndefined();
     });
 });

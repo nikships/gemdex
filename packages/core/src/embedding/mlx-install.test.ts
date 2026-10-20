@@ -41,28 +41,51 @@ describe('managed installer with controlled artifacts/runtime smoke fixture', ()
         Object.defineProperty(process, 'arch', arch);
         await rm(home, { recursive: true, force: true });
     });
-    test('lazy text-only constructor', async () => {
+    test('lazy multimodal constructor', async () => {
         const embedding = new MlxEmbedding({ homeDir: home });
         expect(embedding.getDimension()).toBe(768);
-        expect(embedding.isMultimodal()).toBe(false);
+        expect(embedding.isMultimodal()).toBe(true);
         expect(getMlxStatus(home).installed).toBe(false);
-        await expect(embedding.embedContentBatch([{ inlineData: { mimeType: 'image/png', data: '' } }])).rejects.toThrow('inline media');
+        await expect(embedding.embedContentBatch([{ inlineData: { mimeType: 'image/png', data: 'AA==' } }])).rejects.toThrow('not installed');
         await expect(embedding.embed('text')).rejects.toThrow('not installed');
         expect(fetch).not.toHaveBeenCalled();
     });
     test('queries and documents use their own retrieval prompts', async () => {
         await installMlxModel({ homeDir: home });
         const request = MlxProcess.prototype.request as jest.Mock;
-        expect(request).toHaveBeenLastCalledWith(['Gemdex local embedding installation check'], 'document');
+        // The smoke test embeds text and an image, so it checks the vision tower too.
+        expect(request).toHaveBeenLastCalledWith([
+            { text: 'Gemdex local embedding installation check' },
+            { path: expect.stringMatching(/smoke\.png$/), mimeType: 'image/png' },
+        ], 'document');
         const embedding = new MlxEmbedding({ homeDir: home });
         try {
             await embedding.embedQuery('question');
-            expect(request).toHaveBeenLastCalledWith(['question'], 'query');
+            expect(request).toHaveBeenLastCalledWith([{ text: 'question' }], 'query');
             await embedding.embed('stored memory');
-            expect(request).toHaveBeenLastCalledWith(['stored memory'], 'document');
+            expect(request).toHaveBeenLastCalledWith([{ text: 'stored memory' }], 'document');
             await embedding.embedBatch(['one', 'two']);
-            expect(request).toHaveBeenLastCalledWith(['one', 'two'], 'document');
+            expect(request).toHaveBeenLastCalledWith([{ text: 'one' }, { text: 'two' }], 'document');
         } finally { embedding.close(); }
+    });
+    test('hands media to the worker as private temp files and removes them afterwards', async () => {
+        await installMlxModel({ homeDir: home });
+        const request = MlxProcess.prototype.request as jest.Mock;
+        let seen: { path: string; mimeType: string; mode: number; bytes: string } | undefined;
+        request.mockImplementationOnce(async (inputs: Array<{ path: string; mimeType: string }>) => {
+            const { statSync, readFileSync } = jest.requireActual('node:fs');
+            const [media] = inputs;
+            seen = { ...media, mode: statSync(media.path).mode & 0o777, bytes: readFileSync(media.path, 'utf8') };
+            return [[1, ...Array(767).fill(0)]];
+        });
+        const embedding = new MlxEmbedding({ homeDir: home });
+        try {
+            await embedding.embedQueryContentBatch([{ inlineData: { mimeType: 'audio/x-m4a', data: Buffer.from('m4a').toString('base64') } }]);
+        } finally { embedding.close(); }
+        expect(request).toHaveBeenLastCalledWith([expect.objectContaining({ mimeType: 'audio/x-m4a' })], 'query');
+        expect(seen).toEqual(expect.objectContaining({ mimeType: 'audio/x-m4a', mode: 0o600, bytes: 'm4a' }));
+        expect(seen!.path).toMatch(/\.m4a$/);
+        expect(existsSync(seen!.path)).toBe(false);
     });
     test('refuses unsupported platforms before writes/downloads', async () => {
         Object.defineProperty(process, 'platform', { value: 'linux' });
@@ -96,7 +119,7 @@ describe('managed installer with controlled artifacts/runtime smoke fixture', ()
         embedding.close();
         await expect(overflow).rejects.toThrow('queue is full');
         expect((await settled).every(result => result.status === 'rejected')).toBe(true);
-        await expect(embedding.embedBatch(Array(257).fill(''))).rejects.toThrow('256 texts');
+        await expect(embedding.embedBatch(Array(257).fill(''))).rejects.toThrow('256 inputs');
         await expect(embedding.embed('x'.repeat(1024 * 1024 + 1))).rejects.toThrow('1 MiB');
     });
     test('offline failure cleans partial/lock, retries; smoke failure never marks installed', async () => {

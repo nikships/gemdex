@@ -93,6 +93,14 @@ export abstract class Embedding {
     }
 
     /**
+     * Embed text or media used as a search query. Providers with a query-only
+     * instruction override this; the default embeds it like stored content.
+     */
+    embedQueryContentBatch(contents: EmbeddingContent[]): Promise<EmbeddingVector[]> {
+        return this.embedContentBatch(contents);
+    }
+
+    /**
      * Get embedding vector dimension
      * @returns Vector dimension
      */

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { createReadStream, createWriteStream, existsSync, readFileSync } from 'node:fs';
-import { mkdir, readFile, rename, rm, writeFile, stat, readdir, readlink } from 'node:fs/promises';
+import { constants, createReadStream, createWriteStream, existsSync, readFileSync } from 'node:fs';
+import { copyFile, mkdir, readFile, rename, rm, writeFile, stat, readdir, readlink } from 'node:fs/promises';
 import { homedir, release } from 'node:os';
 import { join, dirname } from 'node:path';
 import { Readable } from 'node:stream';
@@ -14,10 +14,16 @@ import { MlxProcess } from './mlx-process';
 const exec = promisify(execFile);
 export const MLX_INSTALL_ID = createHash('sha256').update(JSON.stringify(MLX_ARTIFACTS) + MLX_WORKER).digest('hex');
 export function mlxRoot(homeDir = join(homedir(), '.gemdex')): string { return join(homeDir, 'mlx', MLX_INSTALL_ID); }
-/** Python arguments for the worker: the pinned model directory and upstream text-encoder source. */
+/** Python arguments for the worker: the pinned model directory. */
 export function mlxWorkerArgs(root: string): string[] {
-    return ['-I', '-B', '-u', join(root, 'worker.py'), join(root, 'model'), join(root, 'arch/embedding_gemma2')];
+    return ['-I', '-B', '-u', join(root, 'worker.py'), join(root, 'model')];
 }
+/** Artifacts needed only to build the runtime; removed once it is installed and covered by the runtime digest. */
+function isInstallOnly(path: string): boolean {
+    return path === 'python.tar.gz' || path.startsWith('wheels/');
+}
+/** A 32×32 PNG that smoke-tests the vision path of the installed runtime. */
+const SMOKE_PNG = 'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAhklEQVR42u2W0RIAIQRFY/z/L9vXdkosstNMHotzk0mAmdtOw7bZzhcgqyPAZNFQP3Ki+62lDDnRZhmM0jV/zKHLUZhGF2Lr30Hk+DNCcQbx4w+c2+yuQLZA1v/cceqvKJ7Em/BLkSNJDLFo9PPRl1f0VUPwJz1GbbH+qUKVyZmLYpU/vxc9rwonRwCb0LcAAAAASUVORK5CYII=';
 export function assertMlxPlatform(): void {
     if (process.platform !== 'darwin' || process.arch !== 'arm64' || Number(release().split('.')[0]) < 23) {
         throw new Error('Local MLX embeddings require native Apple Silicon Node.js on macOS 14 or newer. Use Gemini or remote mode on this machine.');
@@ -49,6 +55,7 @@ async function runtimeDigest(root: string): Promise<string> {
 }
 export async function verifyMlxFiles(root: string): Promise<void> {
     for (const artifact of MLX_ARTIFACTS) {
+        if (isInstallOnly(artifact.path)) continue;
         if (await digest(join(root, artifact.path)) !== artifact.sha256) throw new Error(`MLX integrity check failed: ${artifact.path}. Run the explicit model install to repair it.`);
     }
     if (await readFile(join(root, 'worker.py'), 'utf8') !== MLX_WORKER) throw new Error('MLX worker integrity check failed; reinstall the model');
@@ -95,6 +102,30 @@ export async function downloadMlxArtifact(artifact: { url: string; sha256: strin
     }
 }
 
+/**
+ * Copy an artifact that an earlier install (or a damaged one being repaired)
+ * already verified, so an upgrade does not download the 1.2 GB weights again.
+ * APFS clones the file when it can, so the copy costs no extra space.
+ */
+async function reuseLocalArtifact(artifact: { path: string; sha256: string }, stage: string, parent: string): Promise<void> {
+    const destination = join(stage, artifact.path);
+    if (existsSync(destination)) return;
+    let entries: string[];
+    try { entries = await readdir(parent); } catch { return; }
+    for (const entry of entries) {
+        const candidate = join(parent, entry, artifact.path);
+        if (candidate === destination || !existsSync(candidate)) continue;
+        try {
+            if (await digest(candidate) !== artifact.sha256) continue;
+            await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
+            await copyFile(candidate, destination + '.part', constants.COPYFILE_FICLONE);
+            if (await digest(destination + '.part') !== artifact.sha256) { await rm(destination + '.part', { force: true }); continue; }
+            await rename(destination + '.part', destination);
+            return;
+        } catch { await rm(destination + '.part', { force: true }); }
+    }
+}
+
 /** PID lock: live installs fail clearly; crashed installs can be retried explicitly. */
 async function acquireLock(path: string): Promise<() => Promise<void>> {
     const token = `${process.pid}:${randomUUID()}`;
@@ -137,6 +168,7 @@ export async function installMlxModel(options: { homeDir?: string; onProgress?: 
         await mkdir(stage, { recursive: true, mode: 0o700 });
         for (const artifact of MLX_ARTIFACTS) {
             options.onProgress?.(`Verifying/downloading ${artifact.path}`);
+            await reuseLocalArtifact(artifact, stage, parent);
             await downloadMlxArtifact(artifact, stage);
         }
         // Only the pinned, SHA-256-verified archive is extracted, using macOS's built-in tar.
@@ -145,13 +177,21 @@ export async function installMlxModel(options: { homeDir?: string; onProgress?: 
         const python = join(stage, 'python/bin/python3');
         const wheels = MLX_ARTIFACTS.filter(a => a.path.startsWith('wheels/')).map(a => join(stage, a.path));
         options.onProgress?.('Installing verified offline Python wheels');
-        await exec(python, ['-I', '-B', '-m', 'pip', '--isolated', 'install', '--no-index', '--no-deps', '--no-compile', '--disable-pip-version-check', ...wheels], { timeout: 120_000, maxBuffer: 1024 * 1024 });
+        await exec(python, ['-I', '-B', '-m', 'pip', '--isolated', 'install', '--no-index', '--no-deps', '--no-compile', '--disable-pip-version-check', ...wheels], { timeout: 600_000, maxBuffer: 16 * 1024 * 1024 });
         await writeFile(join(stage, 'worker.py'), MLX_WORKER, { mode: 0o600 });
         await writeFile(join(stage, 'runtime.sha256'), await runtimeDigest(stage), { mode: 0o600 });
         await verifyMlxFiles(stage);
         options.onProgress?.('Smoke-testing local MLX embeddings');
+        const smokeImage = join(stage, 'smoke.png');
+        await writeFile(smokeImage, Buffer.from(SMOKE_PNG, 'base64'), { mode: 0o600 });
         const worker = new MlxProcess(python, mlxWorkerArgs(stage));
-        try { await worker.request(['Gemdex local embedding installation check'], 'document'); } finally { worker.close(); }
+        try {
+            await worker.request([{ text: 'Gemdex local embedding installation check' }, { path: smokeImage, mimeType: 'image/png' }], 'document');
+        } finally { worker.close(); await rm(smokeImage, { force: true }); }
+        for (const artifact of MLX_ARTIFACTS) {
+            if (isInstallOnly(artifact.path)) await rm(join(stage, artifact.path), { force: true });
+        }
+        await rm(join(stage, 'wheels'), { recursive: true, force: true });
         // Commit only after inference passes; failed repair never advertises a new install.
         await writeFile(join(stage, 'installed'), MLX_INSTALL_ID, { mode: 0o600 });
         await rm(root, { recursive: true, force: true });

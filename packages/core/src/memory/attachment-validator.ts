@@ -5,9 +5,12 @@ import { AttachmentKind, MemoryAttachmentInput } from './types';
 /**
  * Validation for inline media attachments before they are embedded/stored.
  *
- * `gemini-embedding-2` accepts text, image, audio, video, and PDF mapped into
- * one space, with documented per-request caps (image ≤ 6, PDF 1 file/≤ 6 pages,
- * audio ≤ 180 s, video ≤ 120 s). We enforce the mimeType allowlist, per-modality
+ * Two embedders sit behind this validator. The server's `gemini-embedding-2`
+ * accepts text, image, audio, video, and PDF mapped into one space, with
+ * documented per-request caps (image ≤ 6, PDF 1 file/≤ 6 pages, audio ≤ 180 s,
+ * video ≤ 120 s): {@link DEFAULT_ATTACHMENT_LIMITS}. The local EmbeddingGemma 2
+ * model takes images, audio and video (no PDF) in more container formats and
+ * longer clips: {@link LOCAL_ATTACHMENT_LIMITS}. We enforce the mimeType allowlist, per-modality
  * counts, and a byte ceiling cheaply (before decoding), then probe the decoded
  * bytes to enforce the precise media limits: PDF page count (≤ 6) via `pdf-lib`
  * and audio/video duration (≤ 180 s / ≤ 120 s) via `music-metadata`. Duration is
@@ -20,13 +23,24 @@ import { AttachmentKind, MemoryAttachmentInput } from './types';
 const MIME_TO_KIND: Record<string, AttachmentKind> = {
     'image/png': 'image',
     'image/jpeg': 'image',
+    'image/webp': 'image',
+    'image/gif': 'image',
     'audio/mp3': 'audio',
     'audio/mpeg': 'audio',
     'audio/wav': 'audio',
     'audio/x-wav': 'audio',
     'audio/wave': 'audio',
+    'audio/flac': 'audio',
+    'audio/x-flac': 'audio',
+    'audio/mp4': 'audio',
+    'audio/x-m4a': 'audio',
+    'audio/aac': 'audio',
+    'audio/aiff': 'audio',
+    'audio/x-aiff': 'audio',
     'video/mp4': 'video',
     'video/quicktime': 'video',
+    'video/x-m4v': 'video',
+    'video/webm': 'video',
     'application/pdf': 'pdf',
     // Blob-only (non-embedded) file attachments — transcripts, plain text, JSONL.
     'text/plain': 'file',
@@ -36,8 +50,19 @@ const MIME_TO_KIND: Record<string, AttachmentKind> = {
     'text/x-jsonl': 'file',
 };
 
-/** Every mimeType accepted as an attachment. */
-export const SUPPORTED_MIME_TYPES: string[] = Object.keys(MIME_TO_KIND);
+const BLOB_ONLY_MIME_TYPES = Object.keys(MIME_TO_KIND).filter((mime) => MIME_TO_KIND[mime] === 'file');
+
+/** MimeTypes the server's Gemini embedding accepts (the default allowlist). */
+export const SUPPORTED_MIME_TYPES: string[] = [
+    'image/png', 'image/jpeg',
+    'audio/mp3', 'audio/mpeg', 'audio/wav', 'audio/x-wav', 'audio/wave',
+    'video/mp4', 'video/quicktime',
+    'application/pdf',
+    ...BLOB_ONLY_MIME_TYPES,
+];
+
+/** MimeTypes the local EmbeddingGemma 2 model embeds, plus blob-only files. EmbeddingGemma 2 has no PDF input. */
+export const LOCAL_SUPPORTED_MIME_TYPES: string[] = Object.keys(MIME_TO_KIND).filter((mime) => MIME_TO_KIND[mime] !== 'pdf');
 
 /**
  * Kinds whose bytes are fed to the multimodal embedding model. `file` is
@@ -64,11 +89,20 @@ const EXT_TO_MIME: Record<string, string> = {
     '.png': 'image/png',
     '.jpg': 'image/jpeg',
     '.jpeg': 'image/jpeg',
+    '.webp': 'image/webp',
+    '.gif': 'image/gif',
     '.mp3': 'audio/mp3',
     '.wav': 'audio/wav',
+    '.flac': 'audio/flac',
+    '.m4a': 'audio/mp4',
+    '.aac': 'audio/aac',
+    '.aiff': 'audio/aiff',
+    '.aif': 'audio/aiff',
     '.mp4': 'video/mp4',
+    '.m4v': 'video/x-m4v',
     '.mov': 'video/quicktime',
     '.qt': 'video/quicktime',
+    '.webm': 'video/webm',
     '.pdf': 'application/pdf',
     '.txt': 'text/plain',
     '.json': 'application/json',
@@ -110,6 +144,8 @@ export interface AttachmentLimits {
     maxVideoSeconds: number;
     /** Max PDF page count. */
     maxPdfPages: number;
+    /** Accepted mimeTypes. Defaults to {@link SUPPORTED_MIME_TYPES}. */
+    mimeTypes?: readonly string[];
 }
 
 export const DEFAULT_ATTACHMENT_LIMITS: AttachmentLimits = {
@@ -122,6 +158,24 @@ export const DEFAULT_ATTACHMENT_LIMITS: AttachmentLimits = {
     maxAudioSeconds: 180,
     maxVideoSeconds: 120,
     maxPdfPages: 6,
+};
+
+/**
+ * Limits for the local EmbeddingGemma 2 store. Five minutes of audio is 7,500
+ * tokens of the model's 8,192-token context; video is sampled at one frame per
+ * second up to 32 frames, so a longer clip only spreads those frames out.
+ */
+export const LOCAL_ATTACHMENT_LIMITS: AttachmentLimits = {
+    maxImages: 8,
+    maxAudio: 4,
+    maxVideo: 2,
+    maxPdf: 0,
+    maxFiles: 4,
+    maxBytesPerAttachment: 100 * 1024 * 1024,
+    maxAudioSeconds: 300,
+    maxVideoSeconds: 600,
+    maxPdfPages: 0,
+    mimeTypes: LOCAL_SUPPORTED_MIME_TYPES,
 };
 
 /** A decoded, validated attachment ready to embed + persist. */
@@ -245,10 +299,11 @@ export async function validateAttachments(
             );
         }
 
-        const kind = mimeToKind(att.mimeType);
+        const accepted = limits.mimeTypes ?? SUPPORTED_MIME_TYPES;
+        const kind = accepted.includes(att.mimeType.toLowerCase()) ? mimeToKind(att.mimeType) : undefined;
         if (!kind) {
             throw new AttachmentValidationError(
-                `Unsupported attachment mimeType '${att.mimeType}'. Supported: ${SUPPORTED_MIME_TYPES.join(', ')}.`,
+                `Unsupported attachment mimeType '${att.mimeType}'. Supported: ${accepted.join(', ')}.`,
             );
         }
 

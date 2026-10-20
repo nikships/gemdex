@@ -1,5 +1,5 @@
 import * as http from 'http';
-import { SUPPORTED_MIME_TYPES } from '../memory/attachment-validator';
+import { LOCAL_SUPPORTED_MIME_TYPES, SUPPORTED_MIME_TYPES } from '../memory/attachment-validator';
 import type { MemoryBackend } from '../memory/backend';
 
 /**
@@ -53,7 +53,7 @@ export const DEFAULT_BODY_LIMIT = 50 * 1024 * 1024; // 50 MiB
 export const ATTACHMENT_BODY_LIMIT = 100 * 1024 * 1024; // 100 MiB for create/update/import with media
 const METHOD_ALLOW_HEADER = 'GET, POST, PUT, PATCH, DELETE, OPTIONS';
 const HEADER_ALLOW_HEADER = 'Content-Type, X-Gemdex-Token';
-const SAFE_INLINE_ATTACHMENT_MIME_TYPES = new Set([...SUPPORTED_MIME_TYPES, 'text/plain']);
+const SAFE_INLINE_ATTACHMENT_MIME_TYPES = new Set([...SUPPORTED_MIME_TYPES, ...LOCAL_SUPPORTED_MIME_TYPES]);
 
 function isJsonObject(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
