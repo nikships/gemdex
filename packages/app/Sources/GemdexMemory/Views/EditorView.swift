@@ -25,15 +25,33 @@ struct EditorView: View {
             }
             .softScrollEdges()
 
+            if let error = editor.saveError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout)
+                    .foregroundStyle(Brand.terracotta)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 8)
+                    .background(.ultraThinMaterial)
+            }
+
             footer
         }
     }
 
     private var footer: some View {
         HStack(spacing: 12) {
-            Text(editor.metaText)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            if let progress = editor.saveProgress {
+                Text(progress)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            } else {
+                Text(editor.metaText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Spacer()
             if editor.isEditingExisting {
                 Button(role: .destructive) { showDeleteConfirm = true } label: {
@@ -45,6 +63,7 @@ struct EditorView: View {
                         .glassSurfaceInteractive(cornerRadius: Metric.radiusControl)
                 }
                 .buttonStyle(.plain)
+                .disabled(editor.isSaving)
                 .confirmationDialog("Delete this memory? This cannot be undone.", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
                     Button("Delete", role: .destructive) { Task { await model.deleteSelected() } }
                     Button("Cancel", role: .cancel) {}
@@ -59,7 +78,7 @@ struct EditorView: View {
                     } else {
                         Image(systemName: "checkmark.circle.fill")
                     }
-                    Text("Save")
+                    Text(editor.isSaving ? "Saving…" : "Save")
                 }
             }
             .brandPrimary()

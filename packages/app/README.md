@@ -1,10 +1,8 @@
 # Gemdex Memory — desktop app
 
-> **Maintenance-only.** This app is no longer the primary way to manage a Gemdex
-> memory layer. It manages a **local** `~/.gemdex` pool on a single Mac; the
-> [web manager](../web/README.md) is the surface for a self-hosted deployment —
-> any browser, behind your Google login, against the shared pool. The app still
-> works and still ships; expect bug fixes, not new features.
+> This app manages a **local** `~/.gemdex` pool on a single Mac. For a
+> self-hosted deployment, the [web manager](../web/README.md) is the surface:
+> any browser, behind your Google login, against the shared pool.
 
 A native, **manage-only** desktop app for the [Gemdex](https://github.com/nikships/gemdex)
 memory layer, built in **SwiftUI** for macOS (Apple Silicon). It opens straight
@@ -16,7 +14,7 @@ and import memories.
 The app manages the local `~/.gemdex` store on this Mac. There is no remote or
 server mode and no API key.
 
-- **Embeddings** run on this Mac with EmbeddingGemma 2 on MLX (text only). On first run
+- **Embeddings** run on this Mac with EmbeddingGemma 2 on MLX (text, images, audio and video share one vector space). On first run
   the setup screen offers an explicit, confirmed install of the MLX runtime and
   model (about 1.3 GB, Apple Silicon required). The memory manager unlocks once
   the model is installed.
@@ -33,7 +31,11 @@ server mode and no API key.
   is not billed per token.
 
 Pressing Return in the sidebar search box runs semantic free-text recall
-against the local store; typing alone filters loaded titles.
+against the local store; typing alone filters loaded titles. **Search by
+file…** (the button in the search field) picks an image, audio, or video file
+and runs recall with it as the query (search by example), combined with the
+typed text if any. A chip under the search field shows the active file, with a
+clear button.
 
 History ingestion is **always new-sessions-only**. Scans report previously
 ingested sessions that later changed, but the UI exposes no override and the
@@ -41,12 +43,28 @@ core engine never includes those sessions in a run.
 
 ## Attachments
 
-Memories are text. Ingested digests keep the full session transcript as a
-read-only file attachment (`text/plain` or `application/x-ndjson`). The editor
-lists attachments with their kind and size and can open or save each one;
-bytes are streamed from `GET /memories/:id/attachments/:attachmentId`. The app
-does not add, caption, or preview media, and older memories with image, audio,
-video, or PDF attachments show those as plain downloadable files.
+Memories can carry image, audio, and video attachments, which are embedded
+locally so they can be found by search, plus stored text/JSON files. The
+editor's **Attach…** button (new and existing memories) adds files; each has an
+optional caption (a description or transcript, which also feeds keyword
+search) and a remove button. A memory may have attachments and no text. Saving
+media takes a few seconds while the model embeds it; the editor shows progress
+and disables Save meanwhile, and shows sidecar error messages (unsupported
+type, too many files, too large) inline.
+
+Accepted types: images `png jpg jpeg webp gif`; audio `mp3 wav flac m4a aac
+aiff aif`; video `mp4 mov m4v webm`; files `txt json jsonl ndjson`. PDF is not
+supported locally. The sidecar enforces the limits (up to 8 images, 4 audio, 2
+video, and 4 files per memory; 100 MiB per attachment; audio up to 5 minutes).
+
+Stored attachments show inline: an image thumbnail, or a playable audio/video
+player (AVKit; formats macOS can't play, such as WebM, fall back to **Open**).
+Every row also has **Open**, **Save…**, an editable caption, and remove.
+Caption-only edits use `PATCH /memories/:id/attachments` (no re-embedding);
+adding or removing files re-sends the full list via `PUT /memories/:id`. Ingested
+digests keep their full session transcript as a `text/plain` or
+`application/x-ndjson` file attachment. Bytes are streamed from
+`GET /memories/:id/attachments/:attachmentId`.
 
 ## Architecture
 
