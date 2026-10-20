@@ -3,9 +3,13 @@ import AppKit
 import UniformTypeIdentifiers
 
 /// The memory editor: title, content, attachments, and footer actions.
+///
+/// `EditorModel` is a nested ObservableObject, so views that show its
+/// attachment/save state hold it with `@ObservedObject` (`AttachmentsSection`,
+/// `EditorFooter`). This view deliberately does not, so typing does not
+/// re-render the whole editor.
 struct EditorView: View {
     @EnvironmentObject var model: AppModel
-    @State private var showDeleteConfirm = false
 
     private var editor: EditorModel { model.editor }
 
@@ -19,21 +23,59 @@ struct EditorView: View {
 
                     ContentTextEditor(text: contentBinding)
 
-                    AttachmentsSection()
+                    AttachmentsSection(editor: editor)
                 }
                 .padding(28)
             }
             .softScrollEdges()
 
+            EditorFooter(editor: editor)
+        }
+    }
+
+    // Bind through the ObservableObject editor.
+    private var titleBinding: Binding<String> {
+        Binding(get: { editor.title }, set: { editor.title = $0 })
+    }
+    private var contentBinding: Binding<String> {
+        Binding(get: { editor.content }, set: { editor.content = $0 })
+    }
+}
+
+/// Save error banner plus the footer actions (Delete, Save).
+private struct EditorFooter: View {
+    @EnvironmentObject var model: AppModel
+    @ObservedObject var editor: EditorModel
+    @State private var showDeleteConfirm = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if let error = editor.saveError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout)
+                    .foregroundStyle(Brand.terracotta)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 8)
+                    .background(.ultraThinMaterial)
+            }
             footer
         }
     }
 
     private var footer: some View {
         HStack(spacing: 12) {
-            Text(editor.metaText)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            if let progress = editor.saveProgress {
+                Text(progress)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            } else {
+                Text(editor.metaText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Spacer()
             if editor.isEditingExisting {
                 Button(role: .destructive) { showDeleteConfirm = true } label: {
@@ -45,6 +87,7 @@ struct EditorView: View {
                         .glassSurfaceInteractive(cornerRadius: Metric.radiusControl)
                 }
                 .buttonStyle(.plain)
+                .disabled(editor.isSaving)
                 .confirmationDialog("Delete this memory? This cannot be undone.", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
                     Button("Delete", role: .destructive) { Task { await model.deleteSelected() } }
                     Button("Cancel", role: .cancel) {}
@@ -59,7 +102,7 @@ struct EditorView: View {
                     } else {
                         Image(systemName: "checkmark.circle.fill")
                     }
-                    Text("Save")
+                    Text(editor.isSaving ? "Saving…" : "Save")
                 }
             }
             .brandPrimary()
@@ -70,14 +113,6 @@ struct EditorView: View {
         .padding(.vertical, 12)
         .background(.ultraThinMaterial)
         .overlay(alignment: .top) { Divider().opacity(0.5) }
-    }
-
-    // Bind through the ObservableObject editor.
-    private var titleBinding: Binding<String> {
-        Binding(get: { editor.title }, set: { editor.title = $0 })
-    }
-    private var contentBinding: Binding<String> {
-        Binding(get: { editor.content }, set: { editor.content = $0 })
     }
 }
 

@@ -19,6 +19,9 @@ actor APIClient {
     private var baseURL: URL
     private var token: String
     private let session: URLSession
+    /// Media saves and file searches wait on the local model to embed the
+    /// files, which can run far past the 30s idle timeout of ordinary calls.
+    private let mediaSession: URLSession
 
     init(baseURL: URL, token: String) {
         self.baseURL = baseURL
@@ -28,6 +31,11 @@ actor APIClient {
         config.timeoutIntervalForResource = 120
         config.waitsForConnectivity = false
         self.session = URLSession(configuration: config)
+        let mediaConfig = URLSessionConfiguration.ephemeral
+        mediaConfig.timeoutIntervalForRequest = 900
+        mediaConfig.timeoutIntervalForResource = 900
+        mediaConfig.waitsForConnectivity = false
+        self.mediaSession = URLSession(configuration: mediaConfig)
     }
 
     func update(baseURL: URL, token: String) {
@@ -56,13 +64,15 @@ actor APIClient {
         return req
     }
 
-    private func send(_ req: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        let (data, response) = try await session.data(for: req)
+    private func send(_ req: URLRequest, media: Bool = false) async throws -> (Data, HTTPURLResponse) {
+        let (data, response) = try await (media ? mediaSession : session).data(for: req)
         guard let http = response as? HTTPURLResponse else {
             throw APIError(status: -1, message: "No HTTP response")
         }
         if !(200...299).contains(http.statusCode) {
-            var message = "HTTP \(http.statusCode)"
+            var message = http.statusCode == 413
+                ? "The files are too large to send in one request. Attach fewer or smaller files."
+                : "HTTP \(http.statusCode)"
             var needsInstall = false
             if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 if let e = obj["error"] as? String { message = e }
@@ -134,23 +144,40 @@ actor APIClient {
         return try decode(Wrapper.self, from: data).memory
     }
 
+    /// Creates a memory. `content` may be empty when `attachments` is not.
     @discardableResult
-    func createMemory(content: String, title: String?) async throws -> Memory {
+    func createMemory(content: String, title: String?, attachments: [AttachmentUpload] = []) async throws -> Memory {
         var payload: [String: Any] = ["content": content]
         if let title, !title.isEmpty { payload["title"] = title }
+        if !attachments.isEmpty { payload["attachments"] = attachments.map(\.json) }
         let body = try JSONSerialization.data(withJSONObject: payload)
-        let (data, _) = try await send(makeRequest("POST", "/memories", body: body))
+        let (data, _) = try await send(makeRequest("POST", "/memories", body: body), media: !attachments.isEmpty)
         struct Wrapper: Decodable { let memory: Memory }
         return try decode(Wrapper.self, from: data).memory
     }
 
-    /// Updates content/title only. Omitting `attachments` keeps the memory's
-    /// existing (read-only) attachments untouched.
+    /// Updates content/title. Omitting `attachments` (nil) keeps the memory's
+    /// existing attachments; a non-nil list REPLACES them all, so callers must
+    /// re-send the ones to keep (with their `id` and `caption`). `[]` clears.
     @discardableResult
-    func updateMemory(_ id: String, content: String, title: String?) async throws -> Memory {
-        let payload: [String: Any] = ["content": content, "title": titleValue(title)]
+    func updateMemory(_ id: String, content: String, title: String?, attachments: [AttachmentUpload]? = nil) async throws -> Memory {
+        var payload: [String: Any] = ["content": content, "title": titleValue(title)]
+        if let attachments { payload["attachments"] = attachments.map(\.json) }
         let body = try JSONSerialization.data(withJSONObject: payload)
-        let (data, _) = try await send(request("PUT", path: "/memories/\(id)", body: body))
+        let hasMedia = !(attachments ?? []).isEmpty
+        let (data, _) = try await send(request("PUT", path: "/memories/\(id)", body: body), media: hasMedia)
+        struct Wrapper: Decodable { let memory: Memory }
+        return try decode(Wrapper.self, from: data).memory
+    }
+
+    /// Edits attachment captions only; nothing is re-embedded.
+    @discardableResult
+    func updateCaptions(_ id: String, captions: [(id: String, caption: String)]) async throws -> Memory {
+        let list: [[String: Any]] = captions.map { entry in
+            entry.caption.isEmpty ? ["id": entry.id] : ["id": entry.id, "caption": entry.caption]
+        }
+        let body = try JSONSerialization.data(withJSONObject: ["captions": list])
+        let (data, _) = try await send(request("PATCH", path: "/memories/\(id)/attachments", body: body))
         struct Wrapper: Decodable { let memory: Memory }
         return try decode(Wrapper.self, from: data).memory
     }
@@ -175,6 +202,18 @@ actor APIClient {
         let payload: [String: Any] = ["query": query, "limit": limit]
         let body = try JSONSerialization.data(withJSONObject: payload)
         let (data, _) = try await send(makeRequest("POST", "/recall", body: body))
+        struct Wrapper: Decodable { let results: [RecallResult] }
+        return try decode(Wrapper.self, from: data).results
+    }
+
+    /// Search by example: media (and optionally text) is embedded by the
+    /// sidecar and used as the query. At least one of the two is required.
+    func recall(query: String?, attachments: [AttachmentUpload], limit: Int = 50) async throws -> [RecallResult] {
+        var payload: [String: Any] = ["limit": limit]
+        if let query, !query.isEmpty { payload["query"] = query }
+        if !attachments.isEmpty { payload["attachments"] = attachments.map(\.json) }
+        let body = try JSONSerialization.data(withJSONObject: payload)
+        let (data, _) = try await send(makeRequest("POST", "/recall", body: body), media: !attachments.isEmpty)
         struct Wrapper: Decodable { let results: [RecallResult] }
         return try decode(Wrapper.self, from: data).results
     }

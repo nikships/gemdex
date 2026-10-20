@@ -67,6 +67,11 @@ final class AppModel: ObservableObject {
 
     /// Semantic free-text search state (`.idle` = local title filter).
     @Published var searchState: SearchState = .idle
+    /// Media file used as the query for search-by-example (with `filterText`
+    /// as optional extra text). nil = text-only search.
+    @Published private(set) var searchFile: SearchFile?
+    /// Bumped per search so a slow earlier request can't overwrite newer results.
+    private var searchGeneration = 0
 
     /// Non-nil while an import is running (drives the progress banner and
     /// disables the Import button); the alert fires once when it finishes.
@@ -297,23 +302,35 @@ final class AppModel: ObservableObject {
 
     // MARK: - Search
 
-    /// Run semantic free-text recall for the current `filterText`. An empty
-    /// query resets to the local-filter idle state; otherwise the sidecar
-    /// embeds the query and returns the parent-document hybrid ranking.
+    /// Run semantic recall for the current `filterText` and/or `searchFile`.
+    /// With neither, resets to the local-filter idle state; otherwise the
+    /// sidecar embeds the query (text and/or media) and returns the
+    /// parent-document hybrid ranking.
     func runSearch() async {
         guard let api else { return }
         let query = filterText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else {
+        let file = searchFile
+        guard !query.isEmpty || file != nil else {
             searchState = .idle
             return
         }
+        searchGeneration += 1
+        let generation = searchGeneration
         searchState = .searching
         do {
-            let results = try await api.recallByText(query: query)
-            // Drop stale results if the user edited the query while loading.
-            guard filterText.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
+            var uploads: [AttachmentUpload] = []
+            if let file {
+                let url = file.url
+                let encoded = try await Task.detached(priority: .userInitiated) {
+                    try Data(contentsOf: url, options: .mappedIfSafe).base64EncodedString()
+                }.value
+                uploads = [AttachmentUpload(id: nil, mimeType: file.mediaType.mimeType, data: encoded, caption: nil)]
+            }
+            let results = try await api.recall(query: query.isEmpty ? nil : query, attachments: uploads)
+            guard generation == searchGeneration else { return }
             searchState = .results(results)
         } catch let err as APIError {
+            guard generation == searchGeneration else { return }
             if handleNeedsInstall(err) {
                 searchState = .idle
                 return
@@ -321,13 +338,39 @@ final class AppModel: ObservableObject {
             searchState = .failed(err.message)
             setStatus("Search failed: \(err.message)", isError: true)
         } catch {
+            guard generation == searchGeneration else { return }
             searchState = .failed(error.localizedDescription)
             setStatus("Search failed: \(error.localizedDescription)", isError: true)
         }
     }
 
+    /// Use `url` (an image, audio or video file) as the search query and run it.
+    func searchByFile(_ url: URL) async {
+        if let reason = MediaTypes.rejection(for: url, mediaOnly: true) {
+            searchGeneration += 1
+            searchState = .failed(reason)
+            setStatus("Search failed: \(reason)", isError: true)
+            return
+        }
+        guard let mediaType = MediaTypes.lookup(url: url) else { return }
+        searchFile = SearchFile(url: url, mediaType: mediaType)
+        await runSearch()
+    }
+
+    /// Drop the file query; re-runs the text query if there is one.
+    func clearSearchFile() {
+        searchFile = nil
+        searchGeneration += 1
+        searchState = .idle
+        if !filterText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            Task { await runSearch() }
+        }
+    }
+
     func clearSearch() {
         filterText = ""
+        searchFile = nil
+        searchGeneration += 1
         searchState = .idle
     }
 
