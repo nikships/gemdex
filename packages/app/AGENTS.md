@@ -1,19 +1,17 @@
 # AGENTS.md — `packages/app` (Gemdex Memory, macOS)
 
-> **Status: maintenance-only.** This app is not the primary manage surface any
-> more — `packages/web` is, for self-hosted deployments. Keep this code working
-> and fix bugs here, but land new manage features in `packages/web` unless the
-> request is specifically about the macOS app. **Do not delete this package.**
+> New features can land here as well as in `packages/web`. **Do not delete this
+> package.**
 
 Architecture quick-reference for the **native SwiftUI manage-only macOS app**.
 It is a **thin HTTP client over a Node sidecar** and holds **no memory logic of
 its own** — all retrieval/embedding/storage lives in the sidecar (`gemdex serve`
 from `gemdex-mcp`, wrapping `gemdex-core` + LanceDB over the shared `~/.gemdex`
 store). The app is **local-only**: memories live in `~/.gemdex` on this Mac,
-embedded by the local EmbeddingGemma 2 model on MLX (text only, no API key). It spawns
+embedded by the local EmbeddingGemma 2 model on MLX (text, images, audio and video in one vector space; no API key). It spawns
 the sidecar, reads a localhost handshake, and drives a browse/create/edit/delete
-UI (text memories, read-only file attachments such as chat transcripts,
-semantic free-text search, JSONL export/import). Chat-history ingestion and
+UI (memories with image/audio/video/file attachments, semantic free-text
+search and search by file, JSONL export/import). Chat-history ingestion and
 memory hygiene run on the user's local Claude Code CLI (`claude -p`, Haiku)
 through the sidecar. Behavior changes belong
 in `core`/`mcp`/`server`, not here. This is Swift/SwiftUI — the repo-wide TS
@@ -27,20 +25,27 @@ lint rules (`??` over `||`, no `eslint-disable`) do **not** apply.
 - `AppModel.swift` — `@MainActor ObservableObject`, the central state hub. Owns
   `SidecarManager` + `APIClient`, subscribes to `sidecar.$phase`, maps it to an
   `AppScreen`, and exposes all memory/config/settings async actions.
-- `EditorModel.swift` — editor state (content/title; attachments read-only).
+- `EditorModel.swift` — editor state: content/title plus attachment edits
+  (pending picked files, stored attachments marked removed, caption drafts) and
+  the save flow (create / update / caption PATCH, progress, error).
 - `Models/Models.swift` — `Codable` DTOs for the sidecar API (`Memory`,
   `MemorySummary`, `ConfigSummary`, `EmbeddingStatus`, `ClaudeCodeReadiness`,
   `RecallResult`, ingest/hygiene DTOs, …). `Attachment.kind` is a raw string so
-  legacy (`image`/`audio`/`video`/`pdf`) and unknown kinds decode; the UI treats
-  every kind as a generic file.
+  legacy (`pdf`) and unknown kinds decode; inline previews are chosen from the
+  mime type (`Attachment.previewKind`), everything else is a generic file.
+- `Models/MediaTypes.swift` — table of the extensions/mime types the local
+  sidecar accepts (used only to filter open panels and label files; the sidecar
+  is the authority and enforces limits), `PendingAttachment`, `SearchFile`, and
+  `AttachmentUpload` (base64 wire shape).
 - `Services/SidecarManager.swift` — Node child-process lifecycle, launch-mode
   state machine, handshake parsing (the most complex file — see below).
 - `Services/APIClient.swift` — `actor`; async localhost HTTP/JSON client.
 - `Services/UpdaterController.swift` — Sparkle wrapper; real updater only under
   `#if SPARKLE_ENABLED`, otherwise a no-op that disables the menu item.
 - `Views/*` — per-screen SwiftUI: `RootView` (screen switch), `MainView`,
-  `SidebarView`, `DetailPane`, `EditorView`, `AttachmentsSection` (read-only
-  file rows with Open / Save…), `SetupView` (local model install; also hosts the
+  `SidebarView` (incl. Search by file… button + file chip), `DetailPane`,
+  `EditorView`, `AttachmentsSection` (Attach…, stored rows with inline
+  image/audio/video preview, caption edit, Open / Save…, remove; pending rows), `SetupView` (local model install; also hosts the
   shared `EmbeddingModelPanel`), `RecoveryView`, `LaunchOverlay`,
   `StorageSettingsView` (Storage & Models), `IngestView`, `HygieneView`
   (memory-hygiene panel: scan → judge → review/delete/dismiss),
@@ -101,15 +106,21 @@ never outlives the app.
 Routes used by `APIClient`: `GET /health`, `GET /config`, `POST /config/check`,
 `GET /settings/embedding`, `POST /settings/embedding/install`,
 `POST /settings/embedding/migrate`, `GET|POST /memories`,
-`GET|PUT|DELETE /memories/:id`, `GET /memories/:id/attachments/:attachmentId`
-(stream bytes), `POST /recall` (semantic free-text search), `GET /export`,
+`GET|PUT|DELETE /memories/:id`, `PATCH /memories/:id/attachments` (captions
+only), `GET /memories/:id/attachments/:attachmentId` (stream bytes),
+`POST /recall` (semantic search by text and/or attached media), `GET /export`,
 `POST /import`, the ingestion set: `GET /ingest/sources`,
 `POST|DELETE /ingest/folders`, `POST /ingest/scan`, `POST /ingest/start`,
 `GET /ingest/status`, `POST /ingest/cancel`, and the memory-hygiene set:
 `GET /hygiene/report`, `POST /hygiene/scan`, `POST /hygiene/start`,
 `GET /hygiene/status`, `POST /hygiene/cancel`, `POST /hygiene/apply`,
-`POST /hygiene/dismiss`. `PUT /memories/:id` sends content/title only, so
-existing attachments are kept; the app never sends attachments.
+`POST /hygiene/dismiss`. `PUT /memories/:id` always sends content/title and
+sends `attachments` only when files were added or removed. That list REPLACES
+the stored one, so the editor re-fetches the bytes of every kept attachment and
+re-sends them with their `id` and `caption`; `attachments: []` clears. Caption-only
+edits go through `PATCH /memories/:id/attachments` and never re-embed. Requests
+that carry media use a separate `URLSession` with a 15-minute timeout, since
+the model embeds the files before the sidecar answers.
 
 ## Readiness gates
 
@@ -132,7 +143,7 @@ existing attachments are kept; the app never sends attachments.
 `SetupView` and the **Storage & Models** panel share `EmbeddingModelPanel`:
 status (`not-installed | installed | installing | migrating | error`), model id,
 message, and determinate progress. `POST /settings/embedding/install`
-(~1.3 GB download, Apple Silicon only) requires a confirmation alert, answers
+(~1.5 GB download, ~1.9 GB on disk: the full mlx-vlm runtime with vision and audio; Apple Silicon only) requires a confirmation alert, answers
 `202`, and is polled through `GET /settings/embedding`; `409` means a job is
 already running and the app reconciles by polling. When it finishes,
 `syncConfigGate()` re-runs so a fresh install mounts the manager.
@@ -200,14 +211,26 @@ binary directly (not `open`) against a local sidecar build with
   typing; pressing Return runs semantic free-text recall via `POST /recall`
   (`AppModel.runSearch` → `searchState`), listing the parent-document hybrid
   ranking. Editing or clearing the query returns to the local title filter.
+  **Search by file…** sets `AppModel.searchFile` (image/audio/video only) and
+  runs recall with it as an attachment plus any typed text as `query`; while a
+  file is active, editing the text does not drop results (Return re-runs) and
+  the chip's clear button removes the file.
 - The sidecar child is killed on app quit and must never outlive the app.
 - Sidecar bootstrap downloads happen **only** through explicit
   `bootstrap(install: true)`; MLX runtime/model downloads separately require the
   confirmed install action in Setup or Storage & Models. Neither happens
   silently.
-- The app never creates or edits attachments (the sidecar rejects media with
-  400). Attachments are displayed read-only and opened/saved via
-  `GET /memories/:id/attachments/:attachmentId`.
+- Attachments are created and edited from the editor (Attach…). The open
+  panels are deliberately not type-filtered: `MediaTypes.rejection(for:)`
+  refuses unsupported extensions (PDF gets its own "not supported locally"
+  message) with an inline explanation instead of greying files out. Per-memory
+  counts, per-file size and audio length limits are enforced by the sidecar
+  (400) and its message is shown as-is. One request body is capped at 256 MiB
+  and attachments travel as base64, so `EditorModel` checks the total
+  (`MediaTypes.requestSizeProblem`) before sending; a sidecar 413 is also
+  shown as a readable message. Previews load bytes via
+  `GET /memories/:id/attachments/:attachmentId` (audio/video go through a temp
+  file for AVKit); a memory may be saved with no text when it has attachments.
 - Sparkle/updater code is gated behind `#if SPARKLE_ENABLED`; dev/CI builds need
   no Sparkle framework.
 - Release DMGs bundle their own Node runtime + sidecar under

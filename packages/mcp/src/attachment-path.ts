@@ -4,11 +4,18 @@ import * as path from "path";
 import { fileURLToPath } from "url";
 import {
     AttachmentValidationError,
-    DEFAULT_ATTACHMENT_LIMITS,
+    LOCAL_ATTACHMENT_LIMITS,
+    LOCAL_SUPPORTED_MIME_TYPES,
     MemoryAttachmentInput,
     SUPPORTED_ATTACHMENT_EXTENSIONS,
     inferMimeTypeFromPath,
 } from "gemdex-core";
+
+/** Extensions the local store accepts (every supported one except PDF). */
+const LOCAL_EXTENSIONS = SUPPORTED_ATTACHMENT_EXTENSIONS.filter((ext) => {
+    const mimeType = inferMimeTypeFromPath(`file${ext}`);
+    return mimeType !== undefined && LOCAL_SUPPORTED_MIME_TYPES.includes(mimeType);
+});
 
 /**
  * MCP-only attachment input: either inline base64 (`data`) — the original
@@ -76,10 +83,10 @@ async function resolveOne(att: AttachmentPathInput, index: number): Promise<Memo
         );
     }
     // Size-guard via stat BEFORE reading, so an oversized file never loads into memory.
-    if (stat.size > DEFAULT_ATTACHMENT_LIMITS.maxBytesPerAttachment) {
+    if (stat.size > LOCAL_ATTACHMENT_LIMITS.maxBytesPerAttachment) {
         throw new AttachmentValidationError(
             `Attachment #${index + 1}: '${resolved}' is ${stat.size} bytes, over the ` +
-            `${DEFAULT_ATTACHMENT_LIMITS.maxBytesPerAttachment}-byte per-attachment limit.`,
+            `${LOCAL_ATTACHMENT_LIMITS.maxBytesPerAttachment}-byte per-attachment limit.`,
         );
     }
 
@@ -87,7 +94,7 @@ async function resolveOne(att: AttachmentPathInput, index: number): Promise<Memo
     if (!mimeType) {
         throw new AttachmentValidationError(
             `Attachment #${index + 1}: could not infer mimeType from '${resolved}'. ` +
-            `Pass 'mimeType' explicitly, or use a supported extension: ${SUPPORTED_ATTACHMENT_EXTENSIONS.join(", ")}.`,
+            `Pass 'mimeType' explicitly, or use a supported extension: ${LOCAL_EXTENSIONS.join(", ")}.`,
         );
     }
 

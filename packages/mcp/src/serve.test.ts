@@ -7,6 +7,7 @@ import type { AddressInfo } from "node:net";
 import { createServer as httpServer } from "node:http";
 import {
     Embedding,
+    EmbeddingContent,
     EmbeddingVector,
     FileBlobStore,
     LanceDBVectorDatabase,
@@ -45,6 +46,11 @@ class FakeEmbedding extends Embedding {
     }
     async embedBatch(texts: string[]): Promise<EmbeddingVector[]> {
         return texts.map((t) => ({ vector: vectorize(t), dimension: DIM }));
+    }
+    isMultimodal(): boolean { return true; }
+    /** Media bytes are read as text, so a file saying "red circle" matches the text "red circle". */
+    async embedContentBatch(contents: EmbeddingContent[]): Promise<EmbeddingVector[]> {
+        return this.embedBatch(contents.map((c) => typeof c === "string" ? c : Buffer.from(c.inlineData.data, "base64").toString()));
     }
 }
 
@@ -435,29 +441,38 @@ test("POST /recall with neither query nor attachments returns 400", async () => 
     assert.equal((await post(`${shared.base}/recall`, {})).status, 400);
 });
 
-test("POST /recall by media is rejected: the local model is text-only", async () => {
+test("POST /recall by an example file finds the memory it matches", async () => {
+    const created = await json(await post(`${shared.base}/memories`, {
+        title: "Gate photo",
+        attachments: [{ mimeType: "image/jpeg", data: Buffer.from("zebra crossing gate").toString("base64") }],
+    }));
     const res = await post(`${shared.base}/recall`, {
-        attachments: [{ mimeType: "image/png", data: Buffer.from("PNGBYTES").toString("base64") }],
+        attachments: [{ mimeType: "image/png", data: Buffer.from("zebra crossing").toString("base64") }],
     });
-    assert.equal(res.status, 400);
-    assert.match((await json(res)).error, /Recall by media is not supported/);
+    assert.equal(res.status, 200);
+    const { results } = await json(res);
+    assert.equal(results[0].id, created.memory.id);
 });
 
-test("media attachments are rejected on create", async () => {
-    for (const mimeType of ["image/png", "image/jpeg", "audio/mpeg", "video/mp4", "application/pdf"]) {
+test("image, audio and video attachments are embedded on create; PDFs are rejected", async () => {
+    for (const mimeType of ["image/png", "image/webp", "audio/mpeg", "audio/mp4", "video/mp4", "video/quicktime"]) {
         const res = await post(`${shared.base}/memories`, {
             content: `a memory with ${mimeType}`,
             attachments: [{ mimeType, data: Buffer.from("MEDIABYTES").toString("base64") }],
         });
-        assert.equal(res.status, 400, mimeType);
-        const { error } = await json(res);
-        assert.ok(
-            error.includes(`${mimeType} attachments are not supported`) || /could not be parsed as a valid PDF/.test(error),
-            `${mimeType}: ${error}`,
-        );
+        assert.equal(res.status, 201, mimeType);
+        const { memory } = await json(res);
+        assert.equal(memory.attachments[0].mimeType, mimeType);
+        const blob = await fetch(`${shared.base}/memories/${memory.id}/attachments/${memory.attachments[0].id}`);
+        assert.equal(blob.headers.get("content-type"), mimeType);
+        assert.equal(Buffer.from(await blob.arrayBuffer()).toString(), "MEDIABYTES");
     }
-    const { memories } = await json(await fetch(`${shared.base}/memories`));
-    assert.equal(memories.some((m: any) => /a memory with/.test(m.preview)), false);
+    const pdf = await post(`${shared.base}/memories`, {
+        content: "a memory with a pdf",
+        attachments: [{ mimeType: "application/pdf", data: Buffer.from("%PDF").toString("base64") }],
+    });
+    assert.equal(pdf.status, 400);
+    assert.match((await json(pdf)).error, /Unsupported attachment mimeType 'application\/pdf'/);
 });
 
 test("text and JSON attachments are stored as blobs and served back", async () => {
@@ -490,7 +505,7 @@ test("text and JSON attachments are stored as blobs and served back", async () =
     assert.equal((await fetch(`${shared.base}/memories/${memory.id}/attachments/nope`)).status, 404);
 });
 
-test("update rejects media attachments and keeps the existing memory intact", async () => {
+test("update replaces attachments with media, and a rejected PDF keeps the existing memory intact", async () => {
     const created = await json(await post(`${shared.base}/memories`, {
         content: "memory that must survive a bad update",
         attachments: [{ mimeType: "text/plain", data: Buffer.from("keep me").toString("base64") }],
@@ -499,12 +514,22 @@ test("update rejects media attachments and keeps the existing memory intact", as
     const res = await fetch(`${shared.base}/memories/${id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ attachments: [{ mimeType: "image/png", data: Buffer.from("PNG").toString("base64") }] }),
+        body: JSON.stringify({ attachments: [{ mimeType: "application/pdf", data: Buffer.from("%PDF").toString("base64") }] }),
     });
     assert.equal(res.status, 400);
     const after = (await json(await fetch(`${shared.base}/memories/${id}`))).memory;
     assert.equal(after.content, "memory that must survive a bad update");
     assert.deepEqual(after.attachments.map((a: any) => a.mimeType), ["text/plain"]);
+
+    const media = await fetch(`${shared.base}/memories/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ attachments: [{ mimeType: "image/png", data: Buffer.from("PNG").toString("base64") }] }),
+    });
+    assert.equal(media.status, 200);
+    const replaced = (await json(await fetch(`${shared.base}/memories/${id}`))).memory;
+    assert.equal(replaced.content, "memory that must survive a bad update");
+    assert.deepEqual(replaced.attachments.map((a: any) => a.mimeType), ["image/png"]);
 });
 
 test("PATCH /memories/:id/attachments updates a caption, 404 missing, 400 bad body, 405 wrong method", async () => {

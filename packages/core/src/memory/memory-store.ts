@@ -14,6 +14,9 @@ import {
     AttachmentLimits,
     AttachmentValidationError,
     DEFAULT_ATTACHMENT_LIMITS,
+    LOCAL_ATTACHMENT_LIMITS,
+    SUPPORTED_MIME_TYPES,
+    ValidatedAttachment,
     isEmbeddableAttachmentKind,
     mimeToKind,
     validateAttachments,
@@ -38,7 +41,7 @@ import {
 } from './types';
 export type { AttachmentBytes } from './types';
 
-/** The local text index (EmbeddingGemma 2 via MLX, 768 dimensions). */
+/** The local index (EmbeddingGemma 2 via MLX, 768 dimensions): text chunks and media in one space. */
 export const LOCAL_TEXT_COLLECTION = 'memories_mlx_embeddinggemma2_8bit';
 /** The index written by earlier BGE-M3 MLX releases (1024 dimensions). */
 export const LEGACY_BGE_M3_COLLECTION = 'memories_mlx_bge_m3_8bit';
@@ -65,10 +68,10 @@ const SIMILAR_MAX_RESULTS = 3;
  * store. Each retrieval chunk is one stored row. The generic store's columns
  * are reused as typed, filterable storage slots:
  *
- *   id            -> `${parentId}::${chunkIndex}`
- *                    (legacy media rows: `${parentId}::att::${attachIndex}`)
- *   vector        -> chunk text embedding
- *   content       -> chunk text (the BM25 target)
+ *   id            -> `${parentId}::${chunkIndex}`       (text chunk row)
+ *                 -> `${parentId}::att::${attachIndex}` (image/audio/video row)
+ *   vector        -> chunk text or media embedding
+ *   content       -> chunk text, or a media row's caption/title (the BM25 target)
  *   relativePath  -> parentId        (filterable: get / list / delete grouping)
  *   startLine     -> chunk/attachment index
  *   endLine       -> chunk/attachment count
@@ -77,8 +80,9 @@ const SIMILAR_MAX_RESULTS = 3;
  *
  * Recall ranks chunks then resolves + dedupes back to whole parent memories,
  * so the caller never receives a fragment (the "parent document retriever"
- * pattern). Attachments are never embedded: their bytes live in the BlobStore
- * and only their metadata rides along in `metadata.attachments`.
+ * pattern). Attachment bytes live in the BlobStore and their metadata rides
+ * along in `metadata.attachments`. Image/audio/video attachments also get one
+ * row each, embedded from their bytes; blob-only `file` attachments never do.
  */
 interface StoredAttachment {
     /** Stable within the parent memory (the attachment's index as a string). */
@@ -134,7 +138,7 @@ export interface MemoryStoreConfig {
     chunkOptions?: ChunkOptions;
     /** Where attachment bytes are stored. Defaults to `~/.gemdex/blobs`. */
     blobStore?: BlobStore;
-    /** Per-modality attachment limits. Defaults applied when omitted. */
+    /** Per-modality attachment limits. Defaults to {@link LOCAL_ATTACHMENT_LIMITS}. */
     attachmentLimits?: AttachmentLimits;
 }
 
@@ -146,6 +150,8 @@ export class MemoryStore {
     private chunkOptions: ChunkOptions;
     private blobStore: BlobStore;
     private attachmentLimits: AttachmentLimits;
+    /** Limits for re-writing attachments that are already stored (update-preserve, import). */
+    private preserveLimits: AttachmentLimits;
     private collectionReady?: Promise<void>;
 
     constructor(config: MemoryStoreConfig) {
@@ -161,7 +167,35 @@ export class MemoryStore {
         }
         this.chunkOptions = config.chunkOptions ?? {};
         this.blobStore = config.blobStore ?? new FileBlobStore();
-        this.attachmentLimits = config.attachmentLimits ?? DEFAULT_ATTACHMENT_LIMITS;
+        this.attachmentLimits = config.attachmentLimits ?? LOCAL_ATTACHMENT_LIMITS;
+        this.preserveLimits = MemoryStore.widenLimits(this.attachmentLimits, DEFAULT_ATTACHMENT_LIMITS);
+    }
+
+    /**
+     * The looser of two limit sets. Earlier Gemini-embedded releases stored
+     * media (including PDFs) under the server limits; an edit or restore of
+     * such a memory must keep those files rather than fail validation.
+     */
+    private static widenLimits(a: AttachmentLimits, b: AttachmentLimits): AttachmentLimits {
+        return {
+            maxImages: Math.max(a.maxImages, b.maxImages),
+            maxAudio: Math.max(a.maxAudio, b.maxAudio),
+            maxVideo: Math.max(a.maxVideo, b.maxVideo),
+            maxPdf: Math.max(a.maxPdf, b.maxPdf),
+            maxFiles: Math.max(a.maxFiles, b.maxFiles),
+            maxBytesPerAttachment: Math.max(a.maxBytesPerAttachment, b.maxBytesPerAttachment),
+            maxAudioSeconds: Math.max(a.maxAudioSeconds, b.maxAudioSeconds),
+            maxVideoSeconds: Math.max(a.maxVideoSeconds, b.maxVideoSeconds),
+            maxPdfPages: Math.max(a.maxPdfPages, b.maxPdfPages),
+            mimeTypes: [...new Set([...(a.mimeTypes ?? SUPPORTED_MIME_TYPES), ...(b.mimeTypes ?? SUPPORTED_MIME_TYPES)])],
+        };
+    }
+
+    /** True when this store embeds an attachment of this kind and mimeType from its bytes. */
+    private embedsAttachment(att: { kind: AttachmentKind; mimeType: string }): boolean {
+        return this.embedding.isMultimodal() &&
+            isEmbeddableAttachmentKind(att.kind) &&
+            (this.attachmentLimits.mimeTypes ?? SUPPORTED_MIME_TYPES).includes(att.mimeType.toLowerCase());
     }
 
     private getIsHybrid(): boolean {
@@ -208,6 +242,10 @@ export class MemoryStore {
         return `${parentId}::${chunkIndex}`;
     }
 
+    private static attachmentRowId(parentId: string, attachmentIndex: number): string {
+        return `${parentId}::att::${attachmentIndex}`;
+    }
+
     private static escapeLiteral(value: string): string {
         return value.replace(/'/g, "''");
     }
@@ -239,6 +277,73 @@ export class MemoryStore {
             fileExtension: '',
             metadata: record,
         }));
+    }
+
+    /**
+     * One row per embedded image/audio/video attachment. Blob-only `file`
+     * attachments live in parent metadata + BlobStore and never enter the
+     * vector table (no dense/BM25 pollution from multi-MB transcripts).
+     */
+    private buildAttachmentRows(
+        parentId: string,
+        stored: StoredAttachment[],
+        vectorsByStoredIndex: Map<number, EmbeddingVector>,
+        meta: ParentMeta,
+    ): VectorDocument[] {
+        const record = this.metaToRecord(meta);
+        const rows: VectorDocument[] = [];
+        for (let index = 0; index < stored.length; index++) {
+            const vector = vectorsByStoredIndex.get(index);
+            if (!vector) continue;
+            rows.push({
+                id: MemoryStore.attachmentRowId(parentId, index),
+                vector: vector.vector,
+                // BM25 text for a media row is its caption, falling back to the title.
+                content: stored[index].caption ?? meta.title,
+                relativePath: parentId,
+                startLine: index,
+                endLine: stored.length,
+                fileExtension: '',
+                metadata: record,
+            });
+        }
+        return rows;
+    }
+
+    /** Embed media one request at a time: a single video can take the worker seconds. */
+    private async embedMedia(
+        attachments: { mimeType: string; bytes: Buffer }[],
+        purpose: 'document' | 'query',
+    ): Promise<EmbeddingVector[]> {
+        const vectors: EmbeddingVector[] = [];
+        for (const att of attachments) {
+            const content = [{ inlineData: { mimeType: att.mimeType, data: att.bytes.toString('base64') } }];
+            vectors.push(...await (purpose === 'query'
+                ? this.embedding.embedQueryContentBatch(content)
+                : this.embedding.embedContentBatch(content)));
+        }
+        return vectors;
+    }
+
+    /**
+     * Embed already-stored media one at a time, leaving out any file the model
+     * cannot decode: an old blob must not block editing, restoring or migrating
+     * its memory. A skipped file stays a readable blob that is not searchable.
+     */
+    private async embedStoredMedia(
+        attachments: { mimeType: string; bytes: Buffer }[],
+    ): Promise<(EmbeddingVector | undefined)[]> {
+        const vectors: (EmbeddingVector | undefined)[] = [];
+        for (const att of attachments) {
+            try {
+                vectors.push((await this.embedMedia([att], 'document'))[0]);
+            } catch (error) {
+                console.warn(`[MemoryStore] Keeping a ${att.mimeType} attachment unsearchable: ${
+                    error instanceof Error ? error.message : String(error)}`);
+                vectors.push(undefined);
+            }
+        }
+        return vectors;
     }
 
     private async embedChunks(chunks: string[]): Promise<EmbeddingVector[]> {
@@ -313,14 +418,18 @@ export class MemoryStore {
     /**
      * The single write path shared by save/update/import. Overwrites any rows +
      * blobs already under `id` (in either index), then persists the supplied
-     * text + attachments into the main index. Attachments are stored as blobs
-     * and never embedded. Image/audio/video/PDF attachments are refused unless
-     * `preserveMedia` is set, which only the update-preserve and import paths
-     * use so media saved by earlier releases survives an edit or a restore.
+     * text + attachments into the main index. Every attachment is stored as a
+     * blob; image/audio/video attachments are also embedded from their bytes
+     * into one row each. New media the store cannot embed is refused.
+     * `preserveMedia` (update-preserve and import) re-writes files that are
+     * already stored: it validates against the looser of the store and server
+     * limits, and keeps any file it cannot embed as an unsearchable blob. On an
+     * update with explicit attachments, inputs matching a `storedAttachments`
+     * entry by id and mimeType get the same treatment; the rest are new files.
      * Throws if the resulting memory would be completely empty.
      *
-     * Also returns the chunk vectors it just computed so `save` can reuse them
-     * for similar-memory detection with zero extra embedding calls.
+     * Also returns the vectors it just computed so `save` can reuse them for
+     * similar-memory detection with zero extra embedding calls.
      */
     private async writeMemory(
         id: string,
@@ -329,22 +438,36 @@ export class MemoryStore {
         attachmentsInput: MemoryAttachmentInput[],
         createdAt: number,
         updatedAt: number,
-        options: { preserveMedia?: boolean } = {},
-    ): Promise<{ memory: Memory; chunkVectors: EmbeddingVector[] }> {
+        options: { preserveMedia?: boolean; storedAttachments?: StoredAttachment[] } = {},
+    ): Promise<{ memory: Memory; vectors: EmbeddingVector[] }> {
         const text = content ?? '';
+        // An input re-sending a file this memory already stores (same id and
+        // mimeType) is held to the stored-file rules, so re-sending a legacy PDF
+        // alongside a newly added image does not fail the update.
+        const stored = new Set((options.storedAttachments ?? []).map((att) => `${att.id}\n${att.mimeType.toLowerCase()}`));
+        const preserved = attachmentsInput.map((att) => options.preserveMedia === true ||
+            (typeof att?.id === 'string' && typeof att.mimeType === 'string' &&
+                stored.has(`${att.id.trim()}\n${att.mimeType.toLowerCase()}`)));
         const validated = attachmentsInput.length > 0
-            ? await validateAttachments(attachmentsInput, this.attachmentLimits)
+            ? await validateAttachments(attachmentsInput, preserved.some(Boolean) ? this.preserveLimits : this.attachmentLimits)
             : [];
 
-        if (!options.preserveMedia) {
-            const media = validated.find((att) => isEmbeddableAttachmentKind(att.kind));
-            if (media) {
+        const accepted = this.attachmentLimits.mimeTypes ?? SUPPORTED_MIME_TYPES;
+        validated.forEach((att, index) => {
+            if (preserved[index]) return;
+            if (!accepted.includes(att.mimeType.toLowerCase())) {
                 throw new AttachmentValidationError(
-                    `${media.mimeType} attachments are not supported: the local embedding model is text-only. ` +
-                    'Only text/JSON file attachments (e.g. transcripts) can be stored.',
+                    `Unsupported attachment mimeType '${att.mimeType}'. Supported: ${accepted.join(', ')}.`,
                 );
             }
-        }
+            if (isEmbeddableAttachmentKind(att.kind) && !this.embedsAttachment(att)) {
+                throw new AttachmentValidationError(
+                    `${att.mimeType} attachments need a multimodal embedding model; ` +
+                    `the current ${this.embedding.getProvider()} model only embeds text.`,
+                );
+            }
+        });
+        const embeddable: ValidatedAttachment[] = validated.filter((att) => this.embedsAttachment(att));
 
         // Guard BEFORE any destructive work: an empty payload must never wipe an
         // existing memory on an update/import overwrite.
@@ -358,9 +481,21 @@ export class MemoryStore {
         // deleting the prior rows/blobs means a failed update/import leaves the
         // existing memory intact instead of destroying it.
         let chunks = text.trim().length > 0 ? chunkMemory(text, this.chunkOptions) : [];
-        // Attachment-only memories still need one row for get/list/delete
-        // grouping — index the title only, never the attachment body.
-        if (chunks.length === 0) chunks = [title];
+        const mediaResults: (EmbeddingVector | undefined)[] = [];
+        for (const att of embeddable) {
+            mediaResults.push(preserved[validated.indexOf(att)]
+                ? (await this.embedStoredMedia([att]))[0]
+                : (await this.embedMedia([att], 'document'))[0]);
+        }
+        const vectorsByStoredIndex = new Map<number, EmbeddingVector>();
+        for (let i = 0; i < embeddable.length; i++) {
+            const vector = mediaResults[i];
+            if (vector) vectorsByStoredIndex.set(validated.indexOf(embeddable[i]), vector);
+        }
+        const mediaVectors = [...vectorsByStoredIndex.values()];
+        // A memory with no text and no embedded media still needs one row for
+        // get/list/delete grouping — index the title only, never a file body.
+        if (chunks.length === 0 && mediaVectors.length === 0) chunks = [title];
         const chunkVectors = await this.embedChunks(chunks);
         await this.ensureCollection();
 
@@ -403,7 +538,10 @@ export class MemoryStore {
             }
 
             const meta: ParentMeta = { title, fullContent: text, createdAt, updatedAt, attachments: stored };
-            await this.db.insertHybrid(this.collectionName, this.buildChunkRows(id, chunks, chunkVectors, meta));
+            await this.db.insertHybrid(this.collectionName, [
+                ...this.buildChunkRows(id, chunks, chunkVectors, meta),
+                ...this.buildAttachmentRows(id, stored, vectorsByStoredIndex, meta),
+            ]);
 
             return {
                 memory: {
@@ -414,7 +552,7 @@ export class MemoryStore {
                     createdAt,
                     updatedAt,
                 },
-                chunkVectors,
+                vectors: [...chunkVectors, ...mediaVectors],
             };
         } catch (error) {
             // Don't leave orphan blobs behind if blob writes or the insert failed.
@@ -434,8 +572,9 @@ export class MemoryStore {
     }
 
     /**
-     * Persist a new memory. Text is chunked + embedded; attachments (text/JSON
-     * files only) are stored as blobs on disk. Returns the
+     * Persist a new memory. Text is chunked + embedded; each image/audio/video
+     * attachment is embedded as its own row; every attachment's bytes are
+     * stored as a blob on disk. Returns the
      * created memory (including the resolved title + attachment metadata) plus
      * advisory `similar` candidates when save-time detection finds any.
      *
@@ -456,11 +595,11 @@ export class MemoryStore {
         }
         const id = MemoryStore.newId();
         const now = Date.now();
-        const { memory, chunkVectors } = await this.writeMemory(id, content, input.title, attachmentsInput, now, now);
+        const { memory, vectors } = await this.writeMemory(id, content, input.title, attachmentsInput, now, now);
 
         let similar: SimilarMemoryRef[] = [];
         try {
-            similar = await this.findSimilarParents(chunkVectors.map(v => v.vector), id);
+            similar = await this.findSimilarParents(vectors.map(v => v.vector), id);
         } catch (error) {
             // Advisory only — never let detection failure taint a successful save.
             console.error('[MemoryStore] Save-time similar-memory detection failed:', error);
@@ -554,25 +693,44 @@ export class MemoryStore {
     }
 
     /**
-     * Retrieve memories by a natural-language query: hybrid (dense + BM25)
-     * search over chunks, resolved to full parent memories and deduped by
-     * parent id. Pure relevance ranking.
+     * Retrieve memories by a natural-language query and/or example media
+     * (image / audio / video). Each query signal becomes its own ranked branch:
+     * text takes the hybrid (dense + BM25) path; each query attachment is
+     * embedded with the query prompt and runs a dense branch in the same shared
+     * space, so it matches text and media rows alike. More than one branch is
+     * fused with RRF (scale-free, like the hybrid text path), then resolved to
+     * full parent memories and deduped by parent id. Pure relevance ranking.
      *
-     * `queryAttachments` exists for {@link MemoryBackend} parity; the local
-     * text model cannot embed media, so supplying any throws. Throws while the
-     * legacy index still holds memories, because they cannot be searched and
-     * silently leaving them out of results would look like data loss.
+     * `query` is optional when at least one query attachment is supplied.
+     * Query attachments need a multimodal embedding and may not be blob-only
+     * files. Throws while the legacy index still holds memories, because they
+     * cannot be searched and silently leaving them out would look like data loss.
      */
     async recall(
         query?: string,
         limit = 10,
         queryAttachments?: MemoryAttachmentInput[],
     ): Promise<MemoryRecallResult[]> {
-        if ((queryAttachments?.length ?? 0) > 0) {
-            throw new AttachmentValidationError('Recall by media is not supported: the local embedding model is text-only.');
-        }
         const trimmed = (query ?? '').trim();
-        if (trimmed.length === 0) return [];
+        const attachmentsInput = queryAttachments ?? [];
+        if (trimmed.length === 0 && attachmentsInput.length === 0) return [];
+
+        // Validate query media before the empty-store shortcut, so a misuse
+        // fails clearly rather than silently returning [] on an empty store.
+        const validatedQuery = attachmentsInput.length > 0
+            ? await validateAttachments(attachmentsInput, this.attachmentLimits)
+            : [];
+        const file = validatedQuery.find((att) => !isEmbeddableAttachmentKind(att.kind));
+        if (file) {
+            throw new AttachmentValidationError(
+                `Recall by ${file.mimeType} is not supported: search with an image, audio or video file, or put the text in the query.`,
+            );
+        }
+        if (validatedQuery.length > 0 && !this.embedding.isMultimodal()) {
+            throw new AttachmentValidationError(
+                `Recall by media needs a multimodal embedding model; the current ${this.embedding.getProvider()} model only embeds text.`,
+            );
+        }
         await this.assertNoLegacyRows('search');
 
         if (!await this.db.hasCollection(this.collectionName) ||
@@ -581,8 +739,42 @@ export class MemoryStore {
         // Over-fetch chunks so that after dedupe-by-parent we still have enough
         // distinct memories to satisfy `limit`.
         const chunkLimit = Math.max(limit * 4, 20);
-        const hits = await this.searchText(trimmed, chunkLimit);
-        return this.resolveHitsToParents(hits, limit);
+        // Text only: keep the per-branch subScores that callers show beneath hits.
+        if (validatedQuery.length === 0) {
+            return this.resolveHitsToParents(await this.searchText(trimmed, chunkLimit), limit);
+        }
+
+        const rankedLists: HybridSearchResult[][] = [];
+        if (trimmed.length > 0) rankedLists.push(await this.searchText(trimmed, chunkLimit));
+        for (const vector of await this.embedMedia(validatedQuery, 'query')) {
+            const dense = await this.db.search(this.collectionName, vector.vector, { topK: chunkLimit });
+            rankedLists.push(dense.map((r) => ({ document: r.document, score: r.score })));
+        }
+        return this.resolveHitsToParents(MemoryStore.fuseByRrf(rankedLists), limit);
+    }
+
+    /**
+     * Reciprocal Rank Fusion across branch result lists. Each row's score is
+     * the sum of `1 / (k + rank)` over the lists that surfaced it (1-based
+     * rank), deduped at the row level. Scale-free, so a dense media branch and
+     * a fused text branch combine without score normalization.
+     */
+    private static fuseByRrf(lists: HybridSearchResult[][], k = RECALL_RRF_K): HybridSearchResult[] {
+        const byRow = new Map<string, HybridSearchResult>();
+        for (const list of lists) {
+            const seen = new Set<string>();
+            let rank = 0;
+            for (const hit of list) {
+                const rowId = hit.document.id;
+                if (!rowId || seen.has(rowId)) continue;
+                seen.add(rowId);
+                const contribution = 1 / (k + ++rank);
+                const existing = byRow.get(rowId);
+                if (existing) existing.score += contribution;
+                else byRow.set(rowId, { document: hit.document, score: contribution });
+            }
+        }
+        return Array.from(byRow.values()).sort((a, b) => b.score - a.score);
     }
 
     /** One text branch: hybrid (dense + BM25) when enabled, else dense-only. */
@@ -674,6 +866,7 @@ export class MemoryStore {
 
         const content = input.content ?? existing.fullContent;
         const preserveMedia = input.attachments === undefined;
+        const storedAttachments = existing.attachments;
         const attachmentsInput = input.attachments ?? await this.attachmentsToInput(existing.attachments);
         const title = input.title ?? existing.title;
 
@@ -683,7 +876,7 @@ export class MemoryStore {
 
         const now = Date.now();
         const { memory } = await this.writeMemory(
-            id, content, title, attachmentsInput, existing.createdAt, now, { preserveMedia });
+            id, content, title, attachmentsInput, existing.createdAt, now, { preserveMedia, storedAttachments });
         return memory;
     }
 
@@ -906,10 +1099,11 @@ export class MemoryStore {
 
     /**
      * Move every memory out of the legacy indexes into the main index. Text
-     * chunks are re-embedded with the main embedding; a parent with no text
-     * rows (media-only) gets a single title row. Legacy media rows are dropped
-     * — the media is no longer searchable — but parent metadata and blobs are
-     * kept byte-for-byte, so attachments stay readable. The destination commits
+     * chunks are re-embedded with the main embedding, and so is each stored
+     * image/audio/video blob the main embedding accepts (one row per file, as
+     * on save); a file the model cannot decode stays a readable, unsearchable
+     * blob. A parent with nothing else embedded gets a single title row. Parent
+     * metadata and blobs are kept byte-for-byte. The destination commits
      * before the source rows are deleted and stable row ids make reruns
      * idempotent, including after a failed source delete. Progress counts
      * legacy parents.
@@ -947,7 +1141,10 @@ export class MemoryStore {
                     const metadata = this.parseMetadata(unique[0].metadata);
                     const inMain = await this.db.hasCollection(this.collectionName) && (await this.db.query(
                         this.collectionName, `relativePath == '${MemoryStore.escapeLiteral(parentId)}'`, ['id'], 1)).length > 0;
-                    const toEmbed = textRows.length > 0 || inMain ? textRows : [{
+                    // A rerun after a page split finds the parent in the main
+                    // index already: its media rows went in with the first upsert.
+                    const mediaDocuments = inMain ? [] : await this.migrateMediaRows(parentId, metadata);
+                    const toEmbed = textRows.length > 0 || inMain || mediaDocuments.length > 0 ? textRows : [{
                         id: MemoryStore.chunkRowId(parentId, 0),
                         content: this.rowToParentMeta(metadata).title,
                         relativePath: parentId,
@@ -956,9 +1153,9 @@ export class MemoryStore {
                         fileExtension: '',
                         metadata,
                     }];
-                    if (toEmbed.length > 0) {
+                    if (toEmbed.length > 0 || mediaDocuments.length > 0) {
                         const vectors = await this.embedChunks(toEmbed.map(row => row.content as string));
-                        const documents: VectorDocument[] = toEmbed.map((row, index) => ({
+                        const documents: VectorDocument[] = [...mediaDocuments, ...toEmbed.map((row, index) => ({
                             id: row.id as string,
                             content: row.content as string,
                             vector: vectors[index].vector,
@@ -967,7 +1164,7 @@ export class MemoryStore {
                             endLine: Number(row.endLine),
                             fileExtension: typeof row.fileExtension === 'string' ? row.fileExtension : '',
                             metadata: this.parseMetadata(row.metadata),
-                        }));
+                        }))];
                         await this.ensureCollection();
                         await this.db.upsertHybrid(this.collectionName, documents);
                     }
@@ -978,6 +1175,38 @@ export class MemoryStore {
                 }
             }
         }
+    }
+
+    /** Main-index rows for a legacy parent's stored media, embedded from its blobs. */
+    private async migrateMediaRows(parentId: string, metadata: Record<string, any>): Promise<VectorDocument[]> {
+        const { title, attachments: stored } = this.rowToParentMeta(metadata);
+        const media: { index: number; mimeType: string; bytes: Buffer; caption?: string }[] = [];
+        for (let index = 0; index < stored.length; index++) {
+            const att = stored[index];
+            if (!this.embedsAttachment(att)) continue;
+            try {
+                media.push({ index, mimeType: att.mimeType, bytes: await this.blobStore.get(att.blobRef), caption: att.caption });
+            } catch {
+                // Blob missing on disk: nothing to embed; the metadata is kept as-is.
+            }
+        }
+        const vectors = await this.embedStoredMedia(media);
+        const documents: VectorDocument[] = [];
+        media.forEach((att, i) => {
+            const vector = vectors[i];
+            if (!vector) return;
+            documents.push({
+                id: MemoryStore.attachmentRowId(parentId, att.index),
+                vector: vector.vector,
+                content: att.caption ?? title,
+                relativePath: parentId,
+                startLine: att.index,
+                endLine: stored.length,
+                fileExtension: '',
+                metadata,
+            });
+        });
+        return documents;
     }
 
     /** Export all memories as portable records (sorted by updatedAt desc). */
@@ -1003,8 +1232,9 @@ export class MemoryStore {
     /**
      * Import memories from portable records. Upsert by id (default merge
      * policy, §7.5): an existing id is replaced; a new id is inserted.
-     * Re-embeds content via the configured embedding. Media attachments in the
-     * records (from exports of earlier releases) are kept as blobs, unembedded.
+     * Re-embeds content and image/audio/video attachments via the configured
+     * embedding. Attachments the store no longer embeds (e.g. PDFs exported by
+     * earlier Gemini releases) are kept as blobs, unsearchable.
      * Per-record fault-tolerant: a record that throws is collected into
      * `errors` and the loop continues, so one bad record can't abort a large
      * restore midway.

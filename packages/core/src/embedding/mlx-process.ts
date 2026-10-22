@@ -4,6 +4,9 @@ import { MLX_DIMENSION } from './mlx-manifest';
 /** Retrieval prompt selector: queries and stored documents are embedded differently. */
 export type MlxEmbeddingKind = 'query' | 'document';
 
+/** One worker input: text, or a media file the worker reads from a private temporary path. */
+export type MlxInput = { text: string } | { path: string; mimeType: string };
+
 /** One in-flight request; no unbounded queue, stdout or stderr accumulation. */
 export class MlxProcess {
     private child?: ChildProcessWithoutNullStreams;
@@ -13,13 +16,14 @@ export class MlxProcess {
     private idle?: NodeJS.Timeout;
     private readonly onExit = () => this.close();
 
-    constructor(private command: string, private args: string[], private timeoutMs = 120_000) {}
+    // Video decoding and long audio take far longer than text, so the per-request bound is generous.
+    constructor(private command: string, private args: string[], private timeoutMs = 300_000) {}
 
-    request(texts: string[], kind: MlxEmbeddingKind): Promise<number[][]> {
+    request(inputs: MlxInput[], kind: MlxEmbeddingKind): Promise<number[][]> {
         if (this.pending) return Promise.reject(new Error('MLX worker is busy; await the previous embedding request'));
-        if (texts.length < 1 || texts.length > 16) return Promise.reject(new Error('MLX batch must contain 1–16 texts'));
+        if (inputs.length < 1 || inputs.length > 16) return Promise.reject(new Error('MLX batch must contain 1–16 inputs'));
         const id = ++this.sequence;
-        const frame = JSON.stringify({ id, kind, texts }) + '\n';
+        const frame = JSON.stringify({ id, kind, inputs }) + '\n';
         if (Buffer.byteLength(frame) > 1024 * 1024) return Promise.reject(new Error('MLX request exceeds 1 MiB'));
         clearTimeout(this.idle);
         if (!this.child) {
@@ -62,7 +66,7 @@ export class MlxProcess {
         }
         this.setReferenced(true);
         return new Promise((resolve, reject) => {
-            this.pending = { id, count: texts.length, resolve, reject, timer: setTimeout(() => this.fail(new Error('MLX worker timed out')), this.timeoutMs) };
+            this.pending = { id, count: inputs.length, resolve, reject, timer: setTimeout(() => this.fail(new Error('MLX worker timed out')), this.timeoutMs) };
             this.child!.stdin.write(frame);
         });
     }

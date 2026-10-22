@@ -276,17 +276,17 @@ test('recall returns titles + ids only — never the body', async () => {
     cleanup();
 });
 
-test('recall requires a non-empty query', async () => {
+test('recall requires a non-empty query or a file', async () => {
     const { statsStore, cleanup } = makeStatsStore();
     const handlers = new MemoryToolHandlers(new FakeBackend(null), statsStore);
 
     const missing = await handlers.handleRecall({});
     assert.equal(missing.isError, true);
-    assert.match(missing.content[0].text, /'query' is required/);
+    assert.match(missing.content[0].text, /provide 'query', at least one file/);
 
     const blank = await handlers.handleRecall({ query: '   ' });
     assert.equal(blank.isError, true);
-    assert.match(blank.content[0].text, /'query' is required/);
+    assert.match(blank.content[0].text, /provide 'query', at least one file/);
     cleanup();
 });
 

@@ -2,11 +2,12 @@ import Foundation
 import UniformTypeIdentifiers
 
 /// Stored-attachment metadata as seen by the manager UI. Attachments are
-/// read-only blobs (chat transcripts are `file` attachments with a text/plain
-/// or application/x-ndjson mime type). `kind` is kept as the raw string so
-/// legacy kinds (image/audio/video/pdf) and unknown future kinds still decode;
-/// the UI treats every kind as a generic downloadable file. Raw bytes are
-/// fetched on demand from `GET /memories/:id/attachments/:attachmentId`.
+/// image/audio/video media or plain files (chat transcripts are `file`
+/// attachments with a text/plain or application/x-ndjson mime type). `kind` is
+/// kept as the raw string so legacy kinds (pdf) and unknown future kinds still
+/// decode; previews are chosen from the mime type and everything else is a
+/// generic downloadable file. Raw bytes are fetched on demand from
+/// `GET /memories/:id/attachments/:attachmentId`.
 struct Attachment: Codable, Identifiable, Hashable, Sendable {
     let id: String
     let kind: String
@@ -40,10 +41,19 @@ struct Attachment: Codable, Identifiable, Hashable, Sendable {
 
     var isTranscript: Bool { fileExtension == "jsonl" }
 
+    /// Which inline preview applies, if any (image thumbnail, audio/video player).
+    var previewKind: MediaKind? {
+        let mime = mimeType.lowercased()
+        if mime.hasPrefix("image/") { return .image }
+        if mime.hasPrefix("audio/") { return .audio }
+        if mime.hasPrefix("video/") { return .video }
+        return nil
+    }
+
     /// Suggested local filename. Attachments carry no stored name, so derive a
     /// stable one from the kind and id.
     var suggestedFilename: String {
-        let base = isTranscript ? "transcript" : (kind == "file" ? "attachment" : kind)
+        let base = isTranscript ? "transcript" : (previewKind?.rawValue ?? (kind == "file" ? "attachment" : kind))
         return "\(base)-\(id.prefix(8)).\(fileExtension)"
     }
 }

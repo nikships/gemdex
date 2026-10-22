@@ -1,5 +1,5 @@
 import * as http from 'http';
-import { SUPPORTED_MIME_TYPES } from '../memory/attachment-validator';
+import { LOCAL_SUPPORTED_MIME_TYPES, SUPPORTED_MIME_TYPES } from '../memory/attachment-validator';
 import type { MemoryBackend } from '../memory/backend';
 
 /**
@@ -51,9 +51,15 @@ export function sendBytes(
 // a larger limit (ATTACHMENT_BODY_LIMIT) since media payloads are much bigger.
 export const DEFAULT_BODY_LIMIT = 50 * 1024 * 1024; // 50 MiB
 export const ATTACHMENT_BODY_LIMIT = 100 * 1024 * 1024; // 100 MiB for create/update/import with media
+/**
+ * Attachment-route ceiling for the desktop sidecar, whose local store accepts
+ * 100 MiB per file. Kept well under V8's maximum string length, because the
+ * whole body is decoded to one string before JSON parsing.
+ */
+export const LOCAL_ATTACHMENT_BODY_LIMIT = 256 * 1024 * 1024;
 const METHOD_ALLOW_HEADER = 'GET, POST, PUT, PATCH, DELETE, OPTIONS';
 const HEADER_ALLOW_HEADER = 'Content-Type, X-Gemdex-Token';
-const SAFE_INLINE_ATTACHMENT_MIME_TYPES = new Set([...SUPPORTED_MIME_TYPES, 'text/plain']);
+const SAFE_INLINE_ATTACHMENT_MIME_TYPES = new Set([...SUPPORTED_MIME_TYPES, ...LOCAL_SUPPORTED_MIME_TYPES]);
 
 function isJsonObject(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -166,6 +172,8 @@ export function readBody(req: http.IncomingMessage, maxBytes: number = DEFAULT_B
 export interface MemoryApiHandlerOptions {
     store: MemoryBackend;
     corsHeaders?: Record<string, string>;
+    /** Body ceiling for attachment-bearing routes. Defaults to {@link ATTACHMENT_BODY_LIMIT}. */
+    attachmentBodyLimit?: number;
 }
 
 /**
@@ -185,6 +193,7 @@ export async function handleMemoryApiRequest(
     const pathname = url.pathname.replace(/\/+$/, '') || '/';
     const corsHeaders = options.corsHeaders ?? {};
     const store = options.store;
+    const attachmentBodyLimit = options.attachmentBodyLimit ?? ATTACHMENT_BODY_LIMIT;
 
     try {
         // GET /memories — list summaries (sorted by updatedAt desc)
@@ -196,7 +205,7 @@ export async function handleMemoryApiRequest(
 
         // POST /memories — create (text and/or inline media attachments)
         if (method === 'POST' && pathname === '/memories') {
-            const body = await readBody(req, ATTACHMENT_BODY_LIMIT);
+            const body = await readBody(req, attachmentBodyLimit);
             if (!isJsonObject(body)) {
                 sendJson(res, 400, { error: 'Request body must be a JSON object' }, corsHeaders);
                 return true;
@@ -238,7 +247,7 @@ export async function handleMemoryApiRequest(
         // POST /import — restore/merge (upsert by id, per-record fault tolerance:
         // 200 carries { imported, failed, errors } so one bad record can't abort the batch)
         if (method === 'POST' && pathname === '/import') {
-            const body = await readBody(req, ATTACHMENT_BODY_LIMIT);
+            const body = await readBody(req, attachmentBodyLimit);
             if (!Array.isArray(body?.records)) {
                 sendJson(res, 400, { error: "Invalid payload: 'records' must be an array" }, corsHeaders);
                 return true;
@@ -264,7 +273,7 @@ export async function handleMemoryApiRequest(
         // recall-by-example (an attachment lifted from an existing memory);
         // at least one of query or attachments is required.
         if (method === 'POST' && pathname === '/recall') {
-            const body = await readBody(req, ATTACHMENT_BODY_LIMIT);
+            const body = await readBody(req, attachmentBodyLimit);
             if (!isJsonObject(body)) {
                 sendJson(res, 400, { error: 'Request body must be a JSON object' }, corsHeaders);
                 return true;
@@ -374,7 +383,7 @@ export async function handleMemoryApiRequest(
             }
 
             if (method === 'PUT' || method === 'PATCH') {
-                const body = await readBody(req, ATTACHMENT_BODY_LIMIT);
+                const body = await readBody(req, attachmentBodyLimit);
                 if (!isJsonObject(body)) {
                     sendJson(res, 400, { error: 'Request body must be a JSON object' }, corsHeaders);
                     return true;

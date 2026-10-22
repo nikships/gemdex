@@ -5,7 +5,7 @@ import nodeOs from 'os';
 import * as path from 'path';
 import { PDFDocument } from 'pdf-lib';
 import { LanceDBVectorDatabase } from '../vectordb';
-import { Embedding, EmbeddingVector } from '../embedding';
+import { Embedding, EmbeddingContent, EmbeddingVector } from '../embedding';
 import { LEGACY_BGE_M3_COLLECTION, LEGACY_GEMINI_COLLECTION, LOCAL_TEXT_COLLECTION, MemoryStore } from './memory-store';
 import { LocalMemoryBackend } from './backend';
 import { FileBlobStore, S3BlobStore } from './blob-store';
@@ -20,7 +20,7 @@ const ROW_FIELDS = ['id', 'vector', 'content', 'relativePath', 'startLine', 'end
 /**
  * Deterministic offline embedding: hashes word tokens into a fixed-dim vector
  * so semantically-overlapping text lands near each other, without any model.
- * Text-only, like the local MLX embedding.
+ * Text-only.
  */
 class FakeEmbedding extends Embedding {
     protected maxTokens = 8192;
@@ -76,6 +76,42 @@ class CountingEmbedding extends FakeEmbedding {
     async embedBatch(texts: string[]): Promise<EmbeddingVector[]> {
         this.embedCalls += 1;
         return super.embedBatch(texts);
+    }
+}
+
+/**
+ * Multimodal variant: media bytes are read as text and hashed the same way, so
+ * an image whose bytes spell "red circle" lands next to the text "red circle".
+ */
+class FakeMultimodalEmbedding extends FakeEmbedding {
+    mediaCalls: { purpose: 'document' | 'query'; mimeType: string }[] = [];
+    /** Media of this mimeType fails to embed, like a file the worker cannot decode. */
+    failMime?: string;
+
+    isMultimodal(): boolean {
+        return true;
+    }
+
+    async embedContentBatch(contents: EmbeddingContent[]): Promise<EmbeddingVector[]> {
+        return this.embedParts(contents, 'document');
+    }
+
+    async embedQueryContentBatch(contents: EmbeddingContent[]): Promise<EmbeddingVector[]> {
+        return this.embedParts(contents, 'query');
+    }
+
+    private async embedParts(contents: EmbeddingContent[], purpose: 'document' | 'query'): Promise<EmbeddingVector[]> {
+        const vectors: EmbeddingVector[] = [];
+        for (const content of contents) {
+            if (typeof content === 'string') {
+                vectors.push(await this.embed(content));
+                continue;
+            }
+            this.mediaCalls.push({ purpose, mimeType: content.inlineData.mimeType });
+            if (content.inlineData.mimeType === this.failMime) throw new Error('cannot decode media');
+            vectors.push(await this.embed(Buffer.from(content.inlineData.data, 'base64').toString()));
+        }
+        return vectors;
     }
 }
 
@@ -259,10 +295,10 @@ describe('MemoryStore', () => {
         expect(await store.recall(undefined, 5)).toEqual([]);
     });
 
-    it('recall by media throws (the local model is text-only), with or without a text query', async () => {
+    it('recall by media throws with a text-only embedding, with or without a text query', async () => {
         await store.save({ content: 'rollout notes' });
         await expect(store.recall(undefined, 5, [png('IMG')])).rejects.toThrow(AttachmentValidationError);
-        await expect(store.recall('rollout', 5, [png('IMG')])).rejects.toThrow(/Recall by media is not supported/);
+        await expect(store.recall('rollout', 5, [png('IMG')])).rejects.toThrow(/Recall by media needs a multimodal embedding/);
         // An explicitly empty attachment list is plain text recall.
         expect((await store.recall('rollout', 5, [])).length).toBe(1);
     });
@@ -341,7 +377,7 @@ describe('MemoryStore', () => {
                 content: 'record whose attachment type is unsupported',
                 createdAt: 3,
                 updatedAt: 4,
-                attachments: [{ mimeType: 'image/gif', data: b64('gif') }],
+                attachments: [{ mimeType: 'image/bmp', data: b64('bmp') }],
             },
             { id: 'import-ok-2', title: 'OK 2', content: 'second good record', createdAt: 5, updatedAt: 6 },
         ]);
@@ -353,7 +389,7 @@ describe('MemoryStore', () => {
         expect(result.errors).toHaveLength(1);
         expect(result.errors[0].index).toBe(1);
         expect(result.errors[0].id).toBe('import-bad-type');
-        expect(result.errors[0].error).toMatch(/Unsupported attachment mimeType 'image\/gif'/);
+        expect(result.errors[0].error).toMatch(/Unsupported attachment mimeType 'image\/bmp'/);
 
         expect((await store.get('import-ok-1'))?.content).toBe('first good record');
         expect((await store.get('import-ok-2'))?.content).toBe('second good record');
@@ -441,12 +477,12 @@ describe('MemoryStore (attachments)', () => {
         ['image/jpeg', 'image'],
         ['audio/mpeg', 'audio'],
         ['video/mp4', 'video'],
-    ])('rejects a %s save with AttachmentValidationError and writes nothing', async (mimeType) => {
+    ])('rejects a %s save with a text-only embedding and writes nothing', async (mimeType) => {
         const embed = jest.spyOn(FakeEmbedding.prototype, 'embedBatch');
         const attempt = store.save({ content: 'design mock', attachments: [{ mimeType, data: b64('media bytes') }] });
         await expect(attempt).rejects.toThrow(AttachmentValidationError);
         await expect(store.save({ attachments: [{ mimeType, data: b64('media only') }] }))
-            .rejects.toThrow(/attachments are not supported: the local embedding model is text-only/);
+            .rejects.toThrow(/attachments need a multimodal embedding model/);
 
         expect(embed).not.toHaveBeenCalled();
         expect(await store.list()).toEqual([]);
@@ -755,6 +791,171 @@ describe('MemoryStore (attachments)', () => {
         await expect(
             store.updateAttachmentCaptions('does-not-exist', [{ id: '0', caption: 'x' }]),
         ).rejects.toThrow(/not found/i);
+    });
+});
+
+describe('MemoryStore (multimodal media)', () => {
+    let dbDir: string;
+    let blobDir: string;
+    let db: LanceDBVectorDatabase;
+    let embedding: FakeMultimodalEmbedding;
+    let store: MemoryStore;
+
+    beforeEach(async () => {
+        dbDir = await fs.mkdtemp(path.join(os.tmpdir(), 'gemdex-media-db-'));
+        blobDir = await fs.mkdtemp(path.join(os.tmpdir(), 'gemdex-media-blob-'));
+        db = new LanceDBVectorDatabase({ uri: dbDir });
+        embedding = new FakeMultimodalEmbedding();
+        store = new MemoryStore({ embedding, vectorDatabase: db, blobStore: new FileBlobStore(blobDir) });
+    });
+
+    afterEach(async () => {
+        jest.restoreAllMocks();
+        await fs.rm(dbDir, { recursive: true, force: true });
+        await fs.rm(blobDir, { recursive: true, force: true });
+    });
+
+    it('embeds an image-only memory as one media row, without a title row', async () => {
+        const mem = await store.save({ title: 'Whiteboard photo', attachments: [png('red circle sketch')] });
+        expect(mem.attachments).toEqual([{ id: '0', kind: 'image', mimeType: 'image/png', byteLength: 17 }]);
+        const rows = await readRows(db, LOCAL_TEXT_COLLECTION);
+        expect(rows.map((r) => [r.id, r.content])).toEqual([[`${mem.id}::att::0`, 'Whiteboard photo']]);
+        expect(embedding.mediaCalls).toEqual([{ purpose: 'document', mimeType: 'image/png' }]);
+        expect((await store.recall('red circle', 5))[0].id).toBe(mem.id);
+    });
+
+    it('embeds text and each media file but never a blob-only file, using captions as media BM25 text', async () => {
+        const mem = await store.save({
+            content: 'onboarding call notes',
+            attachments: [
+                textFile('full transcript'),
+                { mimeType: 'audio/wav', data: b64('reset password walkthrough'), caption: 'support call' },
+                { mimeType: 'video/mp4', data: b64('screen recording') },
+            ],
+        });
+        const rows = await readRows(db, LOCAL_TEXT_COLLECTION);
+        expect(rows.map((r) => r.id).sort()).toEqual([`${mem.id}::0`, `${mem.id}::att::1`, `${mem.id}::att::2`].sort());
+        expect(rows.find((r) => r.id === `${mem.id}::att::1`)!.content).toBe('support call');
+        expect(embedding.mediaCalls.map((c) => c.mimeType)).toEqual(['audio/wav', 'video/mp4']);
+        expect((await store.recall('reset password', 5))[0].id).toBe(mem.id);
+    });
+
+    it('recalls by example media, alone or fused with a text query', async () => {
+        const circle = await store.save({ content: 'red circle logo draft' });
+        const square = await store.save({ content: 'blue square banner' });
+        const byImage = await store.recall(undefined, 5, [png('red circle logo')]);
+        expect(byImage[0].id).toBe(circle.id);
+        expect(embedding.mediaCalls.at(-1)).toEqual({ purpose: 'query', mimeType: 'image/png' });
+        const fused = await store.recall('blue square banner', 5, [png('red circle logo')]);
+        expect(fused.map((r) => r.id).sort()).toEqual([circle.id, square.id].sort());
+    });
+
+    it('refuses recall by a blob-only file or a type the local model cannot read', async () => {
+        await store.save({ content: 'anything' });
+        await expect(store.recall(undefined, 5, [textFile('notes')])).rejects.toThrow(/Recall by text\/plain is not supported/);
+        await expect(store.recall('x', 5, [{ mimeType: 'application/pdf', data: b64('pdf') }]))
+            .rejects.toThrow(AttachmentValidationError);
+    });
+
+    it('rejects a PDF save, since the local model has no PDF input', async () => {
+        await expect(store.save({ content: 'spec', attachments: [{ mimeType: 'application/pdf', data: b64('x') }] }))
+            .rejects.toThrow(/Unsupported attachment mimeType 'application\/pdf'/);
+        expect(await store.list()).toEqual([]);
+    });
+
+    it('fails a save whose media cannot be embedded and writes nothing', async () => {
+        embedding.failMime = 'video/mp4';
+        await expect(store.save({ content: 'clip', attachments: [{ mimeType: 'video/mp4', data: b64('broken') }] }))
+            .rejects.toThrow(/cannot decode/);
+        expect(await store.list()).toEqual([]);
+        expect(await listFilesRecursive(blobDir)).toEqual([]);
+    });
+
+    it('re-embeds kept media on update and embeds media added on update', async () => {
+        const mem = await store.save({ content: 'orig', attachments: [png('red circle')] });
+        embedding.mediaCalls = [];
+        await store.update(mem.id, { content: 'changed' });
+        expect(embedding.mediaCalls).toEqual([{ purpose: 'document', mimeType: 'image/png' }]);
+        await store.update(mem.id, { attachments: [png('red circle'), { mimeType: 'audio/mp3', data: b64('jingle') }] });
+        const rows = await readRows(db, LOCAL_TEXT_COLLECTION);
+        expect(rows.map((r) => r.id).sort()).toEqual([`${mem.id}::0`, `${mem.id}::att::0`, `${mem.id}::att::1`].sort());
+    });
+
+    it('updateAttachmentCaptions rewrites a media row\'s BM25 text and keeps its vector', async () => {
+        const mem = await store.save({ title: 'Photo', attachments: [png('red circle')] });
+        const [before] = await readRows(db, LOCAL_TEXT_COLLECTION);
+        embedding.mediaCalls = [];
+        await store.updateAttachmentCaptions(mem.id, [{ id: '0', caption: 'logo sketch' }]);
+        const [after] = await readRows(db, LOCAL_TEXT_COLLECTION);
+        expect(after.vector).toEqual(before.vector);
+        expect(after.content).toBe('logo sketch');
+        expect(embedding.mediaCalls).toEqual([]);
+    });
+
+    it('embeds imported media and keeps an earlier release\'s PDF as an unsearchable blob', async () => {
+        const pdf = await PDFDocument.create();
+        pdf.addPage();
+        const pdfBytes = Buffer.from(await pdf.save());
+        const result = await store.importRecords([{
+            id: 'old-export',
+            title: 'Spec',
+            content: '',
+            createdAt: 1,
+            updatedAt: 2,
+            attachments: [
+                { id: 'diagram', mimeType: 'image/png', data: b64('red circle'), caption: 'logo' },
+                { id: 'spec', mimeType: 'application/pdf', data: pdfBytes.toString('base64') },
+            ],
+        }]);
+        expect(result).toEqual({ imported: 1, failed: 0, errors: [] });
+        expect((await readRows(db, LOCAL_TEXT_COLLECTION)).map((r) => r.id)).toEqual(['old-export::att::0']);
+        expect((await store.readAttachment('old-export', 'spec'))!.data.equals(pdfBytes)).toBe(true);
+
+        await store.update('old-export', { content: 'spec notes' });
+        expect((await store.get('old-export'))!.attachments.map((a) => a.id)).toEqual(['diagram', 'spec']);
+    });
+
+    it('accepts a stored PDF re-sent with a new image on update, but not a new PDF', async () => {
+        const pdf = await PDFDocument.create();
+        pdf.addPage();
+        const pdfData = Buffer.from(await pdf.save()).toString('base64');
+        await store.importRecords([{
+            id: 'with-pdf', title: 'Spec', content: 'spec notes', createdAt: 1, updatedAt: 2,
+            attachments: [{ id: 'spec', mimeType: 'application/pdf', data: pdfData }],
+        }]);
+
+        const updated = await store.update('with-pdf', {
+            attachments: [{ id: 'spec', mimeType: 'application/pdf', data: pdfData }, png('red circle')],
+        });
+        expect(updated.attachments.map((a) => [a.id, a.kind])).toEqual([['spec', 'pdf'], ['1', 'image']]);
+        expect((await readRows(db, LOCAL_TEXT_COLLECTION)).map((r) => r.id).sort()).toEqual(['with-pdf::0', 'with-pdf::att::1']);
+
+        await expect(store.update('with-pdf', {
+            attachments: [{ id: 'other', mimeType: 'application/pdf', data: pdfData }],
+        })).rejects.toThrow(/Unsupported attachment mimeType 'application\/pdf'/);
+        expect((await store.get('with-pdf'))!.attachments.map((a) => a.id)).toEqual(['spec', '1']);
+    });
+
+    it('keeps preserved media it cannot embed as a blob instead of failing the import', async () => {
+        embedding.failMime = 'video/mp4';
+        jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const result = await store.importRecords([{
+            id: 'clip',
+            title: 'Demo clip',
+            content: '',
+            createdAt: 1,
+            updatedAt: 2,
+            attachments: [{ id: 'v', mimeType: 'video/mp4', data: b64('broken') }],
+        }]);
+        expect(result.imported).toBe(1);
+        expect((await readRows(db, LOCAL_TEXT_COLLECTION)).map((r) => [r.id, r.content])).toEqual([['clip::0', 'Demo clip']]);
+        expect((await store.readAttachment('clip', 'v'))!.data.toString()).toBe('broken');
+    });
+
+    it('reuses media vectors for save-time similar-memory detection', async () => {
+        const first = await store.save({ title: 'Logo A', attachments: [png('red circle logo draft final')] });
+        const second = await store.save({ title: 'Logo B', attachments: [png('red circle logo draft final')] });
+        expect(second.similar?.map((s) => s.id)).toContain(first.id);
     });
 });
 
@@ -1153,6 +1354,21 @@ describe('MemoryStore (legacy collection + migrateLegacy)', () => {
         expect(noLegacyProgress.mock.calls).toEqual([[0, 0]]);
     });
 
+    it('re-embeds legacy image blobs with a multimodal embedding and leaves PDFs as blobs', async () => {
+        const multimodal = new FakeMultimodalEmbedding();
+        const mediaStore = new MemoryStore({
+            embedding: multimodal, vectorDatabase: db, legacyCollectionNames: [LEGACY_GEMINI_COLLECTION], blobStore: blobs,
+        });
+        await mediaStore.migrateLegacy();
+        const main = await readRows(db, LOCAL_TEXT_COLLECTION);
+        expect(main.filter((r) => r.relativePath === MEDIA_ID).map((r) => [r.id, r.content]))
+            .toEqual([[`${MEDIA_ID}::att::0`, 'system overview']]);
+        expect(main.filter((r) => r.relativePath === MIXED_ID).map((r) => r.id)).toEqual([`${MIXED_ID}::0`]);
+        expect(multimodal.mediaCalls).toEqual([{ purpose: 'document', mimeType: 'image/png' }]);
+        expect((await mediaStore.recall(undefined, 5, [png(IMAGE_BYTES.toString())]))[0].id).toBe(MEDIA_ID);
+        expect((await mediaStore.readAttachment(MIXED_ID, '0'))!.data.equals(PDF_BYTES)).toBe(true);
+    });
+
     it('finishes parents split across capped read pages', async () => {
         const legacyRowCount = (await readRows(db, LEGACY_GEMINI_COLLECTION)).length;
         expect(legacyRowCount).toBeGreaterThan(3);
@@ -1259,11 +1475,16 @@ describe('MemoryStore (legacy collection + migrateLegacy)', () => {
         expect(retitled.attachments.map((a) => a.id)).toEqual(['diagram']);
         expect((await store.readAttachment(MEDIA_ID, 'diagram'))!.data.equals(IMAGE_BYTES)).toBe(true);
 
-        // Explicitly re-supplying media is a new media write and is refused.
-        await expect(store.update(MEDIA_ID, {
+        // With this text-only embedding, re-sending the stored file keeps it as
+        // a blob, while a new media file is refused.
+        await store.update(MEDIA_ID, {
             attachments: [{ id: 'diagram', mimeType: 'image/png', data: IMAGE_BYTES.toString('base64') }],
-        })).rejects.toThrow(AttachmentValidationError);
+        });
         expect((await store.readAttachment(MEDIA_ID, 'diagram'))!.data.equals(IMAGE_BYTES)).toBe(true);
+        await expect(store.update(MEDIA_ID, {
+            attachments: [{ id: 'diagram', mimeType: 'image/png', data: IMAGE_BYTES.toString('base64') }, png('new image')],
+        })).rejects.toThrow(AttachmentValidationError);
+        expect((await store.get(MEDIA_ID))!.attachments.map((a) => a.id)).toEqual(['diagram']);
 
         // Explicitly clearing attachments removes the media.
         const cleared = await store.update(MEDIA_ID, { attachments: [] });

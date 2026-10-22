@@ -2,16 +2,18 @@
 
 ## Ownership boundaries
 
-- `memory/memory-store.ts` owns local text storage and migration.
+- `memory/memory-store.ts` owns local storage (text and media) and migration.
   `memory/backend.ts` exposes `MemoryBackend` and its `LocalMemoryBackend`
   adapter. Server implements the same interface with Postgres.
 - `http/http-api.ts` owns the shared data routes for sidecar and server.
   Keep bind/auth/config outside this router. Match attachment routes before
   the greedy memory-id route.
-- Local embedding is `embedding/mlx-embedding.ts`; server embedding is
-  `embedding/gemini-embedding.ts`. The shared attachment validator supports
-  server media, but local `MemoryStore` rejects new media saves and explicit
-  media replacement. Do not remove server support to enforce local limits.
+- Local embedding is `embedding/mlx-embedding.ts` (multimodal); server
+  embedding is `embedding/gemini-embedding.ts`. The shared attachment validator
+  has two limit sets: `DEFAULT_ATTACHMENT_LIMITS` (server, Gemini MIME list) and
+  `LOCAL_ATTACHMENT_LIMITS` (the `MemoryStore` default: more containers, longer
+  clips, no PDF). A limit set's `mimeTypes` is its allowlist. Do not narrow
+  server support to enforce local limits.
 - `memory/content-edits.ts` is client-side literal editing, not a storage
   primitive. `stats/memory-stats-store.ts` is a separate client ledger;
   `MemoryStore` never reads it or applies trust ranking.
@@ -28,9 +30,10 @@
   for upgrades. Legacy vectors are never searched with MLX queries.
   Recall and `listParentsWithVectors` fail while any legacy rows remain.
 - Legacy parents remain listable, readable, updatable, deletable and exportable.
-  Writes go into the main index. `migrateLegacy` embeds text (or a title for a
-  media-only parent), commits destination rows before deleting source rows,
-  and preserves metadata/blobs. Stable ids make migration rerunnable.
+  Writes go into the main index. `migrateLegacy` embeds text and each stored
+  image/audio/video blob (a title row only when nothing else embeds), commits
+  destination rows before deleting source rows, and preserves metadata/blobs.
+  Stable ids make migration rerunnable.
 - Migration requires cross-process write locking and atomic vector upsert.
   LanceDB mutations lock before snapshots. Tables and blobs have no shared
   crash-atomic transaction; rollback attempts are not a transaction guarantee.
@@ -40,15 +43,16 @@
 - Full parent metadata is duplicated in every row. Rewrite all parent rows
   for metadata changes; recall resolves and deduplicates whole parents.
   `relativePath` is the parent id, not a filesystem path.
-- Local file bytes are not embedded. Attachment-only parents index their
-  title. Preserve existing legacy media when attachments are omitted on
-  update; import can restore such blobs, without making them searchable.
-  `attachments:[]` clears attachments.
-- New local files accept `text/plain`, `application/json`, `application/jsonl`,
-  `application/x-ndjson`, `text/x-jsonl`, up to four files of 20 MiB each.
-  Server media caps remain in `memory/attachment-validator.ts`.
-- Export inlines blobs; import re-embeds text. Caption-only updates preserve
-  vectors and blobs. Do not make metadata edits depend on inference.
+- Image/audio/video attachments are embedded from their bytes, one
+  `<parent>::att::<index>` row each, whose BM25 text is the caption or title.
+  `file` attachments (text/JSON/JSONL) are never embedded. A parent with no
+  text and no embedded media indexes its title. New media the embedding cannot
+  take is rejected. Omitted attachments on update and import records re-write
+  stored files under the looser of the store and server limits
+  (`preserveMedia`), so legacy PDFs and media survive; a file that cannot be
+  embedded there stays an unsearchable blob. `attachments:[]` clears them.
+- Export inlines blobs; import re-embeds text and media. Caption-only updates
+  preserve vectors and blobs. Do not make metadata edits depend on inference.
 - Dimensions are fixed per collection. EmbeddingGemma 2 uses 768d (BGE-M3 was
   1024d); do not reuse a table with vectors from another model.
 - `LanceDBVectorDatabase` construction creates its directory; `FileBlobStore`
@@ -56,9 +60,12 @@
 
 ## Retrieval
 
-- Local `MemoryStore.recall` is text-only. Hybrid dense + BM25 uses RRF with
-  `k=100`; vector DB fallback is `DEFAULT_RRF_K=60`. Do not change one assuming
-  it controls the other. `HYBRID_MODE=false` selects dense-only.
+- Local `MemoryStore.recall` takes a text query and/or query media. Text is
+  hybrid dense + BM25; each query file is a dense branch embedded with the query
+  prompt. Several branches fuse by RRF with `k=100` (`RECALL_RRF_K`, also the
+  hybrid text RRF); vector DB fallback is `DEFAULT_RRF_K=60`. Do not change one
+  assuming it controls the other. `HYBRID_MODE=false` selects dense-only.
+  Blob-only file types cannot be query media.
 - The FTS index is lazy because LanceDB cannot train it on an empty table;
   FTS failure can degrade to dense-only.
 - DataFusion lowercases unquoted identifiers. Preserve backtick quoting of
@@ -117,6 +124,9 @@ Apply deletes only after explicit human approval, never as an automatic
 judge side effect or agent tool. BYOI has no vector-listing/hygiene endpoint.
 
 For MLX worker/installer changes, read [MLX runtime](../../docs/MLX_MODELS.md):
-query/document task prompts, prompt-inclusive mean pooling and normalization,
-the unmodified pinned upstream `language.py`, offline inference, pinned
-artifacts, bounded subprocess protocol, and explicit installation are required.
+query/document task prompts (media included), prompt-inclusive mean pooling and
+normalization, unmodified upstream mlx-vlm, offline inference, artifacts pinned
+by the generated manifest (`scripts/generate-mlx-manifest.py`; never hand-edit
+`mlx-manifest.ts`), the bounded subprocess protocol, and explicit installation
+are required. A runtime bump must keep text vectors at parity or ship a
+re-embedding migration.

@@ -10,8 +10,8 @@ Remote agent -> mcp-http --/v1--> server -> Postgres/pgvector + Gemini
 Browser ------> web BFF ---/v1--> server -> core shared HTTP router
 ```
 
-- `packages/mcp` is local-only: on-device EmbeddingGemma 2 embeddings via `MlxEmbedding`,
-  shared storage with the desktop sidecar, and Claude Code inference for
+- `packages/mcp` is local-only: on-device EmbeddingGemma 2 embeddings via `MlxEmbedding`
+  (text, images, audio and video in one space), shared storage with the desktop sidecar, and Claude Code inference for
   ingestion/hygiene. Do not wire it to the self-hosted pool.
 - `packages/server` owns self-hosted Gemini embedding (including multimodal)
   and uploaded-session digestion. `mcp-http` and `web` call its `/v1` API,
@@ -27,10 +27,9 @@ Browser ------> web BFF ---/v1--> server -> core shared HTTP router
   and deliberately omits delete. Human managers have explicit delete flows.
 - Outcome stats are a separate per-client ledger, not memory rows.
   Trust re-ranking belongs in MCP, not core's relevance-only retrieval.
-- `packages/app` is a maintenance-only SwiftUI client over localhost.
-  Keep it working, do not delete it, and land general self-hosted management
-  features in `packages/web`. Describe desktop behavior through the
-  [sidecar contract](packages/mcp/AGENTS.md#sidecar-contract).
+- `packages/app` is the native SwiftUI manager for the local pool, over
+  localhost. `packages/web` manages the self-hosted pool. Describe desktop
+  behavior through the [sidecar contract](packages/mcp/AGENTS.md#sidecar-contract).
 
 ## Read by task
 

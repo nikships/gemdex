@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
     Embedding,
+    EmbeddingContent,
     EmbeddingVector,
     FileBlobStore,
     LanceDBVectorDatabase,
@@ -15,27 +16,55 @@ import { MemoryToolHandlers } from './handlers.js';
 
 const DIM = 8;
 
+/**
+ * Multimodal like the local MLX embedding. Words (in text, or in media bytes
+ * read as text) hash into the vector, so a file whose bytes say "red circle"
+ * lands next to the text "red circle".
+ */
 class FakeEmbedding extends Embedding {
     protected maxTokens = 8192;
+    mediaPurposes: string[] = [];
     async detectDimension(): Promise<number> { return DIM; }
     getDimension(): number { return DIM; }
     getProvider(): string { return 'Fake'; }
+    isMultimodal(): boolean { return true; }
     async embed(text: string): Promise<EmbeddingVector> {
-        return { vector: Array.from({ length: DIM }, (_, i) => (text.length * (i + 1)) % 11 + 1), dimension: DIM };
+        const vector = new Array<number>(DIM).fill(0.01);
+        for (const word of text.toLowerCase().split(/\W+/).filter(Boolean)) {
+            let hash = 0;
+            for (const char of word) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+            vector[hash % DIM] += 1;
+        }
+        return { vector, dimension: DIM };
     }
     async embedBatch(texts: string[]): Promise<EmbeddingVector[]> {
         return Promise.all(texts.map((text) => this.embed(text)));
     }
+    async embedContentBatch(contents: EmbeddingContent[]): Promise<EmbeddingVector[]> {
+        return this.embedParts(contents, 'document');
+    }
+    async embedQueryContentBatch(contents: EmbeddingContent[]): Promise<EmbeddingVector[]> {
+        return this.embedParts(contents, 'query');
+    }
+    private embedParts(contents: EmbeddingContent[], purpose: string): Promise<EmbeddingVector[]> {
+        return Promise.all(contents.map((content) => {
+            if (typeof content === 'string') return this.embed(content);
+            this.mediaPurposes.push(`${purpose}:${content.inlineData.mimeType}`);
+            return this.embed(Buffer.from(content.inlineData.data, 'base64').toString());
+        }));
+    }
 }
 
 let dir: string;
+let embedding: FakeEmbedding;
 let backend: LocalMemoryBackend;
 let handlers: MemoryToolHandlers;
 
 beforeEach(() => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gemdex-handler-att-'));
+    embedding = new FakeEmbedding();
     backend = new LocalMemoryBackend({
-        embedding: new FakeEmbedding(),
+        embedding,
         vectorDatabase: new LanceDBVectorDatabase({ uri: path.join(dir, 'lance') }),
         blobStore: new FileBlobStore(path.join(dir, 'blobs')),
     });
@@ -46,11 +75,11 @@ afterEach(() => {
     fs.rmSync(dir, { recursive: true, force: true });
 });
 
-function text(result: { content: Array<{ text: string }> }): string {
-    return result.content.map((part) => part.text).join('\n');
+function text(result: { content: Array<{ type: string; text?: string }> }): string {
+    return result.content.flatMap((part) => (part.type === 'text' && part.text !== undefined ? [part.text] : [])).join('\n');
 }
 
-function idOf(result: { content: Array<{ text: string }> }): string {
+function idOf(result: { content: Array<{ type: string; text?: string }> }): string {
     const match = text(result).match(/^id: (.+)$/m);
     assert.ok(match, text(result));
     return match[1];
@@ -62,43 +91,68 @@ function writeFile(name: string, contents: string | Buffer): string {
     return file;
 }
 
-const MEDIA: Array<[string, string, Buffer]> = [
-    ['screenshot.png', 'image/png', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])],
-    ['photo.jpg', 'image/jpeg', Buffer.from([0xff, 0xd8, 0xff, 0xe0])],
-    ['clip.mp3', 'audio/mp3', Buffer.from('ID3fakeaudio')],
-    ['clip.mp4', 'video/mp4', Buffer.from('fakevideo')],
+const MEDIA: Array<[string, string, string]> = [
+    ['screenshot.png', 'image/png', 'login screen screenshot'],
+    ['photo.webp', 'image/webp', 'team offsite photo'],
+    ['memo.m4a', 'audio/mp4', 'voice memo about pricing'],
+    ['clip.mp3', 'audio/mp3', 'podcast clip on caching'],
+    ['clip.mov', 'video/quicktime', 'screen recording of deploy'],
 ];
 
 for (const [name, mimeType, bytes] of MEDIA) {
-    test(`save_memory rejects a ${mimeType} path attachment and stores nothing`, async () => {
-        const result = await handlers.handleSaveMemory({
-            content: 'note with media',
-            attachments: [{ path: writeFile(name, bytes) }],
-        });
-        assert.equal(result.isError, true);
-        assert.ok(text(result).includes(`Failed to save memory: ${mimeType} attachments are not supported`), text(result));
-        assert.match(text(result), /text-only/);
-        assert.deepEqual(await backend.list(), []);
+    test(`save_memory embeds a ${mimeType} path attachment and recall finds it by text`, async () => {
+        const saved = await handlers.handleSaveMemory({ attachments: [{ path: writeFile(name, bytes) }] });
+        assert.equal(saved.isError, undefined, text(saved));
+        const id = idOf(saved);
+        assert.deepEqual((await backend.get(id))?.attachments.map((a) => a.mimeType), [mimeType]);
+        assert.deepEqual(embedding.mediaPurposes, [`document:${mimeType}`]);
+
+        const recalled = await handlers.handleRecall({ query: bytes });
+        assert.match(text(recalled), new RegExp(`id: ${id}`));
     });
 }
 
-test('save_memory rejects inline media data', async () => {
-    const result = await handlers.handleSaveMemory({
-        content: 'inline image',
-        attachments: [{ mimeType: 'image/png', data: Buffer.from('PNGBYTES').toString('base64') }],
-    });
-    assert.equal(result.isError, true);
-    assert.match(text(result), /image\/png attachments are not supported/);
-    assert.deepEqual(await backend.list(), []);
+test('recall searches by an example file, alone or with a query', async () => {
+    const circle = idOf(await handlers.handleSaveMemory({ content: 'red circle logo draft' }));
+    idOf(await handlers.handleSaveMemory({ content: 'blue square banner' }));
+
+    const byFile = await handlers.handleRecall({ attachments: [{ path: writeFile('logo.png', 'red circle logo') }] });
+    assert.equal(byFile.isError, undefined, text(byFile));
+    assert.match(text(byFile), /for 1 file/);
+    assert.equal(text(byFile).match(/id: (.+)/)?.[1], circle);
+    assert.deepEqual(embedding.mediaPurposes, ['query:image/png']);
+
+    const both = await handlers.handleRecall({ query: 'banner', attachments: [{ path: writeFile('logo2.png', 'red circle') }] });
+    assert.match(text(both), /for "banner" \+ 1 file/);
+});
+
+test('recall needs a query or a file, and rejects a text file as the example', async () => {
+    const empty = await handlers.handleRecall({});
+    assert.equal(empty.isError, true);
+    assert.match(text(empty), /provide 'query', at least one file/);
+
+    await handlers.handleSaveMemory({ content: 'anything' });
+    const byText = await handlers.handleRecall({ attachments: [{ path: writeFile('notes.txt', 'notes') }] });
+    assert.equal(byText.isError, true);
+    assert.match(text(byText), /Recall by text\/plain is not supported/);
+});
+
+test('read_attachment returns a stored image as viewable image content', async () => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const id = idOf(await handlers.handleSaveMemory({ content: 'diagram', attachments: [{ path: writeFile('d.png', png) }] }));
+    const read = await handlers.handleReadAttachment({ memory_id: id });
+    assert.equal(read.isError, undefined, text(read));
+    assert.match(text(read), /encoding: image/);
+    assert.deepEqual(read.content[1], { type: 'image', data: png.toString('base64'), mimeType: 'image/png' });
 });
 
 test('save_memory rejects a PDF attachment', async () => {
     const result = await handlers.handleSaveMemory({
         content: 'a pdf',
-        attachments: [{ mimeType: 'application/pdf', data: Buffer.from('%PDF-1.4 not really').toString('base64') }],
+        attachments: [{ path: writeFile('spec.pdf', '%PDF-1.4 not really') }],
     });
     assert.equal(result.isError, true);
-    assert.match(text(result), /^Failed to save memory: /);
+    assert.match(text(result), /^Failed to save memory: Unsupported attachment mimeType 'application\/pdf'/);
     assert.deepEqual(await backend.list(), []);
 });
 
@@ -143,7 +197,7 @@ test('save_memory accepts a JSONL transcript as the only content', async () => {
     assert.ok(text(read).includes('"assistant"'));
 });
 
-test('update_memory rejects media and leaves the memory unchanged', async () => {
+test('update_memory embeds media it adds and keeps the memory text', async () => {
     const saved = await handlers.handleSaveMemory({
         content: 'keep this content',
         attachments: [{ path: writeFile('keep.txt', 'original attachment') }],
@@ -152,15 +206,14 @@ test('update_memory rejects media and leaves the memory unchanged', async () => 
 
     const result = await handlers.handleUpdateMemory({
         id,
-        content: 'replacement that must not land',
-        attachments: [{ path: writeFile('new.png', MEDIA[0][2]) }],
+        attachments: [{ path: writeFile('new.png', 'architecture whiteboard'), caption: 'whiteboard' }],
     });
-    assert.equal(result.isError, true);
-    assert.match(text(result), /^Failed to update memory: image\/png attachments are not supported/);
+    assert.equal(result.isError, undefined, text(result));
 
     const memory = await backend.get(id);
     assert.equal(memory?.content, 'keep this content');
-    assert.deepEqual(memory?.attachments.map((a) => a.mimeType), ['text/plain']);
+    assert.deepEqual(memory?.attachments.map((a) => [a.mimeType, a.caption]), [['image/png', 'whiteboard']]);
+    assert.deepEqual(embedding.mediaPurposes, ['document:image/png']);
 });
 
 test('update_memory replaces text attachments, keeps them when omitted, and clears them with []', async () => {

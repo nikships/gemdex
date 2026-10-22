@@ -45,13 +45,17 @@ Behavior: the content is chunked, embedded on-device (EmbeddingGemma 2 via MLX),
 stored globally (searchable from every repo and session). Returns the new
 memory id.
 
-Optionally pass \`attachments\`: text files (.txt, .json, .jsonl) stored
-alongside the memory and readable later with \`read_attachment\`. They are
-not searched — put anything that should be findable in \`content\`. Each
-attachment is either a local file \`path\` (preferred — the server reads the
-bytes, so you don't emit base64) or inline base64 \`data\`. Images, audio,
-video and PDFs are not supported. Either \`content\` or at least one attachment
-is required.
+Optionally pass \`attachments\`: images (.png .jpg .webp .gif), audio (.wav
+.mp3 .m4a .flac .aac .aiff, up to 5 min) and video (.mp4 .mov .m4v .webm) are
+embedded on-device from their bytes, so the memory is findable by what the
+file shows or says. Text files (.txt, .json, .jsonl) are stored but not
+searched — put anything about them that should be findable in \`content\`. A
+\`caption\` per file is optional; it adds keyword matching and helps for audio,
+whose content-only matching is weaker. Every attachment is readable later with
+\`read_attachment\`. Each attachment is either a local file \`path\`
+(preferred — the server reads the bytes, so you don't emit base64) or inline
+base64 \`data\`. PDFs are not supported. Either \`content\` or at least one
+attachment is required.
 
 If the response includes a "⚠ similar existing memories already stored" block,
 the store found near-duplicate/conflicting memories already there — read it and
@@ -60,8 +64,8 @@ rather than leaving both.
 `;
 
 const RECALL_DESCRIPTION = `
-Search the user's global memory layer by natural-language query and return a
-cheap ranked title index (never full bodies).
+Search the user's global memory layer by natural-language query and/or example
+media files, and return a cheap ranked title index (never full bodies).
 
 🎯 **When to use**: proactively and by default — make checking memory a reflex,
 not something you wait to be told to do. Recall at the start of a task, before
@@ -70,8 +74,10 @@ design/convention decision, and before asking the user for information they may
 have already given you. A title-index recall is cheap; prefer checking first
 over assuming nothing is stored.
 
-Behavior: hybrid semantic + BM25 search, fused by relevance. Always returns up
-to 10 hits as title + id only (plus a track-record line when outcome stats
+Behavior: hybrid semantic + BM25 search, fused by relevance. To ask "is there
+anything in memory about this file?", pass the image, audio or video as
+\`attachments\` (a local \`path\`), with or without a \`query\`; it is matched
+against stored text and media alike. Always returns up to 10 hits as title + id only (plus a track-record line when outcome stats
 exist). Most tasks end here with nothing useful — that is expected. When a
 title looks clearly task-relevant, open THAT memory with \`get_memory({ id })\`.
 Do not expect bodies from this tool.
@@ -116,8 +122,10 @@ Two ways to change the text:
 Behavior: re-chunks and re-embeds the resulting content under the same id.
 Omitted fields are preserved — leave out \`content\`/\`edits\` to keep the prior
 text, leave out \`attachments\` to keep the prior attachments (pass
-\`attachments: []\` to clear them). Each attachment is either a local file \`path\` (preferred) or
-inline base64 \`data\`. To remove a memory entirely, use \`delete_memory\`.
+\`attachments: []\` to clear them). Supplied attachments replace the existing
+ones and follow the \`save_memory\` rules: image/audio/video files are embedded,
+text files are stored only. Each attachment is either a local file \`path\`
+(preferred) or inline base64 \`data\`. To remove a memory entirely, use \`delete_memory\`.
 `;
 
 const REPORT_OUTCOME_DESCRIPTION = `
@@ -139,7 +147,8 @@ burned the agent rank lower.
 `;
 
 const READ_ATTACHMENT_DESCRIPTION = `
-Read the bytes of an attachment on a stored memory as text (UTF-8) or base64.
+Read an attachment on a stored memory: text files as UTF-8, images as an
+image you can view, other media as base64.
 
 🎯 **When to use**: after \`get_memory\` shows a memory with attachments —
 especially chat digests that include a \`file\` attachment captioned
@@ -172,19 +181,20 @@ stats for that id. Irreversible via MCP — confirm with the user when unsure.
 const ATTACHMENTS_SCHEMA = {
     type: "array",
     description:
-        "Optional text files stored with the memory (not searched). Each item is either a local " +
-        "file 'path' (preferred — the server reads the bytes off disk; mimeType is inferred from " +
-        "the extension) or inline base64 'data' with a 'mimeType'. Limit: 4 files, 20 MiB each.",
+        "Optional files stored with the memory. Images, audio and video are embedded and searchable; " +
+        "text files are stored only. Each item is either a local file 'path' (preferred — the server " +
+        "reads the bytes off disk; mimeType is inferred from the extension) or inline base64 'data' " +
+        "with a 'mimeType'. Per memory: 8 images, 4 audio (5 min each), 2 videos, 4 text files; 100 MiB per file.",
     items: {
         type: "object",
         properties: {
             path: {
                 type: "string",
-                description: "Absolute (or ~/cwd-relative) path to a local .txt, .json, .jsonl or .ndjson file. Preferred over 'data'. Mutually exclusive with 'data'.",
+                description: "Absolute (or ~/cwd-relative) path to a local image (.png .jpg .webp .gif), audio (.wav .mp3 .m4a .flac .aac .aiff), video (.mp4 .mov .m4v .webm) or text (.txt .json .jsonl .ndjson) file. Preferred over 'data'. Mutually exclusive with 'data'.",
             },
             mimeType: {
                 type: "string",
-                description: "text/plain, application/json, or application/x-ndjson. Required with 'data'; optional with 'path' (inferred from the extension).",
+                description: "e.g. image/png, audio/mpeg, video/mp4, text/plain. Required with 'data'; optional with 'path' (inferred from the extension).",
             },
             data: {
                 type: "string",
@@ -192,7 +202,36 @@ const ATTACHMENTS_SCHEMA = {
             },
             caption: {
                 type: "string",
-                description: "Optional short description of this attachment.",
+                description: "Optional short description or transcript of this attachment; adds keyword matching.",
+            },
+        },
+        anyOf: [
+            { required: ["path"] },
+            { required: ["data", "mimeType"] },
+        ],
+    },
+} as const;
+
+// Example media for recall: the same path-or-data items, without captions.
+const RECALL_ATTACHMENTS_SCHEMA = {
+    type: "array",
+    description:
+        "Optional image, audio or video files to search by, e.g. to check whether anything in memory " +
+        "relates to this file. Each item is a local file 'path' (preferred) or inline base64 'data' with a 'mimeType'.",
+    items: {
+        type: "object",
+        properties: {
+            path: {
+                type: "string",
+                description: "Absolute (or ~/cwd-relative) path to a local image, audio or video file. Mutually exclusive with 'data'.",
+            },
+            mimeType: {
+                type: "string",
+                description: "e.g. image/png, audio/mpeg, video/mp4. Required with 'data'; optional with 'path'.",
+            },
+            data: {
+                type: "string",
+                description: "Base64-encoded file bytes. Mutually exclusive with 'path'.",
             },
         },
         anyOf: [
@@ -246,10 +285,11 @@ class GemdexMemoryServer {
                         properties: {
                             query: {
                                 type: "string",
-                                description: "Natural-language description of what to recall.",
+                                description: "Natural-language description of what to recall. Optional when 'attachments' are given.",
                             },
+                            attachments: RECALL_ATTACHMENTS_SCHEMA,
                         },
-                        required: ["query"],
+                        required: [],
                     },
                 },
                 {

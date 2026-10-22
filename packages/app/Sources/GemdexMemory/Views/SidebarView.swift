@@ -1,9 +1,11 @@
 import SwiftUI
+import AppKit
 
 /// Source-list of memories with a search box. Typing filters loaded titles
 /// client-side; pressing Return runs semantic free-text recall (`POST /recall`)
-/// and lists the parent-document hybrid ranking. Selecting a row opens it in
-/// the detail editor.
+/// and lists the parent-document hybrid ranking. "Search by file…" runs recall
+/// with an image/audio/video file as the query (plus the typed text, if any).
+/// Selecting a row opens it in the detail editor.
 struct SidebarView: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.gemdexIsOLED) private var isOLED
@@ -14,6 +16,11 @@ struct SidebarView: View {
                 .padding(.horizontal, 10)
                 .padding(.top, 8)
                 .padding(.bottom, 6)
+            if let file = model.searchFile {
+                fileChip(file)
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 6)
+            }
             listContent
         }
         // OLED: solid black instead of the sidebar vibrancy material, so the
@@ -32,10 +39,17 @@ struct SidebarView: View {
                 .onSubmit { Task { await model.runSearch() } }
                 .onChange(of: model.filterText) { _ in
                     // Editing the query returns to the live local-title filter
-                    // until the next Return-triggered semantic search.
-                    if case .idle = model.searchState {} else { model.searchState = .idle }
+                    // until the next Return-triggered semantic search. A file
+                    // query keeps its results; Return re-runs with the new text.
+                    if model.searchFile == nil, model.searchState != .idle { model.searchState = .idle }
                 }
-            if !model.filterText.isEmpty {
+            Button { pickSearchFile() } label: {
+                Image(systemName: "photo.on.rectangle.angled").foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Search by file… (image, audio or video)")
+            .accessibilityLabel("Search by file")
+            if !model.filterText.isEmpty || model.searchFile != nil {
                 Button { model.clearSearch() } label: {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
                 }
@@ -46,7 +60,37 @@ struct SidebarView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
         .glassSurface(cornerRadius: Metric.radiusControl)
-        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: model.filterText.isEmpty)
+        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: model.filterText.isEmpty && model.searchFile == nil)
+    }
+
+    private func fileChip(_ file: SearchFile) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: file.mediaType.kind.systemImage)
+                .font(.caption)
+                .foregroundStyle(Brand.gold)
+            Text(file.filename)
+                .font(.caption.weight(.medium))
+                .lineLimit(1).truncationMode(.middle)
+            Spacer(minLength: 0)
+            Button { model.clearSearchFile() } label: {
+                Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Clear file query")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .glassSurface(cornerRadius: Metric.radiusChip, tint: Brand.gold.opacity(0.1))
+    }
+
+    private func pickSearchFile() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.message = "Choose an image, audio or video file to search by."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task { await model.searchByFile(url) }
     }
 
     @ViewBuilder

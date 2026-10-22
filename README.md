@@ -39,8 +39,8 @@ claude mcp add gemdex -- npx -y gemdex-mcp@latest
 
 The explicit install downloads managed Python/MLX and pinned
 [`mlx-community/embeddinggemma-2-8bit`](https://huggingface.co/mlx-community/embeddinggemma-2-8bit)
-weights, about 1.3 GB in total. No Python, uv, Homebrew, HF CLI, or compiler setup is
-needed. Embeddings run offline after installation. There is no API key,
+weights, about 1.45 GB to download and 1.9 GB on disk. No Python, uv, Homebrew,
+HF CLI, or compiler setup is needed. Embeddings run offline after installation. There is no API key,
 sentinel value, or provider switch. Rosetta Node is unsupported.
 See [MLX model and runtime requirements](docs/MLX_MODELS.md).
 
@@ -91,12 +91,12 @@ surface provides delete_memory.
 
 | Tool | Behavior |
 |------|----------|
-| `save_memory` | Save content and/or attachments; return id and title |
-| `recall` | Text query, top 10 titles + ids, never full bodies |
+| `save_memory` | Save content and/or attachments (images, audio, video, text files); return id and title |
+| `recall` | Text query and/or example media files, top 10 titles + ids, never full bodies |
 | `get_memory` | Full parent body, age, attachments and track record |
 | `update_memory` | Full `content` replacement or literal `edits`, optional title/attachments |
 | `report_outcome` | Record `worked`, `failed`, or `stale`, with optional note |
-| `read_attachment` | Attachment bytes as UTF-8 or base64 |
+| `read_attachment` | Attachment as UTF-8 text, a viewable image, or base64 |
 | `delete_memory` | Stdio only, permanent delete and client-stat cleanup |
 
 `get_memory`, not title-index recall, increments recall counts.
@@ -105,18 +105,23 @@ Stats live in a separate ledger (`~/.gemdex/stats.json` by default).
 otherwise ranking is relevance-only.
 
 Local saves include an advisory when existing memories are similar, using
-already-computed vectors and centroid similarity (default threshold 0.90).
+already-computed vectors and centroid similarity (default threshold 0.93).
 The advisory does not block the save. Configure it with
 `GEMDEX_SIMILAR_ON_SAVE` and `GEMDEX_SIMILAR_THRESHOLD`.
 
 ### Attachments
 
-Local attachments are text files only: `.txt`, `.json`, `.jsonl`/`.ndjson`.
-Use a local `path` or inline base64 `data` + `mimeType`. Supported MIME types
-are `text/plain`, `application/json`, `application/jsonl`,
-`application/x-ndjson`, `text/x-jsonl`, up to four files per memory, 20 MiB each.
-Bytes are non-embedded blobs, readable through `read_attachment`.
-New images, audio, video, PDF and media recall queries are unsupported locally.
+Local memories can carry images (PNG, JPEG, WebP, GIF), audio (WAV, MP3, M4A,
+FLAC, AAC, AIFF; up to 5 minutes) and video (MP4, MOV, M4V, WebM). EmbeddingGemma 2
+embeds each file on-device into the same space as text, so the memory is found
+by what the image shows or the recording says. Recall also takes example files:
+"is there anything in memory about this screenshot?" works with or without a
+text query. Captions are optional; they add keyword matching and help most for
+audio. Text files (`.txt`, `.json`, `.jsonl`/`.ndjson`) are stored as
+non-embedded blobs. Per memory: 8 images, 4 audio files, 2 videos and 4 text
+files, 100 MiB each. PDFs are not supported locally. Use a local `path` or
+inline base64 `data` + `mimeType`; every attachment is readable through
+`read_attachment`.
 
 The self-hosted server supports Gemini multimodal embedding and media recall
 through `/v1`. HTTP MCP attachment inputs are inline base64 only, never
@@ -153,9 +158,11 @@ Hygiene first clusters local vectors, then judges candidates with Claude Code.
 Deleting findings requires human approval. Self-hosted uploads instead use
 the server's Gemini digestion. See [chat-history paths](docs/CHAT_HISTORY.md).
 
-## The desktop app (maintenance-only)
+## The desktop app
 
-The native macOS app manages the local pool through `gemdex serve`, which binds
+The native macOS app manages the local pool: browse, search (by text or by
+file), and edit memories, attach and preview images, audio and video, ingest
+chat history, and review hygiene findings. It talks to `gemdex serve`, which binds
 only `127.0.0.1` and uses a per-launch token. Its contract exposes explicit MLX
 install/migration jobs and Claude Code readiness. Memory routes return
 `503 {needsInstall:true}` until installation; ingestion/hygiene start requires

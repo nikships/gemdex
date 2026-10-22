@@ -38,7 +38,7 @@ Gemdex — local memory layer for AI coding agents (on-device EmbeddingGemma 2 e
 
 Usage:
   npx gemdex-mcp install           Install the managed EmbeddingGemma 2 MLX runtime
-                                   and model (Apple Silicon only; explicit ~1.3 GB
+                                   and model (Apple Silicon only; explicit ~1.45 GB
                                    download).
   npx gemdex-mcp migrate           Re-embed memories saved by earlier BGE-M3 or
                                    Gemini-based releases into the current model.

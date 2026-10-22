@@ -4,15 +4,18 @@
 
 The local package uses **[`mlx-community/embeddinggemma-2-8bit`](https://huggingface.co/mlx-community/embeddinggemma-2-8bit)**,
 the MLX conversion of [Google EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2)
-(released 2026-10-06, Apache-2.0). Gemdex runs only its **text encoder**
-(270M parameters, Gemma 4 decoder, 8192-token context) and stores full
-**768-dimensional** vectors. The model can also embed images, audio and video,
-and supports Matryoshka truncation to 512/256/128 dimensions; Gemdex uses neither.
+(released 2026-10-06, Apache-2.0). Gemdex runs the **whole model**: the text
+encoder (270M parameters, Gemma 4 decoder, 8192-token context) plus its vision
+and audio towers. Text chunks, images, audio and video are embedded into one
+**768-dimensional** space, so a text query finds media and a media query finds
+text. The model also supports Matryoshka truncation to 512/256/128 dimensions;
+Gemdex does not use it.
 
 The immutable HF revision is `7505ef2f8ddef45efef6d060865f27989b3c9cec`
 (8-bit affine, group size 64). `packages/core/src/embedding/mlx-manifest.ts` is
-the single source of URLs and SHA-256 digests for the model, tokenizer,
-standalone runtime, wheels and the upstream architecture source.
+the single source of URLs and SHA-256 digests for the model, the standalone
+Python and every wheel. It is generated, never edited by hand (see
+[Updating the runtime](#updating-the-runtime)).
 
 Earlier releases used `mlx-community/bge-m3-mlx-8bit` (1024 dimensions, CLS
 pooling, table `memories_mlx_bge_m3_8bit`), and before that Gemini
@@ -39,9 +42,8 @@ Sources:
   (architecture, task prompts, MRL dimensions, benchmarks).
 - [Selected immutable conversion](https://huggingface.co/mlx-community/embeddinggemma-2-8bit/tree/7505ef2f8ddef45efef6d060865f27989b3c9cec)
   and its `validation.json` (8-bit vs PyTorch FP32: minimum text cosine 0.99981).
-- [mlx-vlm PR #2446](https://github.com/Blaizzy/mlx-vlm/pull/2446), merged as
-  `fec3f50379bb2cb0760ef3c8a68ebce9585e4d97`: the MLX implementation. At the
-  time of the switch it was not yet in a PyPI release.
+- [mlx-vlm PR #2446](https://github.com/Blaizzy/mlx-vlm/pull/2446): the MLX
+  implementation, released on PyPI in mlx-vlm 0.7.9, which Gemdex installs.
 
 ## Correct EmbeddingGemma 2 inference
 
@@ -54,23 +56,36 @@ the worker asserts it before loading weights:
   prompt** (`include_prompt: true`), then L2 normalization.
 - `config_sentence_transformers.json`: queries are prefixed with
   `task: search result | query: `, stored documents with
-  `title: none | text: `. `MlxEmbedding.embedQuery` sends `kind: "query"`;
-  `embed`/`embedBatch` (save, update, import, migration) send `kind: "document"`.
+  `title: none | text: `. `MlxEmbedding.embedQuery` and
+  `embedQueryContentBatch` send `kind: "query"`; `embed`/`embedBatch`/
+  `embedContentBatch` (save, update, import, migration) send `kind: "document"`.
   Titles are not put into the document prompt, so title-only edits never need
   re-embedding.
+- Media gets the same prompt followed by the modality placeholder
+  (`<|image|>`, `<|audio|>` or `<|video|>`), which the processor expands into
+  the media tokens. This matches sentence-transformers, which puts the prompt
+  in a system turn ahead of the media.
 
-The worker tokenizes with the Rust `Tokenizer.from_file`, adds special tokens,
-and asserts `<bos>`=2 first and `<eos>`=1 last. Media placeholder ids are
-replaced by padding before the embedding lookup, as upstream does. Token
-embeddings are scaled by `sqrt(hidden_size)`; non-quantized weights and
-activations stay BF16 (do not cast to float16). Each text is evaluated
-separately (no padded batch), with an all-ones attention mask, so the sliding
-(512-token) and full attention layers see exactly the reference masks. The
-mean is computed in float32.
+The worker calls upstream mlx-vlm unmodified: `mlx_vlm.load(model_dir)` for the
+model and processor, the processor for tokenization and media preprocessing,
+and the model's own pooled `text_embeds`. It asserts `<bos>` first and
+`<eos>` last, a 768-dimensional finite result, and at most **8192 tokens** per
+input (the model's context). Longer input fails rather than truncating;
+MemoryStore's 1500-character chunks are far below it.
 
-The worker **rejects inputs above 2048 actual tokens** rather than silently
-truncating. This bounds attention memory and is ample for normal Gemdex
-1500-character chunks. It is a runtime limit, not the model's 8192-token context.
+Media handling:
+
+- **Images**: PNG, JPEG, WebP, GIF (first frame), decoded with Pillow.
+- **Audio**: WAV, MP3 and FLAC decode directly; M4A/AAC/AIFF are converted with
+  macOS's built-in `/usr/bin/afconvert` first. Audio is resampled to the model's
+  rate. At 40 ms per token, the 5-minute limit is 7,500 tokens; the worker
+  raises the processor's default audio length to that.
+- **Video**: MP4, MOV, M4V, WebM, sampled by the processor at 1 frame per second
+  up to 32 frames, so a longer clip spreads those frames out.
+
+Audio-only matching is noticeably weaker than image or text matching (about 25%
+recall@1 on a Clotho audio-to-caption sample), so an optional caption helps:
+MemoryStore indexes it as the BM25 text of that attachment's row.
 
 ### Similarity threshold
 
@@ -91,60 +106,63 @@ Rosetta x64 Node and non-Mac hosts fail clearly at explicit install/inference;
 construction and status stay lazy. macOS's built-in `/usr/bin/tar` extracts only
 the already SHA-256-verified archive.
 
-The installer downloads about **1.33 GB**: CPython **3.12.12**,
-python-build-standalone release **20260211**,
-`aarch64-apple-darwin-install_only_stripped` (includes pip 26.0.1; the whole
-archive is hash-pinned), plus these individually hash-pinned wheels, installed
-offline with `--no-index --no-deps`:
+The installer downloads about **1.45 GB**:
 
-- `mlx==0.32.3`, `mlx-metal==0.32.3` (macOS 14 arm64 binaries; the conversion
-  was produced and validated with MLX 0.32.3)
-- `tokenizers==0.23.2` (arm64 Rust ABI3 binary)
+- CPython **3.12.12**, python-build-standalone release **20260211**,
+  `aarch64-apple-darwin-install_only_stripped` (the whole archive is
+  hash-pinned).
+- **73 wheels (about 207 MB)**: the complete dependency closure of
+  **`mlx-vlm==0.7.9`** for macOS 14 arm64 / CPython 3.12, one wheel per package,
+  each hash-pinned. They include `mlx`/`mlx-metal` 0.32.4, `transformers`,
+  `numpy`, `Pillow`, `opencv-python`, `mlx-audio` and `miniaudio`. This is the
+  ordinary upstream package, not a subset. The wheels are installed offline
+  with `pip --no-index --no-deps` and deleted after install.
+- The model's 14 files (1.2 GB, mostly the single `model.safetensors`).
 
-and one hash-pinned source file, `arch/embedding_gemma2/language.py`, fetched
-from mlx-vlm commit `fec3f503` on `raw.githubusercontent.com` (content at a
-commit SHA is immutable).
-
-This is a **curated text runtime**, not an mlx-vlm installation. mlx-vlm's
-package imports numpy, Pillow, transformers, KV caches and the vision/audio
-towers. The upstream text encoder file needs only MLX plus two sibling names:
-`RMSNormNoScale` (`mx.fast.rms_norm` without a scale) and the `TextConfig`
-dataclass. The worker defines those two in a private `gemdex_eg2` import
-namespace and imports the **unmodified** pinned `language.py` against them. It
-loads only `language_model.*` tensors. MLX loads safetensors lazily, so the
-unused BF16 tower tensors are never read into memory; measured RSS is ~750 MB
-versus ~2.2 GB for upstream `load_embedding_model`. No transitive package
-resolver or source build runs on the user's machine.
+On disk the install is about **1.9 GB**. No resolver or source build runs on
+the user's machine; the closure is resolved once by the maintainer.
 
 Install storage is `~/.gemdex/mlx/<manifest-and-worker-hash>/`; `homeDir`
 overrides the **Gemdex root**, not the OS home directory. Because the hash
-covers the manifest and worker, the BGE-M3 runtime from an earlier release lives
-in a different directory. It is not reused or deleted automatically, since an
-older desktop app or npx process may still be using it. Once every client is
-upgraded and migrated, the user can delete old `~/.gemdex/mlx/<hash>`
-directories other than the one `npx gemdex-mcp status` reports. The
-same-hash staging directory retains only useful completed downloads for
-interrupted retry. `.part` files are removed on ordinary offline/hash failures;
-retries overwrite any crash-left partial. An exclusive PID lock rejects
-concurrent installers; dead-owner locks can be recovered. The installed marker
-appears only after all download hashes, installed-runtime inventory, and a real
-768d normalized embedding smoke test pass. The installer does not change
-settings or index tables. `npx gemdex-mcp install` is the explicit download
-action.
+covers the manifest and worker, every runtime change gets a new directory.
+Files whose hash matches one in an older sibling install (e.g. the 1.2 GB
+weights) are copied from it (an APFS clone where possible) and verified, so an upgrade does not download the
+model again. Older directories are never deleted automatically, since an older
+desktop app or npx process may still be using them. Once every client is
+upgraded, the user can delete `~/.gemdex/mlx/<hash>` directories other than the
+one `npx gemdex-mcp status` reports. The same-hash staging directory retains
+only useful completed downloads for interrupted retry. `.part` files are
+removed on ordinary offline/hash failures; retries overwrite any crash-left
+partial. An exclusive PID lock rejects concurrent installers; dead-owner locks
+can be recovered. The installed marker appears only after all download hashes,
+the installed-runtime inventory, and a real smoke test pass: one text and one
+small PNG must both return normalized 768d vectors, which proves the vision path
+loads. The installer does not change settings or index tables.
+`npx gemdex-mcp install` is the explicit download action.
 
 ### Upgrade from earlier releases
 
-`npx gemdex-mcp migrate` (or Settings → Migrate in the desktop app) moves
-parents from every older index into `memories_mlx_embeddinggemma2_8bit`, in
-order: `memories_mlx_bge_m3_8bit` (BGE-M3 releases), then `memories` (Gemini
-releases). `MemoryStore` takes them as `legacyCollectionNames`. Until migration
-finishes, recall and hygiene refuse to run; list/get/update/delete/export stay
-available, and an update moves that memory into the new index. Migration
-re-embeds each stored chunk's text (or the title for an attachment-only parent),
-preserves metadata, timestamps and attachment blobs, and commits destination
-rows before deleting source rows. Stable row ids make it rerunnable. A parent
-left in two old indexes by an interrupted migration is counted once. Legacy
-media remains readable but is not media-searchable.
+**From the text-only EmbeddingGemma 2 release:** run `npx gemdex-mcp install`
+again (new install id; the weights are reused locally). No migration: the
+worker produces the same text vectors as the earlier curated runtime (cosine
+1.0 in one venv; 0.99984 minimum across the mlx 0.32.3 → 0.32.4 upgrade, which
+is Metal rounding). Media saved before this release stays an unembedded blob
+until its memory is next updated or re-imported, which embeds it.
+
+**From BGE-M3 or Gemini:** `npx gemdex-mcp migrate` (or Settings → Migrate in
+the desktop app) moves parents from every older index into
+`memories_mlx_embeddinggemma2_8bit`, in order: `memories_mlx_bge_m3_8bit`
+(BGE-M3 releases), then `memories` (Gemini releases). `MemoryStore` takes them
+as `legacyCollectionNames`. Until migration finishes, recall and hygiene refuse
+to run; list/get/update/delete/export stay available, and an update moves that
+memory into the new index. Migration re-embeds each stored chunk's text and each
+stored image/audio/video blob, preserves metadata, timestamps and attachment
+blobs, and commits destination rows before deleting source rows. A parent with
+nothing else to embed gets a title row. Legacy PDFs stay readable blobs, since
+EmbeddingGemma 2 has no PDF input. A file the model cannot decode also stays a
+readable, unsearchable blob rather than failing the migration. Stable row ids
+make it rerunnable. A parent left in two old indexes by an interrupted
+migration is counted once.
 
 An upgraded npx package reports the model as not installed until
 `npx gemdex-mcp install` runs again (new install id), so the order is
@@ -155,95 +173,90 @@ BGE-M3 table; rerunning migrate picks those writes up.
 
 Status is synchronous and cheap (marker only). Before first inference per
 provider instance, the engine verifies artifact hashes, the exact worker source,
-and the extracted/installed Python tree against its recorded digest. This
-detects corruption; it is not a security boundary against an attacker who can
-rewrite both the user's runtime and verification files. Python runs isolated
+and the installed Python tree against its recorded digest. This detects
+corruption; it is not a security boundary against an attacker who can rewrite
+both the user's runtime and verification files. Python runs isolated
 (`-I -B`); imports cannot come from user site packages or `PYTHONPATH`.
 Inference has no downloader and uses only local file paths. Offline environment
 flags are set as an additional guard, not the sole enforcement.
 
-JSONL stdin/stdout frames carry `{id, kind, texts}` with at most 16 texts and
-1 MiB per frame; stderr is drained, not emitted into MCP stdout. One request is
-in flight per worker, the provider admits at most 16 batches of at most 256
-texts / 1 MiB each, and each worker request times out after 120 seconds.
-MemoryStore submits long parents in bounded batches rather than imposing this
-per-request cap on a whole memory. The MLX cache is capped at 256 MiB and its
-allocation limit at 4 GiB. Idle workers are killed after 60 seconds; their pipes
-are unreferenced so a finished CLI can exit immediately. Explicit `close()` and
+JSONL stdin/stdout frames carry `{id, kind, inputs}`, where each input is
+`{text}` or `{path, mimeType}`, with at most 16 inputs and 1 MiB per frame;
+stderr is drained, not emitted into MCP stdout. Media bytes never cross the
+pipe: `MlxEmbedding` writes them to a private `mkdtemp` directory (files mode
+0600) and removes it after the request. One request is in flight per worker;
+the provider admits at most 16 batches of at most 256 inputs / 1 MiB of text
+each, and each worker request times out after 300 seconds (long video and audio
+decode). MemoryStore embeds media one file per request and submits long
+parents in bounded batches. The MLX cache is capped at 256 MiB and cleared
+after every input; there is no allocation limit, because a 20 s video peaks at
+about 5.4 GB. Idle workers are killed after 60 seconds; their pipes are
+unreferenced so a finished CLI can exit immediately. Explicit `close()` and
 parent process exit kill the child. No port is opened.
+
+Measured on an Apple Silicon Mac: worker start plus model load about 5 s;
+warm text about 10 ms, image about 0.12 s, 20 s of video about 5 s (2,449
+tokens); 162 s of audio peaks at about 3 GB.
 
 Public APIs, exported by `embedding/index.ts` (already re-exported at core root):
 
 ```ts
-new MlxEmbedding({ homeDir?: string }); // lazy, text-only, 768d
+new MlxEmbedding({ homeDir?: string }); // lazy, multimodal, 768d
 installMlxModel({ homeDir?: string, onProgress?: (message: string) => void }): Promise<void>;
 getMlxStatus(homeDir?: string): { installed: boolean; model: string; revision: string; dimension: number; path: string };
-// embedding.embed / embedBatch (document prompt), embedQuery (query prompt), close(): void
+// embed / embedBatch / embedContentBatch (document prompt),
+// embedQuery / embedQueryContentBatch (query prompt), close(): void
 ```
 
 ## Verification
 
-All pinned artifacts were downloaded and their SHA-256 values checked against
-Hugging Face LFS metadata and PyPI digests. On an Apple Silicon Mac (macOS 27):
+On an Apple Silicon Mac (macOS 27):
 
-- **Import closure:** the exact embedded worker ran in a venv containing only
-  the three pinned wheels (`--no-deps`).
-- **Architecture parity:** in one process, the worker's model and upstream
-  mlx-vlm `load_embedding_model` (at `fec3f503`) have identical parameters
-  (851 tensors) and produce bit-identical hidden states and a final cosine of
-  1.0. Token ids match the transformers `AutoTokenizer` for 11 cases (queries,
-  documents, multilingual, whitespace, a literal `<|image|>` marker, and a
-  1,378-token input that exercises the 512-token sliding window).
-- **Cross-build:** against upstream running with the macOS 26 `mlx-metal`
-  build, the minimum cosine was 0.99987 (Metal kernel rounding).
-- **Retrieval smoke:** Mars query → Mars passage 0.903 vs Venus 0.700; password
-  query → recovery passage 0.905 vs banana 0.545. This is a smoke check, not a
-  retrieval benchmark.
-- **Throughput:** ~1.4 s cold load plus first embedding; ~9 ms per short
-  document warm.
-- **End to end:** `install`, `status`, `migrate` and stdio `recall` were run
-  through the built CLI against an isolated HOME seeded with BGE-M3-era and
-  Gemini-era tables.
+- **Text parity:** the full-runtime worker and the previous curated text worker
+  produce cosine 1.0 for documents and queries (short, long, multilingual and
+  code inputs) in one environment, and at least 0.99984 between the old
+  install's mlx 0.32.3 and this install's 0.32.4.
+- **Cross-modal smoke:** a red-circle PNG scores 0.82 against the query
+  "red circle"; an M4A recording of "how do I reset my password" scores 0.84
+  against that query. A smoke check, not a retrieval benchmark.
+- **End to end:** an isolated install (weights reused from a sibling), then the
+  built stdio MCP server: save PNG/M4A/MP4 by path, recall by text, by image and
+  by video file, combined text + file recall, `read_attachment` image content,
+  and refusal of PDFs and of text files as recall examples.
 
 Unit tests use real child processes for frame handling, timeouts, crashes,
 dimension and bounds checks; controlled installer fixtures cover platform
 refusal, offline cleanup/retry, lock recovery, idempotency, integrity failures,
-and smoke-before-marker ordering. Store tests cover multi-index migration.
+private media temp files, and smoke-before-marker ordering. Store tests cover
+media rows, recall by media (RRF fusion), update/import/migration of media, and
+multi-index migration.
 
-### Maintainer parity check
+## Updating the runtime
 
-From the repository root (uv is a maintainer tool here, never a user
-prerequisite), this reruns the parity check against upstream mlx-vlm:
+`scripts/generate-mlx-manifest.py` rewrites `mlx-manifest.ts`. Change its
+`MLX_VLM` requirement (or the `REVISION`/`PYTHON` constants) and run, from the
+repository root:
+
+```bash
+uv run scripts/generate-mlx-manifest.py
+```
+
+It resolves the `mlx-vlm` closure with uv for macOS 14 arm64 / CPython 3.12
+(`MACOSX_DEPLOYMENT_TARGET=14.0`), picks one wheel per package from the PyPI
+JSON API with its SHA-256, and pins every model file from the Hugging Face API
+at the revision. Then rebuild, run the installer and store tests, and check text
+parity before shipping: install into an isolated Gemdex root and compare the new
+worker's text vectors with the previous release's on the same inputs (both
+`kind`s). Cosine must be about 0.9998 or higher; a lower score means stored
+vectors changed and the release needs a re-embedding migration instead.
 
 ```bash
 pnpm --filter gemdex-core build
-uv venv /tmp/gemdex-eg2-ref --python 3.12
-uv pip install --python /tmp/gemdex-eg2-ref/bin/python mlx==0.32.3 'transformers>=5.18.0' \
-  'git+https://github.com/Blaizzy/mlx-vlm.git@fec3f50379bb2cb0760ef3c8a68ebce9585e4d97'
-node -e "
-const fs = require('node:fs');
-const { MLX_ARTIFACTS } = require('./packages/core/dist/embedding/mlx-manifest');
-const { downloadMlxArtifact } = require('./packages/core/dist/embedding/mlx-install');
-const { MLX_WORKER } = require('./packages/core/dist/embedding/mlx-worker');
-(async () => {
-  for (const a of MLX_ARTIFACTS.filter(a => !a.path.startsWith('wheels/') && a.path !== 'python.tar.gz'))
-    await downloadMlxArtifact(a, '/tmp/gemdex-eg2');
-  fs.writeFileSync('/tmp/gemdex-eg2/worker.py', MLX_WORKER);
-})();"
-/tmp/gemdex-eg2-ref/bin/python - <<'PY'
-import io, sys, runpy
-from pathlib import Path
-import mlx.core as mx
-from mlx_vlm.embedding_loader import load_embedding_model
-upstream = load_embedding_model(Path('/tmp/gemdex-eg2/model'))
-sys.argv = ['worker.py', '/tmp/gemdex-eg2/model', '/tmp/gemdex-eg2/arch/embedding_gemma2']
-stdout, sys.stdin = sys.stdout, io.TextIOWrapper(io.BytesIO(b''))
-worker = runpy.run_path('/tmp/gemdex-eg2/worker.py')
-sys.stdout = stdout
-ids = mx.array([worker['tokenizer'].encode(worker['PREFIX']['document'] + 'Mars is the Red Planet.').ids])
-lm = worker['model'].language_model
-h = lm(lm.embed_tokens(ids) * mx.array(512 ** 0.5, dtype=mx.bfloat16), mx.ones(ids.shape, dtype=mx.int32))
-v = mx.mean(h[0].astype(mx.float32), axis=0); v = v / mx.linalg.norm(v)
-print('cosine vs upstream:', mx.sum(upstream(input_ids=ids).text_embeds[0] * v).item())
-PY
+node -e "require('./packages/core/dist/embedding').installMlxModel({ homeDir: '/tmp/gemdex-eg2', onProgress: console.log })"
 ```
+
+Each inference input is one JSONL line on the installed worker's stdin:
+`{"id":1,"kind":"document","inputs":[{"text":"Mars is the Red Planet."}]}`.
+Run `<install>/python/bin/python3 -I -B -u <install>/worker.py <install>/model`
+for the new release and the previous release's equivalent, then compare the
+`vectors` they print.
